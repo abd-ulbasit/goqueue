@@ -54,7 +54,7 @@
 
 ### Session Template
 ```
-### Session N - [Date]
+### Session N 
 **Focus**: 
 **Duration**: 
 **Completed**:

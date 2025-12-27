@@ -1,55 +1,68 @@
 ---
 name: summarizeSessionAndPlanNext
-description: Update PROGRESS.md and CONCEPTS.md after each session, plan next steps
+description: Update memory-bank after each session - track architectural decisions and queue concepts learned
 ---
 
-Review conversation history and update tracking files.
+Review conversation history and update memory-bank files.
 
 ---
 
 ## Step 1: Analyze Session
 
-**What was built?** Features, endpoints, packages created
+**What was implemented?** Complete features, not just scaffolding
 
-**What patterns were applied?** Architecture decisions, Go idioms used
+**What architectural decisions were made?** Document the decision AND the tradeoffs considered
 
-**What concepts were explained?** Deep-dives, comparisons, "aha moments"
+**What queue concepts were taught?** Concepts explained in code comments or discussion
 
-**What questions did I ask?** Capture curiosity points for future reference
+**What comparisons to other systems?** Kafka, RabbitMQ, SQS references
 
-**What experiments ran?** Tests, benchmarks, race detection
-
----
-
-## Step 2: Update CONCEPTS.md
-
-Add new concepts following existing format in file:
-- **What**: One-line definition
-- **Key Insight**: The "why" or surprising behavior  
-- **Pattern**: Idiomatic Go code with comments
-- **Antipattern**: Common mistake with fix
-
-Update Quick Reference table at bottom.
+**What patterns emerged?** Patterns that should be documented for future reference
 
 ---
 
-## Step 3: Update PROGRESS.md
+## Step 2: Update systemPatterns.md
 
-- Add new features to "What We've Built" with brief code snippets
-- Update "Patterns Used" list
-- Mark completed tasks, add new tasks from roadmap
+Add new patterns following this format:
+```markdown
+## Pattern Name
+
+**WHY**: Why this pattern exists
+**HOW**: How it works (with ASCII diagram if complex)
+**COMPARISON**: How Kafka/RabbitMQ/SQS do it
+**TRADEOFF**: What we chose and alternatives considered
+```
 
 ---
 
-## Step 4: Apply Updates
+## Step 3: Update progress.md
 
-Directly edit both files (don't show proposed changes first).
+- Add what was implemented this session
+- Track queue concepts learned
+- Note architectural decisions made
+- Update completion status
+
+---
+
+## Step 4: Update activeContext.md
+
+- Current implementation state
+- Next feature to implement
+- Open questions or decisions pending
+
+---
+
+## Step 5: Apply Updates
+
+Directly edit memory-bank files (don't show proposed changes first).
 
 **After editing, confirm:**
-- Current position: Month X, Week Y
-- Week progress: X/Y tasks complete
-- Next session focus
+- Features implemented this session
+- Queue concepts learned
+- Next implementation focus
 
 **File purposes:**
-- `CONCEPTS.md`: Patterns, mechanics, examples (learning reference)
-- `PROGRESS.md`: What's built, decisions made, roadmap status
+- `systemPatterns.md`: Architectural patterns, queue patterns, comparisons
+- `progress.md`: What's built, decisions made, concepts learned
+- `activeContext.md`: Current focus and next steps
+- `productContext.md`: High-level project goals (rarely updated)

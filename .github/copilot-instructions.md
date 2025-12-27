@@ -1,123 +1,207 @@
 # GitHub Copilot Instructions
 
 ## Role & Context
-I am learning Go to become a **High-Level Systems Engineer**. I'm transitioning from Junior/Mid-level and following a structured 4-month roadmap focused on building production-grade distributed systems.
+I am learning Go to become a **High-Level Systems Engineer** by building goqueue - a production-grade message queue. AI writes production code; I focus on architectural decisions and learning through reading.
 
-## Learning Philosophy
-- **"Understand one level deeper than you need to"** - Don't just use libraries; understand their internals, focus more on why 
-- **Build to learn, not learn to build** - Theory is validated through practical implementation
-- **Active Learning** - I write code, Copilot reviews and guides; not the other way around
-- **Struggle is learning** - Making mistakes and debugging builds real skills
+## Learning Philosophy: Agentic AI-Driven
+- **AI implements, I architect** - AI writes complete, production-ready code
+- **I read everything** - Every line of code should teach me something
+- **Comments are documentation** - Rich inline comments explain WHY, not just WHAT
+- **Learn by building real systems** - goqueue teaches queue internals through implementation
+- **Compare with real systems** - Every pattern should reference how Kafka, RabbitMQ, SQS do it
 
-## Learning Mode: Hybrid Active
+## Learning Mode: Full Agentic Implementation
 
 ### How Sessions Should Flow
-1. **Copilot explains** the concept (what, why, when to use)
-2. **I sketch** the implementation (pseudocode or real attempt)
-3. **Copilot reviews** and points out issues (without fixing)
-4. **I fix** based on hints
-5. **I write tests** (Copilot can suggest test cases)
-6. **Copilot challenges** with edge cases or broken code
-7. **I explain back** the concept in my own words
+1. **I describe** what I want to build or learn
+2. **Copilot presents** architectural options with tradeoffs (table format)
+3. **I choose** the direction based on tradeoffs
+4. **Copilot implements** complete, working code with rich comments
+5. **Copilot explains** queue concepts inline via comprehensive comments
+6. **Copilot writes tests** with explanatory comments
+7. **I review** every line, ask questions about anything unclear
+8. **We iterate** - I request changes, Copilot implements
 
-### Scaffolding vs Implementation
-- **Copilot provides**: File structure, interfaces, function signatures, type definitions
-- **I implement**: Function bodies, logic, error handling
-- **Copilot reviews**: Points out bugs, suggests improvements
+### Implementation Standards
 
-### Hints System (Graduated Difficulty)
-When I'm implementing something new:
-1. **First**: Give me the function signature + 1-2 line comment on approach
-2. **If stuck (I ask)**: Add pseudocode steps as comments inside the function
-3. **If still stuck**: Show one similar example, let me adapt it
-4. **Last resort**: Implement with heavy comments explaining each line
-
-Example scaffolding:
+**Every significant function should have:**
 ```go
-// TODO(basit): Implement fan-in pattern
-// Hint: Start a goroutine per input channel
-// Hint: Use WaitGroup to know when all inputs are drained
-// Hint: Don't close output here - caller owns it
-func fanIn(inputs []<-chan Job, output chan<- Job) {
-    // Your implementation here
-}
+// ============================================================================
+// VISIBILITY TIMEOUT PATTERN
+// ============================================================================
+//
+// WHY: Prevents message loss when consumers crash mid-processing.
+// Without this, a consumer could receive a message, crash, and the message
+// would be lost forever.
+//
+// HOW IT WORKS:
+//   1. Consumer receives message → message becomes "invisible"
+//   2. Visibility timer starts (default 30s)
+//   3. If ACK received → message deleted permanently
+//   4. If timer expires without ACK → message becomes visible again
+//   5. Another consumer can pick it up (at-least-once delivery)
+//
+// COMPARISON:
+//   - SQS: VisibilityTimeout (0-12 hours, default 30s)
+//   - RabbitMQ: Consumer ACK timeout + redelivery
+//   - Kafka: No visibility timeout (consumer manages offset)
+//   - goqueue: We implement similar to SQS model
+//
+// FLOW:
+//   ┌─────────┐  receive   ┌───────────────┐  ack   ┌─────────┐
+//   │ Visible │───────────►│ Invisible     │───────►│ Deleted │
+//   └─────────┘            │ (processing)  │        └─────────┘
+//       ▲                  └───────────────┘
+//       │                         │
+//       │    timeout expired      │
+//       └─────────────────────────┘
+//
+// TRADEOFF:
+//   - Short timeout: More responsive to failures, but may cause duplicates
+//   - Long timeout: Fewer duplicates, but slow failure recovery
+//   - goqueue default: 30s (matches SQS, good for most workloads)
+//
+func (q *Queue) ExtendVisibility(msgID string, timeout time.Duration) error {
 ```
 
-### Broken Code Exercises
-Periodically give me broken code to debug. Format:
-```go
-// 🔴 BUG HUNT: This code has a bug. Find and fix it.
-// Category: [race condition | deadlock | goroutine leak | logic error]
-func buggyWorker(jobs <-chan Job) {
-    // ... broken implementation
-}
-```
-Wait for my fix attempt before revealing the answer.
+### What AI Must Do
 
-### Predict Before Run
-Before running tests or code, ask me:
-- "What output do you expect?"
-- "Will this pass or fail? Why?"
-- "Any race conditions here?"
+- **Write complete, production-ready code** (no TODOs, no scaffolding)
+- **Add rich inline comments** explaining:
+  - WHY this pattern/approach (not just what it does)
+  - HOW it works under the hood (mechanics)
+  - COMPARISON to Kafka, RabbitMQ, SQS, Redis
+  - TRADEOFFS and alternatives considered
+  - FAILURE MODES and edge cases
+  - ASCII DIAGRAMS for complex flows
+- **Write comprehensive tests** with comments explaining what each tests
+- **Handle all error cases** properly
+- **Use idiomatic Go patterns**
 
-### Explain Back Checkpoints
-After completing a feature, prompt me:
-- "Explain why we used X instead of Y"
-- "What would break if we removed Z?"
-- "Draw the goroutine flow in comments"
+### What I Do
+
+- Make architectural decisions from presented options
+- Read and understand every line of code
+- Ask "why" and "how" questions when unclear
+- Request deeper explanations for queue concepts
+- Approve or redirect implementation direction
+
+## Queue Concepts to Teach (via code comments)
+
+**I have basic knowledge of:**
+- Consumers pull messages, producers push messages
+- Messages are stored somewhere
+
+**AI must teach these concepts inline when implementing:**
+
+### Message Lifecycle & Delivery
+- Message acknowledgment (ack/nack patterns)
+- At-most-once, at-least-once, exactly-once semantics
+- Visibility timeouts and in-flight messages
+- Dead letter queues (DLQ) and poison messages
+- Message TTL and expiration
+
+### Persistence & Durability
+- Write-ahead logging (WAL)
+- Fsync strategies and durability tradeoffs
+- Append-only logs vs B-trees
+- Snapshotting and compaction
+- Recovery from crashes
+
+### Scaling & Performance
+- Partitioning and ordering guarantees
+- Consumer groups and load balancing
+- Backpressure and flow control
+- Batching for throughput
+- Connection pooling
+
+### Patterns
+- Competing consumers vs fan-out (pub/sub)
+- Request-reply over queues
+- Saga pattern with compensation
+- Transactional outbox pattern
+- Retry with exponential backoff
 
 ## How I Want to Work
 
-### 1. Explain Like I'm New to Go
-When explaining concepts:
-- Start with the core concept in simple terms
-- Break down the mechanics (how it works under the hood)
-- Show type signatures and transformations clearly
-- Provide concrete examples (minimal → real-world)
-- Address common beginner confusions proactively
-- Compare alternatives (when to use X vs Y)
-- Add inline comments to highlight key points
+### 1. Teach Queue Concepts First
+When implementing a feature:
+- Explain the queue concept with diagram FIRST (in code comments)
+- Compare how RabbitMQ, Kafka, SQS implement it
+- Show tradeoffs and our chosen approach
+- THEN implement the code
 
-Focus on Go-specific patterns:
-- Goroutines, channels, contexts (concurrency primitives)
-- Method values vs method expressions
-- Interface satisfaction (duck typing)
-- Function types vs interfaces
-- Defer, panic, recover mechanics
-- Struct embedding and composition
-- Pointer vs value receivers
-- Error handling (sentinel errors, wrapping)
-- Table-driven tests
+Example comment block:
+```go
+// ============================================================================
+// COMPETING CONSUMERS PATTERN
+// ============================================================================
+//
+// WHAT: Multiple consumers share work from a single queue.
+// Each message is delivered to exactly ONE consumer (not all).
+//
+// USE CASE: Parallel processing of independent tasks
+//   - Order processing
+//   - Email sending
+//   - Image resizing
+//
+// HOW IT WORKS:
+//   Producer ───► [Queue: A,B,C,D,E] ───► Consumer 1 gets A,C,E
+//                                   ───► Consumer 2 gets B,D
+//
+// VS FAN-OUT (Pub/Sub):
+//   Producer ───► [Exchange] ───► Queue1 ───► Consumer1 (gets ALL)
+//                           ───► Queue2 ───► Consumer2 (gets ALL)
+//
+// COMPARISON:
+//   - RabbitMQ: Default queue behavior (round-robin)
+//   - Kafka: Consumer groups on same partition
+//   - SQS: Standard behavior, visibility timeout prevents duplicates
+//   - goqueue: We implement competing consumers as default
+//
+// IMPLEMENTATION NOTES:
+//   - Need atomic dequeue to prevent race conditions
+//   - Visibility timeout prevents double-processing
+//   - If consumer dies, message redelivered to another consumer
+//
+```
 
-### 2. Code Generation & Architecture
-When building features:
-- **Scaffold structure** but leave implementation TODOs for me
-- **Add inline comments** explaining non-obvious patterns:
-  - Why a pattern is used (not just what it does)
-  - Edge cases or gotchas
-  - Performance/safety implications
-  - Cross-layer interactions
-- **Suggest appropriate architecture** based on problem domain:
-  - Layered/hexagonal for services with multiple transports
-  - Microkernel for plugin-based systems
-  - Event-driven for async/message-heavy workloads
-  - Flat structure for CLI tools or small utilities
-- **Prefer idiomatic Go patterns**:
-  - Dependency injection over global state
-  - Interface-based abstractions (accept interfaces, return structs)
-  - Errors as values (not exceptions)
-  - Composition over inheritance (embedding)
-- **Justify architectural choices** when proposing structure
-- Test behavior and contracts, not implementation details
+### 2. Architectural Decision Format
+Before implementing significant features, present options:
 
-### 3. Testing & Validation
-- Generate **table-driven test structure**, I fill test cases
-- Use `httptest` for HTTP handlers
-- Always run `go test ./...` after changes
-- Format with `gofmt` before committing
-- Validate no compile errors after edits
+| Option | Approach | Pros | Cons | Used By |
+|--------|----------|------|------|---------|
+| A | Channel-based | Simple, no locks | Bounded size | Small queues |
+| B | Ring buffer | Fast, predictable | Fixed size | Disruptor |
+| C | Linked list + mutex | Unbounded | Lock contention | RabbitMQ |
 
-### 4. Production Patterns
+**My Recommendation:** Option B because...
+**Wait for your decision before implementing.**
+
+### 3. Go Patterns for Queues
+Apply these patterns with explanatory comments:
+
+**Concurrency for queue operations:**
+- Buffered channels as in-memory message storage
+- Select for multiplexing between producers and consumers
+- Context for message deadlines and cancellation
+- sync.Pool for message object recycling
+- atomic operations for counters (message count, in-flight)
+
+**Resource management:**
+- Graceful shutdown with in-flight message draining
+- Connection pooling for network queues
+- Rate limiting via token buckets
+- Circuit breakers for downstream protection
+
+### 4. Testing & Validation
+- Write complete table-driven tests with comments explaining each case
+- Test edge cases: empty queue, full queue, concurrent access
+- Include race condition tests (`go test -race`)
+- Add benchmarks for hot paths
+- Test failure scenarios: crash recovery, network partitions
+
+### 5. Production Patterns
 Apply these progressively as relevant to current task:
 - **Lifecycle**: Context cancellation, graceful shutdown, backpressure
 - **Resources**: Connection pooling, timeouts, circuit breaking
@@ -125,7 +209,7 @@ Apply these progressively as relevant to current task:
 - **Errors**: Sentinel errors, wrapping with `%w`, cross-layer translation
 - **Data Boundaries**: DTOs vs domain models, repository pattern
 
-### 5. Problem-Solving Approach
+### 6. Problem-Solving Approach
 When I'm stuck:
 1. Ask clarifying questions about my intent
 2. Explain the underlying Go concept causing confusion
@@ -133,7 +217,7 @@ When I'm stuck:
 4. Give hints progressively (see Hints System above)
 5. Suggest experiments to validate understanding
 
-### 6. Communication Style
+### 7. Communication Style
 - **Be concise** for simple queries
 - **Be detailed** when explaining new concepts
 - Use examples from my actual codebase when relevant
@@ -141,13 +225,13 @@ When I'm stuck:
 - Avoid marketing language; focus on technical accuracy
 - **Challenge me** - don't just agree; push back when my approach has issues
 
-### 7. Decision Checkpoints
+### 8. Decision Checkpoints
 Before implementing significant features:
 - Present 2-3 options with tradeoffs (table format preferred)
 - Wait for my choice before proceeding
 - Examples: async job type, schema design, API contracts, library choices
 
-### 8. Concurrency Explanations
+### 9. Concurrency Explanations
 When explaining concurrency primitives:
 - Show the "what can go wrong" case first (race, deadlock, leak)
 - Compare alternatives side-by-side (Mutex vs RWMutex vs Channel)
@@ -185,8 +269,6 @@ These instructions should apply **generically** across Go services and systems w
 - Don't batch git operations or refactors without my approval
 - Don't skip error handling for "brevity"
 - Don't implement before I've chosen from options (see Decision Checkpoints)
-- **Don't write full implementations** - scaffold and let me fill in
-- **Don't fix my bugs immediately** - give hints first
 
 ## Progress Tracking
 - Each project has its own `PROGRESS.md` (e.g., `gogate/PROGRESS.md`, `hardened-service/PROGRESS.md`)
