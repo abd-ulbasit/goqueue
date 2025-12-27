@@ -1,103 +1,202 @@
 ---
 agent: 'agent'
-description: 'Debug broken code exercises - provides intentionally broken code for learning through debugging'
+description: 'Queue-specific bug scenarios for learning - demonstrates queue patterns through intentional bugs'
 tools: ['edit/editFiles', 'execute/runInTerminal', 'execute/runTests', 'todo','oraios/serena/*']
 ---
 
-# Bug Hunt Generator
+# Queue Bug Scenarios Generator
 
-Generate intentionally broken Go code for me to debug. This aligns with my learning philosophy: **"Struggle is learning"**.
+Generate intentionally broken queue code to demonstrate queue concepts. These aren't for me to fix - they're examples that teach queue patterns through showing what can go wrong.
 
-## Your Mission
+## Purpose
 
-Create realistic bugs that teach specific concepts:
-- **Concurrency bugs**: Race conditions, deadlocks, goroutine leaks
-- **Resource leaks**: Unclosed channels, unbounded goroutines, connection leaks
-- **Logic errors**: Off-by-one, nil panics, infinite loops
-- **Performance**: N+1 queries, unnecessary allocations, blocking operations
+Show queue concepts by demonstrating failure modes:
+- **Message loss scenarios**: How messages can be lost without proper ack
+- **Duplicate delivery**: When at-least-once causes duplicates
+- **Consumer starvation**: Backpressure and slow consumer problems
+- **Persistence failures**: What happens without proper WAL/fsync
 
-## Bug Categories & Examples
+## Bug Category Examples
 
-### 1. Goroutine Leaks
+### 1. Message Loss (Missing Acknowledgment)
 
 ```go
-// 🔴 BUG HUNT: Goroutine leak
-// Hint: What happens when we stop reading from results early?
+// ============================================================================
+// BUG DEMONSTRATION: Message Loss Without Acknowledgment
+// ============================================================================
+//
+// WHAT'S WRONG: Consumer processes message but crashes before ack.
+// Message is lost forever because queue auto-deleted it.
+//
+// LESSON: This is why we need visibility timeout + explicit ack.
+//
+// HOW OTHER SYSTEMS HANDLE THIS:
+//   - SQS: Message stays invisible for VisibilityTimeout, then reappears
+//   - RabbitMQ: Message redelivered if channel closes without ack
+//   - Kafka: Consumer must commit offset, can reprocess on restart
+//
+// FLOW (buggy):
+//   Queue ─── auto-delete ───► Consumer ─── crash ───► Message LOST
+//
+// FLOW (correct):
+//   Queue ─── invisible ───► Consumer ─── process ───► ACK ───► Delete
+//         └── timeout ───► Requeue (if no ack)
+//
+func (c *Consumer) buggyDequeue() (*Message, error) {
+    msg := c.queue.Pop()  // BUG: Immediately removes from queue
+    return msg, nil       // If consumer crashes here, message is lost
+}
+```
 
-func processItemsWithTimeout(ctx context.Context, items []string) ([]Result, error) {
-    results := make(chan Result)
+### 2. Duplicate Processing (At-Least-Once)
+
+```go
+// ============================================================================
+// BUG DEMONSTRATION: Duplicate Processing
+// ============================================================================
+//
+// WHAT'S WRONG: Consumer processes message, sends ack, but ack is lost.
+// Queue times out and redelivers → duplicate processing.
+//
+// LESSON: At-least-once means you MUST handle duplicates.
+//
+// COMPARISON:
+//   - SQS: Recommends idempotent consumers
+//   - Kafka: Exactly-once requires idempotent producer + transactions
+//   - RabbitMQ: Publisher confirms + consumer idempotency
+//
+// SOLUTION: Make processing idempotent (check if already processed)
+//
+func (c *Consumer) processWithDuplicateRisk(msg *Message) error {
+    // Process the message (might have been processed before!)
+    result := c.handler(msg)
     
-    for _, item := range items {
-        go func(s string) {
-            results <- processItem(s)  // BUG: Blocks forever if no reader
-        }(item)
+    // BUG: If this ack fails (network issue), message will be redelivered
+    err := c.queue.Ack(msg.ID)
+    if err != nil {
+        // Message might have been processed but ack failed
+        // Queue will redeliver → duplicate processing
+        return err
     }
-    
-    select {
-    case <-ctx.Done():
-        return nil, ctx.Err()  // BUG: Goroutines still running!
-    case result := <-results:
-        return []Result{result}, nil  // BUG: Only reads first result
+    return nil
+}
+```
+
+### 3. Consumer Starvation (No Backpressure)
+
+```go
+// ============================================================================
+// BUG DEMONSTRATION: Consumer Starvation
+// ============================================================================
+//
+// WHAT'S WRONG: Producer is faster than consumer, queue grows unbounded.
+// Eventually: OOM, timeouts, cascading failures.
+//
+// LESSON: Need backpressure - slow down producer when queue is full.
+//
+// COMPARISON:
+//   - Kafka: Consumer controls pace (pull-based)
+//   - RabbitMQ: Channel.Qos limits unacked messages
+//   - SQS: ReceiveMessage with MaxNumberOfMessages
+//
+// FLOW (buggy):
+//   Producer ──100/s──► Queue (growing!) ──10/s──► Slow Consumer
+//                       Memory ↑↑↑
+//
+func (p *Producer) buggyProduce(msg *Message) error {
+    // BUG: No check if queue is full
+    // BUG: No backpressure to slow down producer
+    return p.queue.Enqueue(msg)  // Always succeeds, queue grows forever
+}
+```
+
+### 4. Lost Messages (Async Write Without Fsync)
+
+```go
+// ============================================================================
+// BUG DEMONSTRATION: Lost Messages on Crash
+// ============================================================================
+//
+// WHAT'S WRONG: Message written to buffer but not fsynced to disk.
+// Power failure → message lost.
+//
+// LESSON: Fsync is the only guarantee of durability.
+//
+// TRADEOFF:
+//   - Fsync every message: Slow (10-100ms per msg) but durable
+//   - Batch fsync: Fast but may lose recent messages on crash
+//   - No fsync: Very fast but lose everything in buffer on crash
+//
+// COMPARISON:
+//   - Kafka: Configurable acks (0, 1, all) and fsync interval
+//   - RabbitMQ: Publisher confirms, queue mirroring
+//   - SQS: AWS handles this transparently
+//
+func (s *Storage) buggyWrite(msg *Message) error {
+    _, err := s.file.Write(msg.Bytes())
+    // BUG: No fsync! Data is in OS buffer, not on disk
+    return err
+}
+
+func (s *Storage) durableWrite(msg *Message) error {
+    _, err := s.file.Write(msg.Bytes())
+    if err != nil {
+        return err
+    }
+    return s.file.Sync()  // Force to disk - now crash-safe
+}
+```
+
+### 5. Goroutine Leak (Abandoned Consumer)
+
+```go
+// ============================================================================
+// BUG DEMONSTRATION: Goroutine Leak in Consumer
+// ============================================================================
+//
+// WHAT'S WRONG: Consumer goroutine blocks on receive forever.
+// When we want to shut down, goroutine is leaked.
+//
+// LESSON: All blocking operations need context cancellation.
+//
+// COMPARISON:
+//   - All systems: Need graceful shutdown to drain in-flight messages
+//
+func (c *Consumer) buggyConsume() {
+    for {
+        msg := <-c.queue.Messages  // BUG: Blocks forever, no way to stop
+        c.process(msg)
+    }
+}
+
+func (c *Consumer) properConsume(ctx context.Context) {
+    for {
+        select {
+        case <-ctx.Done():
+            return  // Clean shutdown
+        case msg := <-c.queue.Messages:
+            c.process(msg)
+        }
     }
 }
 ```
 
-### 2. Race Conditions
+## How to Use These Examples
 
-```go
-// 🔴 BUG HUNT: Race condition
-// Hint: Run with -race flag
+When implementing a feature, I'll show the "wrong way" first with explanation, then implement the correct version. This teaches:
 
-type Counter struct {
-    count int
-}
+1. **Why the pattern exists** - Not just how, but why
+2. **Failure modes** - What can go wrong
+3. **Tradeoffs** - Why there's no perfect solution
+4. **Comparison** - How real systems handle this
 
-func (c *Counter) Increment() {
-    c.count++  // BUG: Not thread-safe
-}
+## Generation Triggers
 
-func main() {
-    counter := &Counter{}
-    for i := 0; i < 100; i++ {
-        go counter.Increment()  // BUG: Concurrent unsynchronized access
-    }
-    time.Sleep(time.Second)
-    fmt.Println(counter.count)  // BUG: Won't be 100
-}
-```
-
-### 3. Channel Deadlocks
-
-```go
-// 🔴 BUG HUNT: Deadlock
-// Hint: Think about unbuffered channels
-
-func pipeline() {
-    ch := make(chan int)
-    
-    ch <- 42  // BUG: Blocks forever - no receiver
-    
-    fmt.Println(<-ch)
-}
-```
-
-### 4. Context Misuse
-
-```go
-// 🔴 BUG HUNT: Context not respected
-// Hint: Worker doesn't check for cancellation
-
-func worker(ctx context.Context, tasks <-chan Task) {
-    for task := range tasks {  // BUG: Blocks on channel, ignores ctx
-        process(task)
-    }
-}
-```
-
-### 5. Resource Leaks
-
-```go
-// 🔴 BUG HUNT: Connection leak
+Show relevant bug scenarios when implementing:
+- Message acknowledgment → Show message loss scenario
+- Persistence → Show crash data loss scenario
+- Consumer groups → Show consumer starvation scenario
+- Shutdown → Show goroutine leak scenario
 // Hint: What if makeRequest panics?
 
 func fetchData(url string) ([]byte, error) {
