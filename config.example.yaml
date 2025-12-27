@@ -1,0 +1,143 @@
+# GoQueue Configuration Schema
+
+# This is the full configuration reference.
+# Copy this file to config.yaml and customize.
+
+# Broker identity and storage
+broker:
+  # Unique node identifier in cluster
+  nodeId: "node-1"
+  
+  # Directory for storing logs and indexes
+  dataDir: "/var/lib/goqueue"
+
+# Network listeners
+listeners:
+  # HTTP API (producers, consumers, admin)
+  http: ":8080"
+  
+  # gRPC API
+  grpc: ":9000"
+  
+  # Internal communication (replication, cluster)
+  internal: ":7000"
+
+# Metrics endpoint
+metrics:
+  listen: ":9090"
+  path: "/metrics"
+
+# Logging configuration
+logging:
+  level: "info"
+  format: "json"
+
+# Storage engine settings
+storage:
+  # Max size per segment file before rolling
+  segmentSize: 1073741824  # 1GB
+  
+  # Bytes between index entries (smaller = more precise seeks, larger index)
+  indexInterval: 4096  # 4KB
+  
+  # Sync writes to disk (safer but slower)
+  syncOnWrite: false
+  
+  # Batch sync interval (if syncOnWrite is false)
+  syncInterval: "1s"
+
+# Cluster configuration
+cluster:
+  # etcd endpoints for coordination
+  etcd:
+    endpoints:
+      - "localhost:2379"
+    # Optional auth
+    # username: ""
+    # password: ""
+  
+  # Default replication factor for new topics
+  replicationFactor: 2
+  
+  # Minimum replicas that must acknowledge write
+  minInSyncReplicas: 1
+  
+  # How long to wait for replication before timeout
+  replicationTimeout: "5s"
+
+# Default topic settings (can be overridden per-topic)
+defaults:
+  topic:
+    # Number of partitions for new topics
+    partitions: 3
+    
+    # Retention settings
+    retention:
+      # Delete messages older than this (0 = infinite)
+      hours: 168  # 7 days
+      
+      # Delete oldest messages when topic exceeds this size (-1 = unlimited)
+      bytes: -1
+    
+    # Delivery settings
+    delivery:
+      # How long a message is invisible after fetch (for retry)
+      visibilityTimeout: "30s"
+      
+      # Max delivery attempts before sending to DLQ
+      maxRetries: 3
+
+# Consumer settings
+consumer:
+  # How long before consumer considered dead (no heartbeat)
+  sessionTimeout: "30s"
+  
+  # How often consumer should send heartbeat
+  heartbeatInterval: "10s"
+  
+  # Max messages returned per poll
+  maxPollRecords: 500
+  
+  # Max time to wait for messages in long-poll
+  maxPollTimeout: "30s"
+  
+  # Auto-commit offset interval (0 = manual commit only)
+  autoCommitInterval: "5s"
+
+# Producer settings
+producer:
+  # Batch messages up to this size before sending
+  batchSize: 16384  # 16KB
+  
+  # Max time to wait for batch to fill
+  lingerMs: 5
+  
+  # Acknowledgment mode: "none", "leader", "all"
+  # none = fire and forget
+  # leader = wait for leader to write
+  # all = wait for all in-sync replicas
+  acks: "leader"
+  
+  # Retry settings for failed publishes
+  retries: 3
+  retryBackoff: "100ms"
+
+# Topic-specific overrides
+topics:
+  # Example: high-throughput topic with shorter retention
+  events:
+    partitions: 12
+    retention:
+      hours: 24
+    delivery:
+      visibilityTimeout: "10s"
+      maxRetries: 1
+  
+  # Example: critical topic with stronger durability
+  orders:
+    partitions: 6
+    retention:
+      hours: 720  # 30 days
+    delivery:
+      visibilityTimeout: "60s"
+      maxRetries: 5
