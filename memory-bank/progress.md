@@ -3,14 +3,14 @@
 ## Overall Status
 
 **Phase**: 1 of 4
-**Milestones**: 0/18 complete
-**Tests**: 0
-**Started**: Not yet
+**Milestones**: 1/18 complete
+**Tests**: 17 passing
+**Started**: Session 1
 
 ## Phase Progress
 
-### Phase 1: Foundations (0/4)
-- [ ] Milestone 1: Storage Engine & Append-Only Log
+### Phase 1: Foundations (1/4)
+- [x] Milestone 1: Storage Engine & Append-Only Log ✅
 - [ ] Milestone 2: Topics, Partitions & Producer API
 - [ ] Milestone 3: Consumer Groups & Offset Management
 - [ ] Milestone 4: Reliability - ACKs, Visibility & DLQ
@@ -37,19 +37,39 @@
 
 ## What Works
 
-*Nothing yet - project not started*
+### Milestone 1 - Storage Engine ✅
+- **Binary message encoding** with CRC32 Castagnoli checksums
+- **Append-only log** with automatic segment rollover at 64MB
+- **Segment files** (.log) with sealed/active states
+- **Sparse index files** (.index) with 4KB granularity
+- **Log reader** with offset-based consumption
+- **Partition abstraction** wrapping the log
+- **Topic management** with single partition support
+- **Broker API** for publish/consume operations
+- **Demo application** at cmd/goqueue/main.go
+
+### Technical Decisions Made
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Segment size | 64MB | Good balance for durability/performance |
+| Index granularity | 4KB | Matches typical filesystem block size |
+| Fsync interval | 1000ms | Good durability without excessive I/O |
+| File I/O | Buffered (os.File) | Simpler, portable, good performance |
+| Checksum | CRC32 Castagnoli | Hardware acceleration, widely used |
+| Magic bytes | 0x47 0x51 ("GQ") | Identifies goqueue files |
 
 ## What's Left to Build
 
 ### Core (Must Have)
-- [ ] Append-only log with segments
-- [ ] Offset and time indexes
-- [ ] Multi-partition topics
-- [ ] Producer with batching
-- [ ] Consumer groups
-- [ ] Per-message ACK
-- [ ] Dead letter queue
-- [ ] HTTP API
+- [x] Append-only log with segments ✅
+- [x] Offset indexes ✅
+- [ ] Time indexes (Milestone 2)
+- [ ] Multi-partition topics (Milestone 2)
+- [ ] Producer with batching (Milestone 2)
+- [ ] Consumer groups (Milestone 3)
+- [ ] Per-message ACK (Milestone 4)
+- [ ] Dead letter queue (Milestone 4)
+- [ ] TCP/HTTP API (Milestone 2)
 
 ### Differentiators (Key Features) ⭐
 - [ ] Native delay messages (timer wheel)
