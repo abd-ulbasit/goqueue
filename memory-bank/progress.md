@@ -3,15 +3,15 @@
 ## Overall Status
 
 **Phase**: 1 of 4
-**Milestones**: 1/18 complete
-**Tests**: 17 passing
+**Milestones**: 2/18 complete
+**Tests**: 45 passing (storage: 17, broker: 14, api: 14)
 **Started**: Session 1
 
 ## Phase Progress
 
-### Phase 1: Foundations (1/4)
+### Phase 1: Foundations (2/4)
 - [x] Milestone 1: Storage Engine & Append-Only Log ✅
-- [ ] Milestone 2: Topics, Partitions & Producer API
+- [x] Milestone 2: Topics, Partitions & Producer API ✅
 - [ ] Milestone 3: Consumer Groups & Offset Management
 - [ ] Milestone 4: Reliability - ACKs, Visibility & DLQ
 
@@ -48,6 +48,17 @@
 - **Broker API** for publish/consume operations
 - **Demo application** at cmd/goqueue/main.go
 
+### Milestone 2 - Topics, Partitions & Producer API ✅
+- **Murmur3 hash partitioner** for consistent key-based routing
+- **Round-robin partitioner** for nil keys (even distribution)
+- **Manual partitioner** for explicit partition selection
+- **Multi-partition topics** with default 3 partitions
+- **Client-side Producer** with background accumulator goroutine
+- **Three batch triggers**: size (100), linger (5ms), bytes (64KB)
+- **AckMode enum**: None/Leader/All (Leader/All same until M11)
+- **HTTP REST API** with full CRUD for topics and publish/consume
+- **Priority draining** in accumulator to prevent race conditions
+
 ### Technical Decisions Made
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
@@ -57,19 +68,24 @@
 | File I/O | Buffered (os.File) | Simpler, portable, good performance |
 | Checksum | CRC32 Castagnoli | Hardware acceleration, widely used |
 | Magic bytes | 0x47 0x51 ("GQ") | Identifies goqueue files |
+| Hash algorithm | Murmur3 | Industry standard, Kafka compatible |
+| Default partitions | 3 | Good parallelism, expandable in M13 |
+| Batching location | Client-side | Reduces broker load, Kafka pattern |
+| LingerMs=0 | Immediate flush | Kafka semantics for low latency |
+| HTTP API style | REST-ish | Simple, curl-friendly, JSON |
 
 ## What's Left to Build
 
 ### Core (Must Have)
 - [x] Append-only log with segments ✅
 - [x] Offset indexes ✅
-- [ ] Time indexes (Milestone 2)
-- [ ] Multi-partition topics (Milestone 2)
-- [ ] Producer with batching (Milestone 2)
+- [ ] Time indexes (deferred - low priority)
+- [x] Multi-partition topics ✅
+- [x] Producer with batching ✅
+- [x] HTTP API ✅
 - [ ] Consumer groups (Milestone 3)
 - [ ] Per-message ACK (Milestone 4)
 - [ ] Dead letter queue (Milestone 4)
-- [ ] TCP/HTTP API (Milestone 2)
 
 ### Differentiators (Key Features) ⭐
 - [ ] Native delay messages (timer wheel)
@@ -90,7 +106,14 @@
 
 ## Known Issues
 
-*None yet*
+*None currently*
+
+## Lessons Learned
+
+### Session 2 - Milestone 2
+1. **Go's select is non-deterministic** - When multiple channels are ready, Go picks randomly. Fixed accumulator race condition by adding priority draining before flush/close.
+2. **Pointer vs value semantics for channels** - `Send(record)` copies the struct, losing the `resultCh`. Fixed by creating `sendPtr(*ProducerRecord)` internal function.
+3. **Test determinism with partitions** - Multi-partition defaults break tests that assume offset ordering. Solution: use single-partition configs in tests needing deterministic behavior.
 
 ## Performance Benchmarks
 

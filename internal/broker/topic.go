@@ -103,10 +103,18 @@ type TopicConfig struct {
 }
 
 // DefaultTopicConfig returns default configuration.
+//
+// PARTITION COUNT GUIDANCE:
+//   - 1 partition: Simple use cases, strict ordering needed
+//   - 3 partitions: Small workloads, good starting point
+//   - 6-12 partitions: Medium workloads
+//   - 50+ partitions: High-throughput systems
+//
+// Rule of thumb: partitions >= max expected consumers for parallelism
 func DefaultTopicConfig(name string) TopicConfig {
 	return TopicConfig{
 		Name:           name,
-		NumPartitions:  1,   // M1: single partition
+		NumPartitions:  3,   // M2: default to 3 partitions for parallelism
 		RetentionHours: 168, // 7 days
 		RetentionBytes: 0,   // unlimited
 	}
@@ -118,8 +126,10 @@ func DefaultTopicConfig(name string) TopicConfig {
 
 // Topic represents a logical message stream with one or more partitions.
 //
-// MILESTONE 1: Single partition only
-// FUTURE: Multiple partitions with key-based routing
+// MILESTONE 2: Full multi-partition support with:
+//   - Murmur3 hash-based partitioning (same key → same partition)
+//   - Round-robin for null keys
+//   - Explicit partition selection
 type Topic struct {
 	// config holds topic configuration
 	config TopicConfig
@@ -307,17 +317,18 @@ func (t *Topic) Publish(key, value []byte) (partition int, offset int64, err err
 	return partition, offset, nil
 }
 
-// hashPartition computes target partition from key using consistent hashing.
-// We use a simple hash for M1, will upgrade to murmur3 or similar later.
+// hashPartition computes target partition from key using murmur3 hashing.
+//
+// WHY MURMUR3?
+// Murmur3 provides excellent distribution properties:
+//   - Fast: ~3 bytes/cycle on modern CPUs
+//   - Low collision rate across partition counts
+//   - Same algorithm as Kafka (compatibility)
+//
+// IMPORTANT: This must match the Producer's partitioner for consistency!
 func (t *Topic) hashPartition(key []byte, numPartitions int) int {
-	// Simple hash: sum of bytes mod numPartitions
-	// This is NOT a good hash for production, but works for M1
-	// FUTURE: Use murmur3 or xxhash for better distribution
-	var hash uint32
-	for _, b := range key {
-		hash = hash*31 + uint32(b)
-	}
-	return int(hash % uint32(numPartitions))
+	// Use the same murmur3 implementation as the Partitioner
+	return DefaultPartitioner.Partition(key, nil, numPartitions)
 }
 
 // PublishToPartition writes directly to a specific partition.

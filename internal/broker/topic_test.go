@@ -39,7 +39,11 @@ func TestTopic_NewAndClose(t *testing.T) {
 func TestTopic_PublishAndConsume(t *testing.T) {
 	dir := t.TempDir()
 
-	config := DefaultTopicConfig("test-topic")
+	// Single partition for deterministic offset behavior
+	config := TopicConfig{
+		Name:          "test-topic",
+		NumPartitions: 1,
+	}
 	topic, err := NewTopic(dir, config)
 	if err != nil {
 		t.Fatalf("NewTopic failed: %v", err)
@@ -85,7 +89,11 @@ func TestTopic_PublishAndConsume(t *testing.T) {
 func TestTopic_ConsumeFromMiddle(t *testing.T) {
 	dir := t.TempDir()
 
-	config := DefaultTopicConfig("test-topic")
+	// Single partition for deterministic behavior
+	config := TopicConfig{
+		Name:          "test-topic",
+		NumPartitions: 1,
+	}
 	topic, err := NewTopic(dir, config)
 	if err != nil {
 		t.Fatalf("NewTopic failed: %v", err)
@@ -116,7 +124,11 @@ func TestTopic_ConsumeFromMiddle(t *testing.T) {
 func TestTopic_ConsumeNoNewMessages(t *testing.T) {
 	dir := t.TempDir()
 
-	config := DefaultTopicConfig("test-topic")
+	// Single partition for deterministic behavior
+	config := TopicConfig{
+		Name:          "test-topic",
+		NumPartitions: 1,
+	}
 	topic, err := NewTopic(dir, config)
 	if err != nil {
 		t.Fatalf("NewTopic failed: %v", err)
@@ -159,8 +171,11 @@ func TestTopic_ConsumeInvalidPartition(t *testing.T) {
 func TestTopic_LoadExisting(t *testing.T) {
 	dir := t.TempDir()
 
-	// Create topic and publish messages
-	config := DefaultTopicConfig("test-topic")
+	// Create topic with single partition for deterministic behavior
+	config := TopicConfig{
+		Name:          "test-topic",
+		NumPartitions: 1,
+	}
 	topic1, err := NewTopic(dir, config)
 	if err != nil {
 		t.Fatalf("NewTopic failed: %v", err)
@@ -226,7 +241,11 @@ func TestTopic_PublishToPartition(t *testing.T) {
 func TestTopic_NilKeyRoundRobin(t *testing.T) {
 	dir := t.TempDir()
 
-	config := DefaultTopicConfig("test-topic")
+	// Single partition for deterministic behavior
+	config := TopicConfig{
+		Name:          "test-topic",
+		NumPartitions: 1,
+	}
 	topic, err := NewTopic(dir, config)
 	if err != nil {
 		t.Fatalf("NewTopic failed: %v", err)
@@ -241,7 +260,7 @@ func TestTopic_NilKeyRoundRobin(t *testing.T) {
 		}
 	}
 
-	// All should go to partition 0 (single partition in M1)
+	// All should go to partition 0 (single partition)
 	msgs, err := topic.Consume(0, 0, 5)
 	if err != nil {
 		t.Fatalf("Consume failed: %v", err)
@@ -254,7 +273,11 @@ func TestTopic_NilKeyRoundRobin(t *testing.T) {
 func TestTopic_LatestAndEarliestOffset(t *testing.T) {
 	dir := t.TempDir()
 
-	config := DefaultTopicConfig("test-topic")
+	// Single partition for deterministic behavior
+	config := TopicConfig{
+		Name:          "test-topic",
+		NumPartitions: 1,
+	}
 	topic, err := NewTopic(dir, config)
 	if err != nil {
 		t.Fatalf("NewTopic failed: %v", err)
