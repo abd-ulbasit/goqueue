@@ -141,8 +141,11 @@ func TestBroker_PublishAndConsume(t *testing.T) {
 	}
 	defer b.Close()
 
-	// Create topic
-	topicConfig := DefaultTopicConfig("orders")
+	// Create topic with single partition for deterministic behavior
+	topicConfig := TopicConfig{
+		Name:          "orders",
+		NumPartitions: 1, // Single partition so all messages go to partition 0
+	}
 	b.CreateTopic(topicConfig)
 
 	// Publish messages
@@ -233,8 +236,11 @@ func TestBroker_ConsumeFromMiddle(t *testing.T) {
 	}
 	defer b.Close()
 
-	// Create topic and publish
-	topicConfig := DefaultTopicConfig("orders")
+	// Create topic with single partition for deterministic behavior
+	topicConfig := TopicConfig{
+		Name:          "orders",
+		NumPartitions: 1,
+	}
 	b.CreateTopic(topicConfig)
 
 	for i := 0; i < 20; i++ {
@@ -267,8 +273,11 @@ func TestBroker_GetOffsetBounds(t *testing.T) {
 	}
 	defer b.Close()
 
-	// Create topic
-	topicConfig := DefaultTopicConfig("orders")
+	// Create topic with single partition for deterministic behavior
+	topicConfig := TopicConfig{
+		Name:          "orders",
+		NumPartitions: 1,
+	}
 	b.CreateTopic(topicConfig)
 
 	// Empty topic bounds
@@ -351,7 +360,11 @@ func TestBroker_LoadExisting(t *testing.T) {
 		t.Fatalf("NewBroker failed: %v", err)
 	}
 
-	topicConfig := DefaultTopicConfig("orders")
+	// Single partition for deterministic behavior
+	topicConfig := TopicConfig{
+		Name:          "orders",
+		NumPartitions: 1,
+	}
 	b1.CreateTopic(topicConfig)
 
 	for i := 0; i < 10; i++ {
@@ -401,8 +414,11 @@ func TestBroker_ConsumeNoNewMessages(t *testing.T) {
 	}
 	defer b.Close()
 
-	// Create topic
-	topicConfig := DefaultTopicConfig("orders")
+	// Create topic with single partition
+	topicConfig := TopicConfig{
+		Name:          "orders",
+		NumPartitions: 1,
+	}
 	b.CreateTopic(topicConfig)
 
 	// Publish some messages
@@ -430,8 +446,11 @@ func TestBroker_MessageTimestamp(t *testing.T) {
 	}
 	defer b.Close()
 
-	// Create topic
-	topicConfig := DefaultTopicConfig("orders")
+	// Create topic with single partition
+	topicConfig := TopicConfig{
+		Name:          "orders",
+		NumPartitions: 1,
+	}
 	b.CreateTopic(topicConfig)
 
 	before := time.Now()

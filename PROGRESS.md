@@ -1,16 +1,16 @@
 # GoQueue Development Progress
 
-## Status: Phase 1 - Not Started
+## Status: Phase 1 - In Progress
 
 **Target Milestones**: 18
-**Completed**: 0
-**Current**: Milestone 1 (Storage Engine)
+**Completed**: 2
+**Current**: Milestone 3 (Consumer Groups)
 
 ---
 
 ## Phase 1: Foundations (Milestones 1-4)
 
-### Milestone 1: Storage Engine & Append-Only Log ⏳ CURRENT
+### Milestone 1: Storage Engine & Append-Only Log ✅ COMPLETE
 
 **Goal:** Build the foundational append-only log that all message queues depend on.
 
@@ -22,14 +22,14 @@
 - Segment files for bounded file sizes
 
 **Deliverables:**
-- [ ] Message struct with binary encoding/decoding
-- [ ] Append-only log writer with fsync modes
-- [ ] Segment files with configurable size limits
-- [ ] Sparse index for offset → file position
-- [ ] Time index for timestamp → offset lookup
-- [ ] Log reader (sequential and random access)
-- [ ] Segment cleanup (retention by time/size)
-- [ ] CRC32 checksums for corruption detection
+- [x] Message struct with binary encoding/decoding
+- [x] Append-only log writer with fsync modes
+- [x] Segment files with configurable size limits
+- [x] Sparse index for offset → file position
+- [ ] Time index for timestamp → offset lookup (deferred)
+- [x] Log reader (sequential and random access)
+- [ ] Segment cleanup (retention by time/size) (deferred)
+- [x] CRC32 checksums for corruption detection
 - [ ] Benchmark: write throughput, read latency
 
 **Key Concepts:**
@@ -57,17 +57,17 @@ Time Index Layout:
 ```
 
 **Tests:**
-- [ ] Write 1M messages, verify all readable
-- [ ] Segment rolls over at size limit
-- [ ] Index allows sub-millisecond offset lookup
-- [ ] Time index enables point-in-time queries
-- [ ] Log survives process restart
-- [ ] CRC detects single-bit corruption
-- [ ] Retention cleanup removes old segments
+- [x] Write 1M messages, verify all readable
+- [x] Segment rolls over at size limit
+- [x] Index allows sub-millisecond offset lookup
+- [ ] Time index enables point-in-time queries (deferred)
+- [x] Log survives process restart
+- [x] CRC detects single-bit corruption
+- [ ] Retention cleanup removes old segments (deferred)
 
 ---
 
-### Milestone 2: Topics, Partitions & Producer API
+### Milestone 2: Topics, Partitions & Producer API ✅ COMPLETE
 
 **Goal:** Multi-partition topics with proper producer batching.
 
@@ -78,20 +78,54 @@ Time Index Layout:
 - Acknowledgment modes (fire-and-forget vs durable)
 
 **Deliverables:**
-- [ ] Topic abstraction (name → partitions mapping)
-- [ ] Partition with dedicated log
-- [ ] Partitioner interface (hash, round-robin, explicit)
-- [ ] Consistent hash partitioner (murmur3)
-- [ ] Producer with configurable batching
-- [ ] Ack modes: none, leader, all
-- [ ] Topic creation/deletion/listing API
-- [ ] Partition count configuration
-- [ ] HTTP API for publish
+- [x] Topic abstraction (name → partitions mapping)
+- [x] Partition with dedicated log
+- [x] Partitioner interface (hash, round-robin, explicit)
+- [x] Consistent hash partitioner (murmur3)
+- [x] Producer with configurable batching
+- [x] Ack modes: none, leader, all
+- [x] Topic creation/deletion/listing API
+- [x] Partition count configuration
+- [x] HTTP API for publish
 - [ ] Benchmark: throughput at various batch sizes
+
+**Implementation Notes:**
+```
+Murmur3 Hash Partitioner:
+┌─────────────┐     murmur3     ┌─────────────┐
+│ Message Key │ ───────────────► │ Hash (32b)  │ ──► partition = hash % N
+└─────────────┘                 └─────────────┘
+
+Producer Batching (client-side):
+┌──────────────────────────────────────────────────────────────┐
+│                    Producer Accumulator                       │
+│  ┌─────────────────────────────────────────────────────────┐ │
+│  │ Partition 0: [msg1, msg4, msg7] → flush when:           │ │
+│  │ Partition 1: [msg2, msg5]           - BatchSize=100     │ │
+│  │ Partition 2: [msg3, msg6, msg8]     - LingerMs=5ms      │ │
+│  │                                     - BatchBytes=64KB   │ │
+│  └─────────────────────────────────────────────────────────┘ │
+└──────────────────────────────────────────────────────────────┘
+
+AckMode Enum (forward-compatible):
+  AckNone   = 0  (fire-and-forget, no wait)
+  AckLeader = 1  (wait for broker acknowledgment)
+  AckAll    = 2  (wait for all replicas - same as Leader until M11)
+```
+
+**Tests:**
+- [x] Hash partitioner consistent for same key
+- [x] Hash partitioner distributes evenly
+- [x] Producer batches by size trigger
+- [x] Producer batches by linger trigger
+- [x] Producer flush drains all batches
+- [x] Concurrent sends are thread-safe
+- [x] HTTP API creates/lists/deletes topics
+- [x] HTTP API publishes and consumes messages
 
 ---
 
-### Milestone 3: Consumer Groups & Offset Management
+### Milestone 3: Consumer Groups & Offset Management ⏳ CURRENT
 
 **Goal:** Multiple consumers sharing partition load with reliable offset tracking.
 
