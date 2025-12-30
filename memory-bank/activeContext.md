@@ -3,82 +3,87 @@
 ## Current Focus
 
 **Phase**: 1 - Foundations
-**Milestone**: 1 - Storage Engine & Append-Only Log
+**Milestone**: 3 - Consumer Groups & Offset Management
 **Status**: ✅ COMPLETE
 
 ## What I'm Working On
 
-### Completed
-- ✅ Project structure (cmd, internal directories)
-- ✅ Message struct with binary encoding (CRC32 Castagnoli)
-- ✅ Append-only log writer with segment rollover
-- ✅ Segment file management (64MB segments)
-- ✅ Sparse index (4KB granularity) with binary search
-- ✅ Partition abstraction over log
-- ✅ Topic management with routing
-- ✅ Broker with CRUD and publish/consume APIs
-- ✅ Comprehensive test suite
+### Just Completed (M3)
+- ✅ Consumer group membership with heartbeat-based sessions
+- ✅ Range partition assignment strategy
+- ✅ Generation ID for zombie consumer protection
+- ✅ File-based offset storage with JSON persistence
+- ✅ Auto-commit support (5s interval)
+- ✅ Group coordinator managing all consumer groups
+- ✅ Session monitoring with 30s timeout
+- ✅ Chi router HTTP API with middleware
+- ✅ Long-polling for message consumption
+- ✅ Comprehensive test suite (24 API tests)
 
-### Next Steps (Milestone 2)
-1. Add TCP server for remote connections
-2. Implement wire protocol for producers/consumers
-3. Add multi-partition topic support
-4. Implement consumer groups
+### Next Steps (Milestone 4 - Reliability)
+1. Per-message acknowledgment (ack/nack)
+2. Visibility timeout for in-flight messages
+3. Dead letter queue (DLQ) for poison messages
+4. Retry policies (exponential backoff)
 
 ## Recent Changes
 
-### Session 1 - Milestone 1 Implementation
+### Session 3 - Milestone 3 Implementation
 **Completed**:
-- Created binary message format with 30-byte header
-  - Magic bytes: 0x47 0x51 ("GQ")
-  - CRC32 Castagnoli for corruption detection
-  - Supports keys up to 64KB, values up to 16MB
-- Built segment file management
-  - 64MB max segment size
-  - Automatic sealing when full
-  - Load/recovery from disk
-- Created sparse index
-  - 4KB byte granularity
-  - Binary search for O(log n) lookups
-  - Persists to .index files
-- Implemented append-only log
-  - Manages multiple segments
-  - Automatic rollover
-  - fsync every 1000ms (configurable)
-- Added broker layer
-  - Topic CRUD operations
-  - Publish/Consume APIs
-  - Statistics and metadata
+- Created consumer group system
+  - `ConsumerGroup` struct with membership tracking
+  - `Member` struct with heartbeat/assignment tracking
+  - Range assignment for partition distribution
+  - Generation ID increments on rebalance
+- Built offset management
+  - `OffsetManager` with file-based JSON storage
+  - Auto-commit goroutine (configurable interval)
+  - Atomic file writes for durability
+  - Per-group, per-topic, per-partition offsets
+- Implemented group coordinator
+  - `GroupCoordinator` centralizes group management
+  - Session monitoring goroutine evicts dead consumers
+  - Topic registration for partition counting
+- Refactored HTTP API
+  - Replaced stdlib `ServeMux` with `chi` router
+  - Added logging middleware
+  - URL parameter support for `/groups/{groupID}`
+- Added consumer group endpoints
+  - `POST /groups/{group}/join` - join with client_id, topics
+  - `POST /groups/{group}/heartbeat` - keep session alive
+  - `POST /groups/{group}/leave` - graceful departure
+  - `GET /groups/{group}/poll` - long-poll messages
+  - `POST /groups/{group}/offsets` - commit offsets
+  - `GET /groups/{group}/offsets` - fetch offsets
+  - `GET /groups` - list all groups
+  - `GET /groups/{group}` - group details
+  - `DELETE /groups/{group}` - delete group
 
-## Resolved Decisions
+## Resolved Decisions (M3)
 
-### Decision: Binary Message Format ✅
-**Chosen**: Custom binary with 30-byte header
-**Reason**: Compact, fast parsing, CRC integrity
+### Decision: Partition Assignment Strategy ✅
+**Chosen**: Range assignment
+**Reason**: Simple, deterministic, Kafka default
 
-### Decision: Index Granularity ✅
-**Chosen**: Every 4KB of data
-**Reason**: Kafka-style balance, consistent index size
+### Decision: Session Timeout ✅
+**Chosen**: 30s session, 3s heartbeat
+**Reason**: ~10 heartbeats per session, good margin
 
-### Decision: Segment Size ✅
-**Chosen**: 64MB
-**Reason**: Good balance for most workloads
+### Decision: Rebalance Protocol ✅
+**Chosen**: Eager (stop-the-world)
+**Reason**: Simpler; cooperative planned for M12
 
-### Decision: fsync Strategy ✅
-**Chosen**: Background sync every 1000ms
-**Reason**: Balance durability and performance
+### Decision: Offset Storage ✅
+**Chosen**: File-based JSON
+**Reason**: Simple, debuggable; Kafka uses __consumer_offsets topic
 
-### Decision: CRC Algorithm ✅
-**Chosen**: CRC32 Castagnoli (SSE4.2 accelerated)
-**Reason**: Fast on modern CPUs, good error detection
+### Decision: HTTP Router ✅
+**Chosen**: chi v5
+**Reason**: Lightweight, idiomatic Go, stdlib-compatible
 
-## Technical Details Implemented
-
-### Message Binary Format
-```
-| Magic (2B) | Ver (1B) | Flags (1B) | CRC (4B) | Offset (8B) | 
-| Timestamp (8B) | KeyLen (2B) | ValueLen (4B) | Key | Value |
-```
+### Decision: Poll Mechanism ✅
+**Chosen**: Long-polling (30s timeout)
+**Reason**: Simple, works with HTTP/1.1, no WebSocket complexity
 
 ### File Structure
 ```
