@@ -4,16 +4,25 @@
 //
 // This is the entry point for the goqueue broker. It demonstrates:
 //   - Creating a broker with default configuration
-//   - Creating topics
-//   - Publishing messages
-//   - Consuming messages
-//   - Viewing statistics
+//   - Creating multi-partition topics
+//   - Using the Producer with client-side batching
+//   - Message routing via consistent hashing (Murmur3)
+//   - HTTP API server for external access
+//   - Consuming messages from partitions
+//   - Graceful shutdown
+//
+// MILESTONE 2 FEATURES DEMONSTRATED:
+//   - Multi-partition topics (default 3 partitions)
+//   - Producer batching (100 msgs, 5ms linger, 64KB)
+//   - Murmur3 hash partitioning for message key routing
+//   - HTTP REST API (create topics, publish, consume)
 //
 // =============================================================================
 
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -21,19 +30,31 @@ import (
 	"syscall"
 	"time"
 
+	"goqueue/internal/api"
 	"goqueue/internal/broker"
 )
 
 func main() {
 	fmt.Println("╔═══════════════════════════════════════════════════════════════╗")
-	fmt.Println("║                     GoQueue v0.1.0                            ║")
-	fmt.Println("║              Milestone 1: Storage Engine Demo                 ║")
+	fmt.Println("║                     GoQueue v0.2.0                            ║")
+	fmt.Println("║          Milestone 2: Topics, Partitions & Producer           ║")
 	fmt.Println("╚═══════════════════════════════════════════════════════════════╝")
 	fmt.Println()
 
 	// -------------------------------------------------------------------------
 	// STEP 1: Create broker with default configuration
 	// -------------------------------------------------------------------------
+	// ┌─────────────────────────────────────────────────────────────────────────┐
+	// │ The Broker is the central component that:                               │
+	// │   - Manages all topics and their partitions                             │
+	// │   - Handles message persistence via the storage engine (M1)             │
+	// │   - Coordinates producers and consumers                                 │
+	// │                                                                         │
+	// │ COMPARISON:                                                             │
+	// │   - Kafka: Broker is a JVM process, typically 3+ in a cluster           │
+	// │   - RabbitMQ: Broker = the entire RabbitMQ node                         │
+	// │   - goqueue: Single broker for now (clustering in M10-M11)              │
+	// └─────────────────────────────────────────────────────────────────────────┘
 	fmt.Println("📦 Starting broker...")
 	config := broker.DefaultBrokerConfig()
 	config.DataDir = "./data" // Store data in ./data directory
@@ -48,14 +69,38 @@ func main() {
 	fmt.Printf("   ✓ Data directory: %s\n\n", b.DataDir())
 
 	// -------------------------------------------------------------------------
-	// STEP 2: Create a topic (or use existing)
+	// STEP 2: Create a multi-partition topic
 	// -------------------------------------------------------------------------
+	// ┌─────────────────────────────────────────────────────────────────────────┐
+	// │ PARTITIONS - The Unit of Parallelism                                    │
+	// │                                                                         │
+	// │ A topic is split into partitions for:                                   │
+	// │   1. PARALLELISM: Multiple consumers can read different partitions      │
+	// │   2. ORDERING: Messages with same key go to same partition (ordered)    │
+	// │   3. SCALABILITY: Partitions can be spread across nodes (future)        │
+	// │                                                                         │
+	// │ HOW IT WORKS:                                                           │
+	// │   Producer ──► Topic ──┬── Partition 0 ──► Messages: A, D, G            │
+	// │                        ├── Partition 1 ──► Messages: B, E, H            │
+	// │                        └── Partition 2 ──► Messages: C, F, I            │
+	// │                                                                         │
+	// │ ROUTING DECISION:                                                       │
+	// │   - With key: hash(key) % numPartitions → deterministic partition       │
+	// │   - Without key: round-robin across partitions                          │
+	// │                                                                         │
+	// │ COMPARISON:                                                             │
+	// │   - Kafka: Same model, partitions are fundamental unit                  │
+	// │   - RabbitMQ: Queues (not partitions), different semantics              │
+	// │   - SQS: FIFO queues have MessageGroupId (similar concept)              │
+	// └─────────────────────────────────────────────────────────────────────────┘
 	topicName := "demo-orders"
+	numPartitions := 3
+
 	if !b.TopicExists(topicName) {
-		fmt.Printf("📝 Creating topic '%s'...\n", topicName)
+		fmt.Printf("📝 Creating topic '%s' with %d partitions...\n", topicName, numPartitions)
 		err := b.CreateTopic(broker.TopicConfig{
 			Name:          topicName,
-			NumPartitions: 1, // Single partition for M1
+			NumPartitions: numPartitions,
 		})
 		if err != nil {
 			log.Fatalf("Failed to create topic: %v", err)
@@ -66,54 +111,193 @@ func main() {
 	}
 
 	// -------------------------------------------------------------------------
-	// STEP 3: Publish some messages
+	// STEP 3: Create a Producer with batching
 	// -------------------------------------------------------------------------
-	fmt.Println("📤 Publishing messages...")
+	// ┌─────────────────────────────────────────────────────────────────────────┐
+	// │ PRODUCER BATCHING - Trading Latency for Throughput                      │
+	// │                                                                         │
+	// │ Instead of sending each message immediately:                            │
+	// │   1. Messages accumulate in an in-memory buffer                         │
+	// │   2. Batch is flushed when ANY trigger fires:                           │
+	// │      - BatchSize reached (100 messages)                                 │
+	// │      - LingerMs elapsed (5ms since first message)                       │
+	// │      - BatchBytes exceeded (64KB total)                                 │
+	// │                                                                         │
+	// │ FLOW:                                                                   │
+	// │   Send() ──► Batch Buffer ──[trigger]──► Flush to Broker               │
+	// │                 │                                                       │
+	// │                 ├── size >= 100?    ──► flush                           │
+	// │                 ├── age >= 5ms?     ──► flush                           │
+	// │                 └── bytes >= 64KB?  ──► flush                           │
+	// │                                                                         │
+	// │ COMPARISON:                                                             │
+	// │   - Kafka: Same model (batch.size, linger.ms)                           │
+	// │   - RabbitMQ: Publisher confirms, no client batching                    │
+	// │   - SQS: SendMessageBatch (max 10 messages)                             │
+	// └─────────────────────────────────────────────────────────────────────────┘
+	fmt.Println("🚀 Creating Producer with batching enabled...")
+	producerConfig := broker.ProducerConfig{
+		Topic:      topicName,
+		BatchSize:  10,        // Smaller for demo (normally 100)
+		LingerMs:   50,        // 50ms - longer for demo visibility
+		BatchBytes: 64 * 1024, // 64KB
+		AckMode:    broker.AckLeader,
+	}
+
+	producer, err := broker.NewProducer(b, producerConfig)
+	if err != nil {
+		log.Fatalf("Failed to create producer: %v", err)
+	}
+	defer producer.Close()
+
+	fmt.Printf("   ✓ Producer started (BatchSize=%d, LingerMs=%dms, AckMode=%s)\n\n",
+		producerConfig.BatchSize, producerConfig.LingerMs, producerConfig.AckMode)
+
+	// -------------------------------------------------------------------------
+	// STEP 4: Publish messages with keys (demonstrates partitioning)
+	// -------------------------------------------------------------------------
+	// ┌─────────────────────────────────────────────────────────────────────────┐
+	// │ KEY-BASED PARTITIONING - Ordering Guarantee                             │
+	// │                                                                         │
+	// │ When you provide a message key:                                         │
+	// │   partition = murmur3(key) % numPartitions                              │
+	// │                                                                         │
+	// │ This ensures:                                                           │
+	// │   - Same key ALWAYS goes to same partition                              │
+	// │   - Messages for same key are ORDERED                                   │
+	// │   - Different keys may share partitions (hash collisions)               │
+	// │                                                                         │
+	// │ EXAMPLE (3 partitions):                                                 │
+	// │   "user-100" → murmur3 → partition 0                                    │
+	// │   "user-200" → murmur3 → partition 2                                    │
+	// │   "user-300" → murmur3 → partition 1                                    │
+	// │   "user-100" → murmur3 → partition 0 (SAME!)                            │
+	// │                                                                         │
+	// │ WHY MURMUR3:                                                            │
+	// │   - Fast (non-cryptographic)                                            │
+	// │   - Excellent distribution (uniform across partitions)                  │
+	// │   - Industry standard (Kafka default)                                   │
+	// └─────────────────────────────────────────────────────────────────────────┘
+	fmt.Println("📤 Publishing messages with keys (observing partition routing)...")
 	messages := []struct {
 		Key   string
 		Value string
 	}{
-		{"order-001", `{"id": "001", "product": "Widget", "qty": 5}`},
-		{"order-002", `{"id": "002", "product": "Gadget", "qty": 3}`},
-		{"order-003", `{"id": "003", "product": "Gizmo", "qty": 10}`},
-		{"user-123", `{"user": "123", "action": "purchase"}`},
-		{"user-456", `{"user": "456", "action": "view"}`},
+		// Orders from different users - should go to consistent partitions
+		{"user-100", `{"order": "A", "user": "100", "product": "Widget"}`},
+		{"user-200", `{"order": "B", "user": "200", "product": "Gadget"}`},
+		{"user-300", `{"order": "C", "user": "300", "product": "Gizmo"}`},
+		{"user-100", `{"order": "D", "user": "100", "product": "Sprocket"}`}, // Same user as A
+		{"user-200", `{"order": "E", "user": "200", "product": "Cog"}`},      // Same user as B
+		{"user-100", `{"order": "F", "user": "100", "product": "Bolt"}`},     // Same user as A, D
 	}
 
+	// Track which partition each user goes to
+	userPartitions := make(map[string]int)
+
 	for _, msg := range messages {
-		partition, offset, err := b.Publish(
-			topicName,
-			[]byte(msg.Key),
-			[]byte(msg.Value),
-		)
-		if err != nil {
-			log.Printf("   ✗ Failed to publish %s: %v", msg.Key, err)
+		// Use synchronous send for demo (easier to show partition assignment)
+		ctx := context.Background()
+		result := producer.SendSync(ctx, broker.ProducerRecord{
+			Key:   []byte(msg.Key),
+			Value: []byte(msg.Value),
+		})
+		if result.Error != nil {
+			log.Printf("   ✗ Failed to publish: %v", result.Error)
 			continue
 		}
-		fmt.Printf("   ✓ Published: key=%s → partition=%d, offset=%d\n",
-			msg.Key, partition, offset)
+
+		partition := result.Partition
+		offset := result.Offset
+
+		// Track partition for this user
+		if existing, ok := userPartitions[msg.Key]; ok {
+			if existing != partition {
+				fmt.Printf("   ⚠ PARTITION MISMATCH for %s! (expected %d, got %d)\n",
+					msg.Key, existing, partition)
+			}
+		} else {
+			userPartitions[msg.Key] = partition
+		}
+
+		fmt.Printf("   ✓ key=%-10s → partition=%d, offset=%d\n", msg.Key, partition, offset)
+	}
+
+	fmt.Println("\n   📊 Partition Assignment Summary:")
+	for user, part := range userPartitions {
+		fmt.Printf("      %s → Partition %d\n", user, part)
 	}
 	fmt.Println()
 
 	// -------------------------------------------------------------------------
-	// STEP 4: Consume messages
+	// STEP 5: Consume messages from each partition
 	// -------------------------------------------------------------------------
-	fmt.Println("📥 Consuming messages from beginning...")
-	consumed, err := b.Consume(topicName, 0, 0, 100) // partition 0, from offset 0, max 100
-	if err != nil {
-		log.Fatalf("Failed to consume: %v", err)
+	fmt.Println("📥 Consuming messages from each partition...")
+	for p := 0; p < numPartitions; p++ {
+		consumed, err := b.Consume(topicName, p, 0, 100)
+		if err != nil {
+			log.Printf("   ✗ Failed to consume from partition %d: %v", p, err)
+			continue
+		}
+
+		fmt.Printf("\n   Partition %d (%d messages):\n", p, len(consumed))
+		for _, m := range consumed {
+			key := string(m.Key)
+			if key == "" {
+				key = "(no key)"
+			}
+			fmt.Printf("      [offset=%d] key=%s\n", m.Offset, key)
+		}
+	}
+	fmt.Println()
+
+	// -------------------------------------------------------------------------
+	// STEP 6: Start HTTP API Server
+	// -------------------------------------------------------------------------
+	// ┌─────────────────────────────────────────────────────────────────────────┐
+	// │ HTTP API - External Access to GoQueue                                   │
+	// │                                                                         │
+	// │ Endpoints:                                                              │
+	// │   GET  /health                              - Health check              │
+	// │   GET  /stats                               - Broker statistics         │
+	// │   POST /topics                              - Create topic              │
+	// │   GET  /topics                              - List topics               │
+	// │   GET  /topics/{name}                       - Get topic info            │
+	// │   DELETE /topics/{name}                     - Delete topic              │
+	// │   POST /topics/{name}/messages              - Publish messages          │
+	// │   GET  /topics/{name}/partitions/{id}/msgs  - Consume messages          │
+	// │                                                                         │
+	// │ COMPARISON:                                                             │
+	// │   - Kafka: Binary protocol (librdkafka), REST proxy separate            │
+	// │   - RabbitMQ: AMQP protocol, HTTP management API                        │
+	// │   - SQS: HTTP/REST API                                                  │
+	// │   - goqueue: REST-first (gRPC planned for M14)                          │
+	// └─────────────────────────────────────────────────────────────────────────┘
+	fmt.Println("🌐 Starting HTTP API server...")
+	serverConfig := api.DefaultServerConfig()
+	serverConfig.Addr = "127.0.0.1:8080"
+
+	server := api.NewServer(b, serverConfig)
+	if err := server.Start(); err != nil {
+		log.Fatalf("Failed to start HTTP server: %v", err)
 	}
 
-	fmt.Printf("   Retrieved %d messages:\n\n", len(consumed))
-	for _, m := range consumed {
-		fmt.Printf("   ┌─ Offset: %d\n", m.Offset)
-		fmt.Printf("   │  Time:   %s\n", m.Timestamp.Format(time.RFC3339))
-		fmt.Printf("   │  Key:    %s\n", string(m.Key))
-		fmt.Printf("   └─ Value:  %s\n\n", string(m.Value))
-	}
+	fmt.Printf("   ✓ HTTP API listening on http://%s\n", serverConfig.Addr)
+	fmt.Println()
+	fmt.Println("   Try these commands:")
+	fmt.Println("   ┌────────────────────────────────────────────────────────────────────────┐")
+	fmt.Println("   │ curl http://localhost:8080/health                                      │")
+	fmt.Println("   │ curl http://localhost:8080/stats                                       │")
+	fmt.Println("   │ curl http://localhost:8080/topics                                      │")
+	fmt.Println("   │ curl -X POST -d '{\"name\":\"test\"}' http://localhost:8080/topics      │")
+	fmt.Println("   │ curl -X POST -d '{\"messages\":[{\"key\":\"k\",\"value\":\"v\"}]}'       │")
+	fmt.Println("   │      http://localhost:8080/topics/test/messages                        │")
+	fmt.Println("   │ curl 'http://localhost:8080/topics/test/partitions/0/messages'         │")
+	fmt.Println("   └────────────────────────────────────────────────────────────────────────┘")
+	fmt.Println()
 
 	// -------------------------------------------------------------------------
-	// STEP 5: Show statistics
+	// STEP 7: Show statistics
 	// -------------------------------------------------------------------------
 	fmt.Println("📊 Broker Statistics:")
 	stats := b.Stats()
@@ -129,18 +313,10 @@ func main() {
 	}
 
 	// -------------------------------------------------------------------------
-	// STEP 6: Demonstrate persistence
+	// STEP 8: Wait for interrupt (server mode)
 	// -------------------------------------------------------------------------
 	fmt.Println()
-	fmt.Println("💾 Persistence Demo:")
-	fmt.Println("   Messages are now persisted to disk.")
-	fmt.Println("   Restart the program to see messages survive restarts!")
-
-	// -------------------------------------------------------------------------
-	// STEP 7: Wait for interrupt (simple server mode)
-	// -------------------------------------------------------------------------
-	fmt.Println()
-	fmt.Println("🚀 Broker running. Press Ctrl+C to stop.")
+	fmt.Println("🚀 GoQueue running. Press Ctrl+C to stop.")
 
 	// Set up signal handling for graceful shutdown
 	sigCh := make(chan os.Signal, 1)
@@ -148,5 +324,14 @@ func main() {
 	<-sigCh
 
 	fmt.Println("\n\n🛑 Shutting down...")
-	fmt.Println("   ✓ Broker shutdown complete")
+
+	// Graceful shutdown with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := server.Stop(ctx); err != nil {
+		log.Printf("HTTP server shutdown error: %v", err)
+	}
+
+	fmt.Println("   ✓ Shutdown complete")
 }
