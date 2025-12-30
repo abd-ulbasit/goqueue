@@ -3,16 +3,16 @@
 ## Overall Status
 
 **Phase**: 1 of 4
-**Milestones**: 2/18 complete
-**Tests**: 45 passing (storage: 17, broker: 14, api: 14)
+**Milestones**: 3/18 complete
+**Tests**: 84 passing (storage: 42, broker: 18, api: 24)
 **Started**: Session 1
 
 ## Phase Progress
 
-### Phase 1: Foundations (2/4)
+### Phase 1: Foundations (3/4)
 - [x] Milestone 1: Storage Engine & Append-Only Log ✅
 - [x] Milestone 2: Topics, Partitions & Producer API ✅
-- [ ] Milestone 3: Consumer Groups & Offset Management
+- [x] Milestone 3: Consumer Groups & Offset Management ✅
 - [ ] Milestone 4: Reliability - ACKs, Visibility & DLQ
 
 ### Phase 2: Advanced Features (0/5)
@@ -29,7 +29,7 @@
 - [ ] Milestone 13: Online Partition Scaling
 
 ### Phase 4: Operations (0/5)
-- [ ] Milestone 14: gRPC API & Go Client
+- [ ] Milestone 14: gRPC API & Go Client (js/ts as well if time)
 - [ ] Milestone 15: CLI Tool
 - [ ] Milestone 16: Prometheus Metrics & Grafana
 - [ ] Milestone 17: Multi-Tenancy & Quotas
@@ -59,6 +59,18 @@
 - **HTTP REST API** with full CRUD for topics and publish/consume
 - **Priority draining** in accumulator to prevent race conditions
 
+### Milestone 3 - Consumer Groups & Offset Management ✅
+- **Consumer group membership** with heartbeat-based session management
+- **Range partition assignment** (Kafka-compatible strategy)
+- **Generation ID tracking** for zombie consumer protection
+- **Stop-the-world rebalancing** (eager protocol)
+- **File-based offset storage** with JSON persistence
+- **Auto-commit support** (5s interval) with manual commit API
+- **Group coordinator** managing all consumer groups centrally
+- **Session monitoring** with 30s timeout, 3s heartbeat interval
+- **Chi router HTTP API** with middleware logging
+- **Long-polling** for message consumption (30s default timeout)
+
 ### Technical Decisions Made
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
@@ -73,6 +85,15 @@
 | Batching location | Client-side | Reduces broker load, Kafka pattern |
 | LingerMs=0 | Immediate flush | Kafka semantics for low latency |
 | HTTP API style | REST-ish | Simple, curl-friendly, JSON |
+| HTTP router | chi v5 | Lightweight, idiomatic, stdlib compatible |
+| Session timeout | 30s | Kafka default, good balance |
+| Heartbeat interval | 3s | ~10 heartbeats per session (margin) |
+| Partition strategy | Range | Simple, deterministic, Kafka default |
+| Rebalance protocol | Eager (stop-world) | Simpler; cooperative in M12 |
+| Offset storage | File-based JSON | Simple, debuggable; Kafka uses topics |
+| Auto-commit interval | 5s | Kafka default |
+| MemberID format | clientID-randomHex | Unique, traceable |
+| Poll timeout | 30s | Standard long-poll duration |
 
 ## What's Left to Build
 
@@ -83,8 +104,10 @@
 - [x] Multi-partition topics ✅
 - [x] Producer with batching ✅
 - [x] HTTP API ✅
-- [ ] Consumer groups (Milestone 3)
+- [x] Consumer groups ✅ (M3)
+- [x] Offset management ✅ (M3)
 - [ ] Per-message ACK (Milestone 4)
+- [ ] Visibility timeout (Milestone 4)
 - [ ] Dead letter queue (Milestone 4)
 
 ### Differentiators (Key Features) ⭐
@@ -109,6 +132,12 @@
 *None currently*
 
 ## Lessons Learned
+
+### Session 3 - Milestone 3
+1. **Chi router URL params** - chi uses `chi.URLParam(r, "name")` to get URL params, not explicit arguments. Test code must call through `router.ServeHTTP()` not individual handlers.
+2. **JSON partition keys as strings** - HTTP JSON APIs need partition IDs as strings (JSON keys), not ints. Convert with `strconv.Itoa()` for JSON serialization.
+3. **Generation ID prevents zombies** - Stale consumers with old generation get rejected on heartbeat/commit. Critical for at-least-once guarantees.
+4. **Stop-the-world rebalance tradeoff** - Simpler than incremental, but all consumers pause during rebalance. Good enough for v1; cooperative rebalancing in M12.
 
 ### Session 2 - Milestone 2
 1. **Go's select is non-deterministic** - When multiple channels are ready, Go picks randomly. Fixed accumulator race condition by adding priority draining before flush/close.

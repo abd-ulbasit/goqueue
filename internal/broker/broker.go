@@ -117,6 +117,10 @@ type Broker struct {
 	// logsDir is where log files are stored
 	logsDir string
 
+	// groupCoordinator manages consumer groups and offsets
+	// Added in Milestone 3 for consumer group support
+	groupCoordinator *GroupCoordinator
+
 	// mu protects topics map
 	mu sync.RWMutex
 
@@ -153,12 +157,20 @@ func NewBroker(config BrokerConfig) (*Broker, error) {
 		return nil, fmt.Errorf("failed to create logs directory: %w", err)
 	}
 
+	// Create group coordinator for consumer group management (M3)
+	coordinatorConfig := DefaultCoordinatorConfig(config.DataDir)
+	groupCoordinator, err := NewGroupCoordinator(coordinatorConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create group coordinator: %w", err)
+	}
+
 	broker := &Broker{
-		config:    config,
-		topics:    make(map[string]*Topic),
-		logsDir:   logsDir,
-		logger:    logger,
-		startedAt: time.Now(),
+		config:           config,
+		topics:           make(map[string]*Topic),
+		logsDir:          logsDir,
+		groupCoordinator: groupCoordinator,
+		logger:           logger,
+		startedAt:        time.Now(),
 	}
 
 	// Discover and load existing topics
@@ -202,6 +214,10 @@ func (b *Broker) loadExistingTopics() error {
 		}
 
 		b.topics[topicName] = topic
+
+		// Register topic with group coordinator for partition assignment
+		b.groupCoordinator.RegisterTopic(topicName, topic.NumPartitions())
+
 		b.logger.Info("loaded topic",
 			"topic", topicName,
 			"partitions", topic.NumPartitions(),
@@ -215,9 +231,10 @@ func (b *Broker) loadExistingTopics() error {
 //
 // SHUTDOWN PROCESS:
 //  1. Stop accepting new requests
-//  2. Sync all topics to disk
-//  3. Close all topics
-//  4. Release resources
+//  2. Close group coordinator (flushes offsets)
+//  3. Sync all topics to disk
+//  4. Close all topics
+//  5. Release resources
 func (b *Broker) Close() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -229,6 +246,14 @@ func (b *Broker) Close() error {
 	b.logger.Info("shutting down broker")
 
 	var errs []error
+
+	// Close group coordinator first (flushes pending offset commits)
+	if b.groupCoordinator != nil {
+		if err := b.groupCoordinator.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("group coordinator: %w", err))
+		}
+	}
+
 	for name, topic := range b.topics {
 		if err := topic.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("topic %s: %w", name, err))
@@ -279,6 +304,9 @@ func (b *Broker) CreateTopic(config TopicConfig) error {
 
 	b.topics[config.Name] = topic
 
+	// Register with group coordinator for consumer group partition assignment
+	b.groupCoordinator.RegisterTopic(config.Name, config.NumPartitions)
+
 	b.logger.Info("created topic",
 		"topic", config.Name,
 		"partitions", config.NumPartitions)
@@ -308,6 +336,9 @@ func (b *Broker) DeleteTopic(name string) error {
 	}
 
 	delete(b.topics, name)
+
+	// Unregister from group coordinator
+	b.groupCoordinator.UnregisterTopic(name)
 
 	b.logger.Info("deleted topic", "topic", name)
 
@@ -583,6 +614,12 @@ func (b *Broker) NodeID() string {
 // DataDir returns the data directory path.
 func (b *Broker) DataDir() string {
 	return b.config.DataDir
+}
+
+// GroupCoordinator returns the broker's consumer group coordinator.
+// Used by the API layer for consumer group operations.
+func (b *Broker) GroupCoordinator() *GroupCoordinator {
+	return b.groupCoordinator
 }
 
 // Uptime returns how long the broker has been running.

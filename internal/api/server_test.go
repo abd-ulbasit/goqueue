@@ -1,3 +1,20 @@
+// ============================================================================
+// API SERVER TESTS - Chi Router Based
+// ============================================================================
+//
+// These tests validate the REST API layer using chi router.
+// Tests call through the full router (ServeHTTP) rather than individual handlers
+// to properly exercise URL parameter parsing, middleware, and routing.
+//
+// TEST PATTERNS:
+//   - setupTestServer: Creates broker + API server in temp directory
+//   - All tests use httptest.NewRecorder() + router.ServeHTTP()
+//   - This ensures chi URL params work correctly
+//
+// COMPARISON WITH UNIT TESTS:
+//   - Integration tests: Call through full router (what we do here)
+//   - Unit tests: Would mock the broker and test handlers in isolation
+//   - Both are valuable; we prioritize integration for end-to-end validation
 package api
 
 import (
@@ -13,7 +30,15 @@ import (
 	"goqueue/internal/broker"
 )
 
-// setupTestServer creates a test broker and API server.
+// ============================================================================
+// TEST HELPERS
+// ============================================================================
+
+// setupTestServer creates a test broker and API server in a temp directory.
+// Returns the server and a cleanup function.
+//
+// WHY temp directory: Tests must be isolated - each test gets fresh state.
+// Temp directories are auto-cleaned by Go's testing framework.
 func setupTestServer(t *testing.T) (*Server, func()) {
 	t.Helper()
 
@@ -37,15 +62,36 @@ func setupTestServer(t *testing.T) (*Server, func()) {
 	return server, cleanup
 }
 
+// doRequest is a helper to make HTTP requests through the router.
+// This ensures chi URL params and middleware are exercised.
+func doRequest(server *Server, method, path string, body interface{}) *httptest.ResponseRecorder {
+	var reqBody *bytes.Reader
+	if body != nil {
+		data, _ := json.Marshal(body)
+		reqBody = bytes.NewReader(data)
+	} else {
+		reqBody = bytes.NewReader(nil)
+	}
+
+	req := httptest.NewRequest(method, path, reqBody)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	server.router.ServeHTTP(rec, req)
+	return rec
+}
+
+// ============================================================================
+// HEALTH & STATS ENDPOINT TESTS
+// ============================================================================
+
 // TestHealthEndpoint tests GET /health.
+// Health endpoint is critical for orchestration systems (Kubernetes liveness probes).
 func TestHealthEndpoint(t *testing.T) {
 	server, cleanup := setupTestServer(t)
 	defer cleanup()
 
-	req := httptest.NewRequest(http.MethodGet, "/health", nil)
-	rec := httptest.NewRecorder()
-
-	server.handleHealth(rec, req)
+	rec := doRequest(server, http.MethodGet, "/health", nil)
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("Expected status 200, got %d", rec.Code)
@@ -62,14 +108,12 @@ func TestHealthEndpoint(t *testing.T) {
 }
 
 // TestStatsEndpoint tests GET /stats.
+// Stats endpoint is used for observability and monitoring dashboards.
 func TestStatsEndpoint(t *testing.T) {
 	server, cleanup := setupTestServer(t)
 	defer cleanup()
 
-	req := httptest.NewRequest(http.MethodGet, "/stats", nil)
-	rec := httptest.NewRecorder()
-
-	server.handleStats(rec, req)
+	rec := doRequest(server, http.MethodGet, "/stats", nil)
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("Expected status 200, got %d", rec.Code)
@@ -85,7 +129,12 @@ func TestStatsEndpoint(t *testing.T) {
 	}
 }
 
+// ============================================================================
+// TOPIC CRUD TESTS
+// ============================================================================
+
 // TestCreateTopic tests POST /topics.
+// Topic creation is the entry point for using the queue.
 func TestCreateTopic(t *testing.T) {
 	server, cleanup := setupTestServer(t)
 	defer cleanup()
@@ -114,11 +163,7 @@ func TestCreateTopic(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			body, _ := json.Marshal(tt.body)
-			req := httptest.NewRequest(http.MethodPost, "/topics", bytes.NewReader(body))
-			rec := httptest.NewRecorder()
-
-			server.handleTopics(rec, req)
+			rec := doRequest(server, http.MethodPost, "/topics", tt.body)
 
 			if rec.Code != tt.expectedStatus {
 				t.Errorf("Expected status %d, got %d: %s", tt.expectedStatus, rec.Code, rec.Body.String())
@@ -128,22 +173,20 @@ func TestCreateTopic(t *testing.T) {
 }
 
 // TestCreateTopicDuplicate tests creating a topic that already exists.
+// Should return 409 Conflict.
 func TestCreateTopicDuplicate(t *testing.T) {
 	server, cleanup := setupTestServer(t)
 	defer cleanup()
 
-	body, _ := json.Marshal(CreateTopicRequest{Name: "dup-topic"})
-	req := httptest.NewRequest(http.MethodPost, "/topics", bytes.NewReader(body))
-	rec := httptest.NewRecorder()
-	server.handleTopics(rec, req)
+	body := CreateTopicRequest{Name: "dup-topic"}
+	rec := doRequest(server, http.MethodPost, "/topics", body)
 
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("Failed to create first topic: %s", rec.Body.String())
 	}
 
-	req = httptest.NewRequest(http.MethodPost, "/topics", bytes.NewReader(body))
-	rec = httptest.NewRecorder()
-	server.handleTopics(rec, req)
+	// Try to create the same topic again
+	rec = doRequest(server, http.MethodPost, "/topics", body)
 
 	if rec.Code != http.StatusConflict {
 		t.Errorf("Expected status 409 Conflict, got %d", rec.Code)
@@ -155,16 +198,16 @@ func TestListTopics(t *testing.T) {
 	server, cleanup := setupTestServer(t)
 	defer cleanup()
 
+	// Create multiple topics
 	for _, name := range []string{"topic-a", "topic-b", "topic-c"} {
-		body, _ := json.Marshal(CreateTopicRequest{Name: name})
-		req := httptest.NewRequest(http.MethodPost, "/topics", bytes.NewReader(body))
-		rec := httptest.NewRecorder()
-		server.handleTopics(rec, req)
+		rec := doRequest(server, http.MethodPost, "/topics", CreateTopicRequest{Name: name})
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("Failed to create topic %s: %s", name, rec.Body.String())
+		}
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/topics", nil)
-	rec := httptest.NewRecorder()
-	server.handleTopics(rec, req)
+	// List topics
+	rec := doRequest(server, http.MethodGet, "/topics", nil)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("Expected status 200, got %d", rec.Code)
@@ -188,14 +231,14 @@ func TestGetTopic(t *testing.T) {
 	server, cleanup := setupTestServer(t)
 	defer cleanup()
 
-	body, _ := json.Marshal(CreateTopicRequest{Name: "my-topic", NumPartitions: 4})
-	req := httptest.NewRequest(http.MethodPost, "/topics", bytes.NewReader(body))
-	rec := httptest.NewRecorder()
-	server.handleTopics(rec, req)
+	// Create a topic
+	rec := doRequest(server, http.MethodPost, "/topics", CreateTopicRequest{Name: "my-topic", NumPartitions: 4})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("Failed to create topic: %s", rec.Body.String())
+	}
 
-	req = httptest.NewRequest(http.MethodGet, "/topics/my-topic", nil)
-	rec = httptest.NewRecorder()
-	server.getTopic(rec, req, "my-topic")
+	// Get the topic
+	rec = doRequest(server, http.MethodGet, "/topics/my-topic", nil)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("Expected status 200, got %d: %s", rec.Code, rec.Body.String())
@@ -217,9 +260,7 @@ func TestGetTopicNotFound(t *testing.T) {
 	server, cleanup := setupTestServer(t)
 	defer cleanup()
 
-	req := httptest.NewRequest(http.MethodGet, "/topics/nonexistent", nil)
-	rec := httptest.NewRecorder()
-	server.getTopic(rec, req, "nonexistent")
+	rec := doRequest(server, http.MethodGet, "/topics/nonexistent", nil)
 
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("Expected status 404, got %d", rec.Code)
@@ -231,38 +272,43 @@ func TestDeleteTopic(t *testing.T) {
 	server, cleanup := setupTestServer(t)
 	defer cleanup()
 
-	body, _ := json.Marshal(CreateTopicRequest{Name: "to-delete"})
-	req := httptest.NewRequest(http.MethodPost, "/topics", bytes.NewReader(body))
-	rec := httptest.NewRecorder()
-	server.handleTopics(rec, req)
+	// Create a topic
+	rec := doRequest(server, http.MethodPost, "/topics", CreateTopicRequest{Name: "to-delete"})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("Failed to create topic: %s", rec.Body.String())
+	}
 
-	req = httptest.NewRequest(http.MethodDelete, "/topics/to-delete", nil)
-	rec = httptest.NewRecorder()
-	server.deleteTopic(rec, req, "to-delete")
+	// Delete the topic
+	rec = doRequest(server, http.MethodDelete, "/topics/to-delete", nil)
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("Expected status 200, got %d", rec.Code)
 	}
 
-	req = httptest.NewRequest(http.MethodGet, "/topics/to-delete", nil)
-	rec = httptest.NewRecorder()
-	server.getTopic(rec, req, "to-delete")
+	// Verify it's deleted
+	rec = doRequest(server, http.MethodGet, "/topics/to-delete", nil)
 
 	if rec.Code != http.StatusNotFound {
-		t.Errorf("Expected topic to be deleted")
+		t.Errorf("Expected topic to be deleted, got status %d", rec.Code)
 	}
 }
+
+// ============================================================================
+// PUBLISH & CONSUME TESTS
+// ============================================================================
 
 // TestPublishMessages tests POST /topics/{name}/messages.
 func TestPublishMessages(t *testing.T) {
 	server, cleanup := setupTestServer(t)
 	defer cleanup()
 
-	body, _ := json.Marshal(CreateTopicRequest{Name: "pub-topic", NumPartitions: 3})
-	req := httptest.NewRequest(http.MethodPost, "/topics", bytes.NewReader(body))
-	rec := httptest.NewRecorder()
-	server.handleTopics(rec, req)
+	// Create topic
+	rec := doRequest(server, http.MethodPost, "/topics", CreateTopicRequest{Name: "pub-topic", NumPartitions: 3})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("Failed to create topic: %s", rec.Body.String())
+	}
 
+	// Publish messages
 	pubReq := PublishRequest{
 		Messages: []PublishMessage{
 			{Key: "key-1", Value: "value-1"},
@@ -270,10 +316,7 @@ func TestPublishMessages(t *testing.T) {
 			{Value: "value-3"},
 		},
 	}
-	body, _ = json.Marshal(pubReq)
-	req = httptest.NewRequest(http.MethodPost, "/topics/pub-topic/messages", bytes.NewReader(body))
-	rec = httptest.NewRecorder()
-	server.publishMessages(rec, req, "pub-topic")
+	rec = doRequest(server, http.MethodPost, "/topics/pub-topic/messages", pubReq)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("Expected status 200, got %d: %s", rec.Code, rec.Body.String())
@@ -297,21 +340,20 @@ func TestPublishWithExplicitPartition(t *testing.T) {
 	server, cleanup := setupTestServer(t)
 	defer cleanup()
 
-	body, _ := json.Marshal(CreateTopicRequest{Name: "explicit-part", NumPartitions: 3})
-	req := httptest.NewRequest(http.MethodPost, "/topics", bytes.NewReader(body))
-	rec := httptest.NewRecorder()
-	server.handleTopics(rec, req)
+	// Create topic
+	rec := doRequest(server, http.MethodPost, "/topics", CreateTopicRequest{Name: "explicit-part", NumPartitions: 3})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("Failed to create topic: %s", rec.Body.String())
+	}
 
+	// Publish to specific partition
 	partition := 2
 	pubReq := PublishRequest{
 		Messages: []PublishMessage{
 			{Value: "value", Partition: &partition},
 		},
 	}
-	body, _ = json.Marshal(pubReq)
-	req = httptest.NewRequest(http.MethodPost, "/topics/explicit-part/messages", bytes.NewReader(body))
-	rec = httptest.NewRecorder()
-	server.publishMessages(rec, req, "explicit-part")
+	rec = doRequest(server, http.MethodPost, "/topics/explicit-part/messages", pubReq)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("Expected status 200, got %d", rec.Code)
@@ -333,11 +375,13 @@ func TestConsumeMessages(t *testing.T) {
 	server, cleanup := setupTestServer(t)
 	defer cleanup()
 
-	body, _ := json.Marshal(CreateTopicRequest{Name: "consume-topic", NumPartitions: 1})
-	req := httptest.NewRequest(http.MethodPost, "/topics", bytes.NewReader(body))
-	rec := httptest.NewRecorder()
-	server.handleTopics(rec, req)
+	// Create topic
+	rec := doRequest(server, http.MethodPost, "/topics", CreateTopicRequest{Name: "consume-topic", NumPartitions: 1})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("Failed to create topic: %s", rec.Body.String())
+	}
 
+	// Publish messages
 	pubReq := PublishRequest{
 		Messages: []PublishMessage{
 			{Key: "k1", Value: "v1"},
@@ -345,14 +389,13 @@ func TestConsumeMessages(t *testing.T) {
 			{Key: "k3", Value: "v3"},
 		},
 	}
-	body, _ = json.Marshal(pubReq)
-	req = httptest.NewRequest(http.MethodPost, "/topics/consume-topic/messages", bytes.NewReader(body))
-	rec = httptest.NewRecorder()
-	server.publishMessages(rec, req, "consume-topic")
+	rec = doRequest(server, http.MethodPost, "/topics/consume-topic/messages", pubReq)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Failed to publish: %s", rec.Body.String())
+	}
 
-	req = httptest.NewRequest(http.MethodGet, "/topics/consume-topic/partitions/0/messages?offset=0&limit=10", nil)
-	rec = httptest.NewRecorder()
-	server.consumeMessages(rec, req, "consume-topic", 0)
+	// Consume messages
+	rec = doRequest(server, http.MethodGet, "/topics/consume-topic/partitions/0/messages?offset=0&limit=10", nil)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("Expected status 200, got %d: %s", rec.Code, rec.Body.String())
@@ -375,24 +418,25 @@ func TestConsumeWithOffset(t *testing.T) {
 	server, cleanup := setupTestServer(t)
 	defer cleanup()
 
-	body, _ := json.Marshal(CreateTopicRequest{Name: "offset-topic", NumPartitions: 1})
-	req := httptest.NewRequest(http.MethodPost, "/topics", bytes.NewReader(body))
-	rec := httptest.NewRecorder()
-	server.handleTopics(rec, req)
+	// Create topic
+	rec := doRequest(server, http.MethodPost, "/topics", CreateTopicRequest{Name: "offset-topic", NumPartitions: 1})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("Failed to create topic: %s", rec.Body.String())
+	}
 
+	// Publish 10 messages
 	for i := 0; i < 10; i++ {
 		pubReq := PublishRequest{
 			Messages: []PublishMessage{{Value: fmt.Sprintf("msg-%d", i)}},
 		}
-		body, _ = json.Marshal(pubReq)
-		req = httptest.NewRequest(http.MethodPost, "/topics/offset-topic/messages", bytes.NewReader(body))
-		rec = httptest.NewRecorder()
-		server.publishMessages(rec, req, "offset-topic")
+		rec = doRequest(server, http.MethodPost, "/topics/offset-topic/messages", pubReq)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("Failed to publish message %d: %s", i, rec.Body.String())
+		}
 	}
 
-	req = httptest.NewRequest(http.MethodGet, "/topics/offset-topic/partitions/0/messages?offset=5&limit=10", nil)
-	rec = httptest.NewRecorder()
-	server.consumeMessages(rec, req, "offset-topic", 0)
+	// Consume from offset 5
+	rec = doRequest(server, http.MethodGet, "/topics/offset-topic/partitions/0/messages?offset=5&limit=10", nil)
 
 	var resp ConsumeResponse
 	json.Unmarshal(rec.Body.Bytes(), &resp)
@@ -405,6 +449,399 @@ func TestConsumeWithOffset(t *testing.T) {
 		t.Errorf("Expected first message offset 5, got %d", resp.Messages[0].Offset)
 	}
 }
+
+// ============================================================================
+// CONSUMER GROUP TESTS
+// ============================================================================
+
+// TestJoinConsumerGroup tests POST /groups/{group}/join.
+// Joining a group is the first step for coordinated consumption.
+func TestJoinConsumerGroup(t *testing.T) {
+	server, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	// Create topic first (needed for partition assignment)
+	rec := doRequest(server, http.MethodPost, "/topics", CreateTopicRequest{Name: "orders", NumPartitions: 3})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("Failed to create topic: %s", rec.Body.String())
+	}
+
+	// Join group - uses ClientID, not ConsumerID
+	joinReq := JoinGroupRequest{
+		ClientID: "consumer-1",
+		Topics:   []string{"orders"},
+	}
+	rec = doRequest(server, http.MethodPost, "/groups/order-processors/join", joinReq)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp JoinGroupResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("Failed to parse response: %v", err)
+	}
+
+	// JoinGroupResponse uses Generation, not GenerationID
+	if resp.Generation != 1 {
+		t.Errorf("Expected generation 1, got %d", resp.Generation)
+	}
+
+	// Response gives Partitions array directly (for the subscribed topic)
+	// Single consumer should get all 3 partitions
+	if len(resp.Partitions) != 3 {
+		t.Errorf("Expected 3 partition assignments, got %d", len(resp.Partitions))
+	}
+
+	// Should have a MemberID assigned
+	if resp.MemberID == "" {
+		t.Error("Expected member_id to be assigned")
+	}
+}
+
+// TestConsumerGroupRebalance tests that adding consumers triggers rebalance.
+func TestConsumerGroupRebalance(t *testing.T) {
+	server, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	// Create topic
+	rec := doRequest(server, http.MethodPost, "/topics", CreateTopicRequest{Name: "orders", NumPartitions: 4})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("Failed to create topic: %s", rec.Body.String())
+	}
+
+	// First consumer joins
+	joinReq := JoinGroupRequest{
+		ClientID: "consumer-1",
+		Topics:   []string{"orders"},
+	}
+	rec = doRequest(server, http.MethodPost, "/groups/order-processors/join", joinReq)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Consumer 1 join failed: %s", rec.Body.String())
+	}
+
+	var resp1 JoinGroupResponse
+	json.Unmarshal(rec.Body.Bytes(), &resp1)
+
+	// Consumer 1 should have all 4 partitions initially
+	if len(resp1.Partitions) != 4 {
+		t.Errorf("Expected consumer 1 to have 4 partitions, got %d", len(resp1.Partitions))
+	}
+
+	// Second consumer joins - triggers rebalance
+	joinReq2 := JoinGroupRequest{
+		ClientID: "consumer-2",
+		Topics:   []string{"orders"},
+	}
+	rec = doRequest(server, http.MethodPost, "/groups/order-processors/join", joinReq2)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Consumer 2 join failed: %s", rec.Body.String())
+	}
+
+	var resp2 JoinGroupResponse
+	json.Unmarshal(rec.Body.Bytes(), &resp2)
+
+	// Generation should increase due to rebalance
+	if resp2.Generation <= resp1.Generation {
+		t.Errorf("Expected generation to increase after rebalance")
+	}
+
+	// Consumer 2 should have ~2 partitions (range assignment)
+	if len(resp2.Partitions) != 2 {
+		t.Errorf("Expected consumer 2 to have 2 partitions, got %d", len(resp2.Partitions))
+	}
+}
+
+// TestHeartbeat tests POST /groups/{group}/heartbeat.
+func TestHeartbeat(t *testing.T) {
+	server, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	// Create topic and join group
+	doRequest(server, http.MethodPost, "/topics", CreateTopicRequest{Name: "orders", NumPartitions: 2})
+
+	joinReq := JoinGroupRequest{
+		ClientID: "consumer-1",
+		Topics:   []string{"orders"},
+	}
+	rec := doRequest(server, http.MethodPost, "/groups/order-processors/join", joinReq)
+	var joinResp JoinGroupResponse
+	json.Unmarshal(rec.Body.Bytes(), &joinResp)
+
+	// Send heartbeat - uses MemberID and Generation
+	hbReq := HeartbeatRequest{
+		MemberID:   joinResp.MemberID,
+		Generation: joinResp.Generation,
+	}
+	rec = doRequest(server, http.MethodPost, "/groups/order-processors/heartbeat", hbReq)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("Expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHeartbeatWrongGeneration tests that stale heartbeats are rejected.
+func TestHeartbeatWrongGeneration(t *testing.T) {
+	server, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	// Create topic and join group
+	doRequest(server, http.MethodPost, "/topics", CreateTopicRequest{Name: "orders", NumPartitions: 2})
+
+	joinReq := JoinGroupRequest{
+		ClientID: "consumer-1",
+		Topics:   []string{"orders"},
+	}
+	rec := doRequest(server, http.MethodPost, "/groups/order-processors/join", joinReq)
+	var joinResp JoinGroupResponse
+	json.Unmarshal(rec.Body.Bytes(), &joinResp)
+
+	// Send heartbeat with wrong generation
+	hbReq := HeartbeatRequest{
+		MemberID:   joinResp.MemberID,
+		Generation: joinResp.Generation + 100, // Wrong generation
+	}
+	rec = doRequest(server, http.MethodPost, "/groups/order-processors/heartbeat", hbReq)
+
+	// Should be rejected
+	if rec.Code != http.StatusConflict {
+		t.Errorf("Expected status 409 (conflict), got %d", rec.Code)
+	}
+}
+
+// TestLeaveGroup tests POST /groups/{group}/leave.
+func TestLeaveGroup(t *testing.T) {
+	server, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	// Create topic and join group
+	doRequest(server, http.MethodPost, "/topics", CreateTopicRequest{Name: "orders", NumPartitions: 2})
+
+	joinReq := JoinGroupRequest{
+		ClientID: "consumer-1",
+		Topics:   []string{"orders"},
+	}
+	rec := doRequest(server, http.MethodPost, "/groups/order-processors/join", joinReq)
+	var joinResp JoinGroupResponse
+	json.Unmarshal(rec.Body.Bytes(), &joinResp)
+
+	// Leave group - uses MemberID
+	leaveReq := LeaveGroupRequest{
+		MemberID: joinResp.MemberID,
+	}
+	rec = doRequest(server, http.MethodPost, "/groups/order-processors/leave", leaveReq)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("Expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify group details show no members
+	rec = doRequest(server, http.MethodGet, "/groups/order-processors", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Failed to get group details: %s", rec.Body.String())
+	}
+
+	var groupInfo map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &groupInfo)
+
+	members := groupInfo["members"].([]interface{})
+	if len(members) != 0 {
+		t.Errorf("Expected 0 members after leave, got %d", len(members))
+	}
+}
+
+// TestCommitOffsets tests POST /groups/{group}/offsets.
+func TestCommitOffsets(t *testing.T) {
+	server, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	// Create topic and join group
+	doRequest(server, http.MethodPost, "/topics", CreateTopicRequest{Name: "orders", NumPartitions: 2})
+
+	joinReq := JoinGroupRequest{
+		ClientID: "consumer-1",
+		Topics:   []string{"orders"},
+	}
+	rec := doRequest(server, http.MethodPost, "/groups/order-processors/join", joinReq)
+	var joinResp JoinGroupResponse
+	json.Unmarshal(rec.Body.Bytes(), &joinResp)
+
+	// Commit offsets - uses MemberID and Generation, with string partition keys
+	commitReq := CommitOffsetsRequest{
+		MemberID:   joinResp.MemberID,
+		Generation: joinResp.Generation,
+		Offsets: map[string]map[string]int64{
+			"orders": {
+				"0": 100,
+				"1": 50,
+			},
+		},
+	}
+	rec = doRequest(server, http.MethodPost, "/groups/order-processors/offsets", commitReq)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("Expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestGetOffsets tests GET /groups/{group}/offsets.
+func TestGetOffsets(t *testing.T) {
+	server, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	// Create topic and join group
+	doRequest(server, http.MethodPost, "/topics", CreateTopicRequest{Name: "orders", NumPartitions: 2})
+
+	joinReq := JoinGroupRequest{
+		ClientID: "consumer-1",
+		Topics:   []string{"orders"},
+	}
+	rec := doRequest(server, http.MethodPost, "/groups/order-processors/join", joinReq)
+	var joinResp JoinGroupResponse
+	json.Unmarshal(rec.Body.Bytes(), &joinResp)
+
+	// Commit some offsets
+	commitReq := CommitOffsetsRequest{
+		MemberID:   joinResp.MemberID,
+		Generation: joinResp.Generation,
+		Offsets: map[string]map[string]int64{
+			"orders": {"0": 100, "1": 50},
+		},
+	}
+	doRequest(server, http.MethodPost, "/groups/order-processors/offsets", commitReq)
+
+	// Fetch offsets
+	rec = doRequest(server, http.MethodGet, "/groups/order-processors/offsets?topic=orders", nil)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+
+	// Response uses "topics" key, not "offsets"
+	topics, ok := resp["topics"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected topics in response, got: %v", resp)
+	}
+
+	orderOffsets, ok := topics["orders"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected orders topic in response, got: %v", topics)
+	}
+
+	// Note: JSON unmarshals numbers as float64
+	if int64(orderOffsets["0"].(float64)) != 100 {
+		t.Errorf("Expected partition 0 offset 100, got %v", orderOffsets["0"])
+	}
+	if int64(orderOffsets["1"].(float64)) != 50 {
+		t.Errorf("Expected partition 1 offset 50, got %v", orderOffsets["1"])
+	}
+}
+
+// TestListGroups tests GET /groups.
+func TestListGroups(t *testing.T) {
+	server, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	// Create topic
+	doRequest(server, http.MethodPost, "/topics", CreateTopicRequest{Name: "orders", NumPartitions: 2})
+
+	// Create multiple groups
+	for _, groupID := range []string{"group-a", "group-b", "group-c"} {
+		joinReq := JoinGroupRequest{
+			ClientID: "consumer-1",
+			Topics:   []string{"orders"},
+		}
+		doRequest(server, http.MethodPost, fmt.Sprintf("/groups/%s/join", groupID), joinReq)
+	}
+
+	// List groups
+	rec := doRequest(server, http.MethodGet, "/groups", nil)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+
+	groups := resp["groups"].([]interface{})
+	if len(groups) != 3 {
+		t.Errorf("Expected 3 groups, got %d", len(groups))
+	}
+}
+
+// TestGetGroupDetails tests GET /groups/{group}.
+func TestGetGroupDetails(t *testing.T) {
+	server, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	// Create topic and join group with multiple consumers
+	doRequest(server, http.MethodPost, "/topics", CreateTopicRequest{Name: "orders", NumPartitions: 4})
+
+	// Add two consumers
+	for _, clientID := range []string{"consumer-1", "consumer-2"} {
+		joinReq := JoinGroupRequest{
+			ClientID: clientID,
+			Topics:   []string{"orders"},
+		}
+		doRequest(server, http.MethodPost, "/groups/order-processors/join", joinReq)
+	}
+
+	// Get group details
+	rec := doRequest(server, http.MethodGet, "/groups/order-processors", nil)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+
+	// Response uses "id" not "group_id"
+	if resp["id"] != "order-processors" {
+		t.Errorf("Expected id 'order-processors', got %v", resp["id"])
+	}
+
+	members := resp["members"].([]interface{})
+	if len(members) != 2 {
+		t.Errorf("Expected 2 members, got %d", len(members))
+	}
+}
+
+// TestDeleteGroup tests DELETE /groups/{group}.
+func TestDeleteGroup(t *testing.T) {
+	server, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	// Create topic and join group
+	doRequest(server, http.MethodPost, "/topics", CreateTopicRequest{Name: "orders", NumPartitions: 2})
+
+	joinReq := JoinGroupRequest{
+		ClientID: "consumer-1",
+		Topics:   []string{"orders"},
+	}
+	doRequest(server, http.MethodPost, "/groups/order-processors/join", joinReq)
+
+	// Delete group
+	rec := doRequest(server, http.MethodDelete, "/groups/order-processors", nil)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("Expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify it's gone
+	rec = doRequest(server, http.MethodGet, "/groups/order-processors", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("Expected group to be deleted, got status %d", rec.Code)
+	}
+}
+
+// ============================================================================
+// SERVER LIFECYCLE TESTS
+// ============================================================================
 
 // TestServerStartStop tests server lifecycle.
 func TestServerStartStop(t *testing.T) {
