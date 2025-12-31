@@ -121,6 +121,13 @@ type Broker struct {
 	// Added in Milestone 3 for consumer group support
 	groupCoordinator *GroupCoordinator
 
+	// ackManager handles per-message acknowledgment (M4)
+	// Provides ACK/NACK/REJECT semantics on top of offset-based consumption
+	ackManager *AckManager
+
+	// reliabilityConfig holds M4 reliability settings
+	reliabilityConfig ReliabilityConfig
+
 	// mu protects topics map
 	mu sync.RWMutex
 
@@ -164,14 +171,22 @@ func NewBroker(config BrokerConfig) (*Broker, error) {
 		return nil, fmt.Errorf("failed to create group coordinator: %w", err)
 	}
 
+	// Initialize reliability configuration (M4)
+	reliabilityConfig := DefaultReliabilityConfig()
+
 	broker := &Broker{
-		config:           config,
-		topics:           make(map[string]*Topic),
-		logsDir:          logsDir,
-		groupCoordinator: groupCoordinator,
-		logger:           logger,
-		startedAt:        time.Now(),
+		config:            config,
+		topics:            make(map[string]*Topic),
+		logsDir:           logsDir,
+		groupCoordinator:  groupCoordinator,
+		reliabilityConfig: reliabilityConfig,
+		logger:            logger,
+		startedAt:         time.Now(),
 	}
+
+	// Create ACK manager for per-message acknowledgment (M4)
+	// Must be created after broker struct exists (circular dependency)
+	broker.ackManager = NewAckManager(broker, reliabilityConfig)
 
 	// Discover and load existing topics
 	if err := broker.loadExistingTopics(); err != nil {
@@ -181,7 +196,10 @@ func NewBroker(config BrokerConfig) (*Broker, error) {
 	logger.Info("broker started",
 		"nodeID", config.NodeID,
 		"dataDir", config.DataDir,
-		"topics", len(broker.topics))
+		"topics", len(broker.topics),
+		"visibility_timeout_ms", reliabilityConfig.VisibilityTimeoutMs,
+		"max_retries", reliabilityConfig.MaxRetries,
+		"dlq_enabled", reliabilityConfig.DLQEnabled)
 
 	return broker, nil
 }
@@ -247,7 +265,14 @@ func (b *Broker) Close() error {
 
 	var errs []error
 
-	// Close group coordinator first (flushes pending offset commits)
+	// Close ACK manager first (stops visibility tracking, flushes retry queue)
+	if b.ackManager != nil {
+		if err := b.ackManager.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("ack manager: %w", err))
+		}
+	}
+
+	// Close group coordinator (flushes pending offset commits)
 	if b.groupCoordinator != nil {
 		if err := b.groupCoordinator.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("group coordinator: %w", err))
@@ -625,4 +650,190 @@ func (b *Broker) GroupCoordinator() *GroupCoordinator {
 // Uptime returns how long the broker has been running.
 func (b *Broker) Uptime() time.Duration {
 	return time.Since(b.startedAt)
+}
+
+// =============================================================================
+// MILESTONE 4: RELIABILITY LAYER API
+// =============================================================================
+//
+// These methods provide per-message acknowledgment (ACK/NACK/REJECT) on top
+// of the Kafka-style offset-based consumption model.
+//
+// FLOW COMPARISON:
+//
+//   KAFKA (offset-only):
+//   ┌────────┐  poll  ┌────────┐ process ┌────────┐ commit ┌────────┐
+//   │Consumer│───────►│Receives│────────►│Process │───────►│Commit  │
+//   │        │        │batch   │         │all     │        │offset  │
+//   └────────┘        └────────┘         └────────┘        └────────┘
+//
+//   GOQUEUE (per-message ACK):
+//   ┌────────┐  poll  ┌────────┐ process ┌────────┐ ack    ┌────────┐
+//   │Consumer│───────►│Receives│────────►│Process │───────►│ACK each│
+//   │        │        │+receipt│         │one msg │        │message │
+//   └────────┘        └────────┘         └────────┘        └────────┘
+//                                              │                │
+//                                              │ fail           │ offset
+//                                              ▼                │ advances
+//                                         ┌────────┐            │
+//                                         │NACK/   │────────────┘
+//                                         │Reject  │
+//                                         └────────┘
+//
+// =============================================================================
+
+// AckManager returns the broker's ACK manager for per-message acknowledgment.
+// Used by the API layer for ACK/NACK/REJECT operations.
+func (b *Broker) AckManager() *AckManager {
+	return b.ackManager
+}
+
+// ReliabilityConfig returns the current reliability configuration.
+func (b *Broker) ReliabilityConfig() ReliabilityConfig {
+	return b.reliabilityConfig
+}
+
+// ConsumeWithReceipts reads messages and tracks them for per-message ACK.
+//
+// PARAMETERS:
+//   - topic: Topic name
+//   - partition: Partition number
+//   - fromOffset: Starting offset
+//   - maxMessages: Max messages to return
+//   - consumerID, groupID: Consumer identification for tracking
+//
+// RETURNS:
+//   - Messages with receipt handles attached
+//   - Error if read fails
+//
+// IMPORTANT:
+// Each returned message has a ReceiptHandle that MUST be used for ACK/NACK/REJECT.
+// Messages not ACKed within VisibilityTimeout will be redelivered.
+func (b *Broker) ConsumeWithReceipts(
+	topic string,
+	partition int,
+	fromOffset int64,
+	maxMessages int,
+	consumerID, groupID string,
+) ([]MessageWithReceipt, error) {
+	// First, get the raw messages using existing Consume method
+	messages, err := b.Consume(topic, partition, fromOffset, maxMessages)
+	if err != nil {
+		return nil, err
+	}
+
+	// Track each message for per-message ACK and generate receipt handles
+	results := make([]MessageWithReceipt, 0, len(messages))
+	visibilityTimeout := time.Duration(b.reliabilityConfig.VisibilityTimeoutMs) * time.Millisecond
+
+	for _, msg := range messages {
+		// Track delivery and get receipt handle
+		receiptHandle, err := b.ackManager.TrackDelivery(&msg, consumerID, groupID, visibilityTimeout)
+		if err != nil {
+			// Backpressure or tracking error - stop here
+			b.logger.Warn("failed to track delivery",
+				"topic", topic,
+				"partition", partition,
+				"offset", msg.Offset,
+				"error", err)
+			break
+		}
+
+		results = append(results, MessageWithReceipt{
+			Message:       msg,
+			ReceiptHandle: receiptHandle,
+		})
+	}
+
+	return results, nil
+}
+
+// MessageWithReceipt extends Message with a receipt handle for ACK/NACK/REJECT.
+type MessageWithReceipt struct {
+	Message
+	ReceiptHandle string
+}
+
+// Ack acknowledges successful processing of a message.
+//
+// PARAMETERS:
+//   - receiptHandle: The receipt handle from ConsumeWithReceipts
+//
+// SEMANTICS:
+//   - Message is considered fully processed
+//   - Will not be redelivered
+//   - Committed offset may advance (if contiguous)
+func (b *Broker) Ack(receiptHandle string) (*AckResult, error) {
+	return b.ackManager.Ack(receiptHandle)
+}
+
+// Nack indicates processing failed and message should be retried.
+//
+// PARAMETERS:
+//   - receiptHandle: The receipt handle from ConsumeWithReceipts
+//   - reason: Why the message failed (for logging/debugging)
+//
+// SEMANTICS:
+//   - Message will be redelivered after exponential backoff
+//   - Each NACK increments delivery count
+//   - After MaxRetries, message goes to DLQ
+func (b *Broker) Nack(receiptHandle, reason string) (*AckResult, error) {
+	return b.ackManager.Nack(receiptHandle, reason)
+}
+
+// Reject sends a message directly to the dead letter queue.
+//
+// PARAMETERS:
+//   - receiptHandle: The receipt handle from ConsumeWithReceipts
+//   - reason: Why the message was rejected
+//
+// SEMANTICS:
+//   - Message is considered "poison" (can never succeed)
+//   - Immediately routed to DLQ (no retry)
+//
+// USE CASES:
+//   - Message format is invalid
+//   - Business logic determines message is unprocessable
+func (b *Broker) Reject(receiptHandle, reason string) (*AckResult, error) {
+	return b.ackManager.Reject(receiptHandle, reason)
+}
+
+// ExtendVisibility extends the visibility timeout for a message.
+//
+// PARAMETERS:
+//   - receiptHandle: The receipt handle from ConsumeWithReceipts
+//   - extension: Additional time to add
+//
+// USE CASE:
+//   - Processing takes longer than expected
+//   - Prevents timeout while still working on message
+//
+// EXAMPLE:
+//
+//	// Processing will take longer than 30s visibility timeout
+//	if estimatedTime > 25*time.Second {
+//	    broker.ExtendVisibility(receipt, 30*time.Second)
+//	}
+func (b *Broker) ExtendVisibility(receiptHandle string, extension time.Duration) (time.Time, error) {
+	return b.ackManager.ExtendVisibility(receiptHandle, extension)
+}
+
+// GetConsumerLag returns lag information for a consumer.
+func (b *Broker) GetConsumerLag(consumerID, groupID, topic string, partition int) (*ConsumerLag, error) {
+	return b.ackManager.GetConsumerLag(consumerID, groupID, topic, partition)
+}
+
+// ReliabilityStats returns combined reliability layer statistics.
+type ReliabilityStats struct {
+	AckManager AckManagerStats
+	Visibility VisibilityStats
+	DLQ        DLQStats
+}
+
+func (b *Broker) ReliabilityStats() ReliabilityStats {
+	return ReliabilityStats{
+		AckManager: b.ackManager.Stats(),
+		Visibility: b.ackManager.visibilityTracker.Stats(),
+		DLQ:        b.ackManager.dlqRouter.Stats(),
+	}
 }
