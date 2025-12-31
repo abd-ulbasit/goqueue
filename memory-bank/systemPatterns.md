@@ -260,6 +260,132 @@ for {
 }
 ```
 
+### 9. Reliability Layer - ACKs, Visibility & DLQ (M4)
+
+The reliability layer provides per-message acknowledgment semantics on top of the Kafka-style offset-based model.
+
+```
+HYBRID ACK MODEL:
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                  │
+│  KAFKA-STYLE (offset only):                                     │
+│  ┌────────────────────────────────────────────────────────────┐ │
+│  │ Offset:  0   1   2   3   4   5   6   7   8   9             │ │
+│  │ Status:  ✓   ✓   ✓   ✓   ✓   │                             │ │
+│  │                              │                             │ │
+│  │                         committed=5                        │ │
+│  │                                                            │ │
+│  │ PROBLEM: If msg 3 fails, can't skip. Must reprocess 3,4,5  │ │
+│  └────────────────────────────────────────────────────────────┘ │
+│                                                                  │
+│  GOQUEUE HYBRID:                                                │
+│  ┌────────────────────────────────────────────────────────────┐ │
+│  │ Offset:  0   1   2   3   4   5   6   7   8   9             │ │
+│  │ Status:  ✓   ✓   ✓   ✗   ✓   ✓   ?   ?   ?   ?             │ │
+│  │                      │                                     │ │
+│  │              msg 3 in retry queue                          │ │
+│  │              (will be redelivered)                         │ │
+│  │                                                            │ │
+│  │ Committed offset = 2 (last contiguous ACKed)               │ │
+│  │ On crash: Resume from offset 3 (natural recovery)          │ │
+│  └────────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### Receipt Handle Format
+```
+{topic}:{partition}:{offset}:{deliveryCount}:{nonce}
+
+Example: "orders:0:42:1:a1b2c3d4e5f67890"
+
+WHY THIS FORMAT?
+- Parseable: Extract message location without database lookup
+- Debuggable: Human-readable for troubleshooting
+- Unique: Nonce prevents replay attacks (new per delivery)
+```
+
+#### Visibility Tracker (Min-Heap Implementation)
+```go
+// Min-heap orders by deadline (earliest expiring at top)
+type visibilityHeap []*visibilityItem
+
+type visibilityItem struct {
+    receiptHandle string
+    deadline      time.Time    // When visibility expires
+    message       *InFlightMessage
+    index         int          // Heap index for O(log n) updates
+}
+
+// Complexity:
+// - Track:    O(log n) heap push
+// - Untrack:  O(log n) heap remove
+// - Peek:     O(1) check earliest deadline
+// - Extend:   O(log n) update + reheap
+```
+
+#### ACK Semantics
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ ACK (Success)                                                   │
+│ ─────────────                                                   │
+│ • Message is fully processed                                    │
+│ • Will not be redelivered                                       │
+│ • Committed offset may advance (if contiguous)                  │
+│ • Use: Normal successful processing                             │
+├─────────────────────────────────────────────────────────────────┤
+│ NACK (Transient Failure)                                        │
+│ ────────────────────────                                        │
+│ • Processing failed, but may succeed on retry                   │
+│ • Message scheduled for retry after backoff                     │
+│ • DeliveryCount incremented                                     │
+│ • After MaxRetries → automatic DLQ                              │
+│ • Use: Database timeout, network error, temporary failure       │
+├─────────────────────────────────────────────────────────────────┤
+│ REJECT (Permanent Failure)                                      │
+│ ─────────────────────────                                       │
+│ • Message is "poison" (can never succeed)                       │
+│ • Immediately routed to DLQ                                     │
+│ • No retry attempts                                             │
+│ • Use: Invalid format, schema error, business rule violation    │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### Exponential Backoff
+```go
+// Backoff calculation
+backoff := baseMs * pow(multiplier, attempt-1)
+if backoff > maxMs {
+    backoff = maxMs
+}
+
+// With base=1s, multiplier=2, max=60s:
+// Attempt 1: 1s
+// Attempt 2: 2s
+// Attempt 3: 4s
+// Attempt 4: 8s
+// Attempt 5: 16s
+// Attempt 6: 32s
+// Attempt 7: 60s (capped)
+```
+
+#### Dead Letter Queue Pattern
+```
+┌─────────────────┐       Route        ┌─────────────────┐
+│   orders        │ ─────────────────► │   orders.dlq    │
+└─────────────────┘                    └─────────────────┘
+                                              │
+DLQ Message Contains:                         │
+├─ Original message key/value                 │
+├─ Original topic/partition/offset            │
+├─ Delivery attempts count                    │
+├─ First delivery timestamp                   │
+├─ Last delivery timestamp                    │
+├─ Last consumer ID                           │
+├─ DLQ reason (max_retries/rejected)         │
+├─ Last error message                         │
+└─ DLQ timestamp                              │
+```
+
 ## Key Technical Decisions
 
 ### Decision 1: Embedded vs External Coordination

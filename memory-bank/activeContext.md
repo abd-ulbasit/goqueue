@@ -2,31 +2,52 @@
 
 ## Current Focus
 
-**Phase**: 1 - Foundations
-**Milestone**: 3 - Consumer Groups & Offset Management
+**Phase**: 1 - Foundations ✅ COMPLETE
+**Milestone**: 4 - Reliability: ACKs, Visibility & DLQ
 **Status**: ✅ COMPLETE
 
 ## What I'm Working On
 
-### Just Completed (M3)
-- ✅ Consumer group membership with heartbeat-based sessions
-- ✅ Range partition assignment strategy
-- ✅ Generation ID for zombie consumer protection
-- ✅ File-based offset storage with JSON persistence
-- ✅ Auto-commit support (5s interval)
-- ✅ Group coordinator managing all consumer groups
-- ✅ Session monitoring with 30s timeout
-- ✅ Chi router HTTP API with middleware
-- ✅ Long-polling for message consumption
-- ✅ Comprehensive test suite (24 API tests)
+### Just Completed (M4 - Reliability)
+- ✅ Hybrid ACK model (per-message + offset-based)
+- ✅ Visibility timeout with min-heap tracking
+- ✅ Receipt handles with topic:partition:offset:count:nonce format
+- ✅ Dead Letter Queue with auto-creation and metadata preservation
+- ✅ Retry with exponential backoff (1s base, 2x multiplier, 60s max)
+- ✅ ACK/NACK/Reject semantics
+- ✅ HTTP API endpoints for message acknowledgment
+- ✅ Comprehensive test suite for visibility tracker
 
-### Next Steps (Milestone 4 - Reliability)
-1. Per-message acknowledgment (ack/nack)
-2. Visibility timeout for in-flight messages
-3. Dead letter queue (DLQ) for poison messages
-4. Retry policies (exponential backoff)
+### Next Steps (Milestone 5 - Delay Messages)
+1. Timer wheel implementation for scheduled delivery
+2. Native delay message support (schedule for future)
+3. Delay queue integration with consumer groups
 
 ## Recent Changes
+
+### Session 4 - Milestone 4 Implementation
+**Completed**:
+- Created reliability layer
+  - `inflight.go` - InFlightMessage, ReceiptHandle, DLQMessage, ReliabilityConfig
+  - `visibility_tracker.go` - Min-heap based timeout tracking with background checker
+  - `ack_manager.go` - Per-message ACK state, consumer state tracking, retry queue
+  - `dlq.go` - DLQ routing with auto-topic creation, metadata preservation
+- Updated broker integration
+  - Added `AckManager()`, `ReliabilityConfig()` accessors
+  - Added `ConsumeWithReceipts()` for tracked consumption
+  - Added `Ack()`, `Nack()`, `Reject()`, `ExtendVisibility()` methods
+  - Added `ReliabilityStats()` for observability
+- Implemented HTTP API endpoints
+  - `POST /messages/ack` - Acknowledge successful processing
+  - `POST /messages/nack` - Signal retry needed (transient failure)
+  - `POST /messages/reject` - Send to DLQ (poison message)
+  - `POST /messages/visibility` - Extend visibility timeout
+  - `GET /reliability/stats` - Combined reliability layer stats
+- Technical decisions
+  - Hybrid ACK model: Best of SQS (per-message) + Kafka (offset)
+  - 30s default visibility timeout (SQS default)
+  - 3 max retries before DLQ
+  - Receipt handles encode location for debuggability
 
 ### Session 3 - Milestone 3 Implementation
 **Completed**:
