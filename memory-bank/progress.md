@@ -3,17 +3,17 @@
 ## Overall Status
 
 **Phase**: 1 of 4
-**Milestones**: 3/18 complete
-**Tests**: 84 passing (storage: 42, broker: 18, api: 24)
+**Milestones**: 4/18 complete
+**Tests**: 92+ passing (storage: 42, broker: 26+, api: 24)
 **Started**: Session 1
 
 ## Phase Progress
 
-### Phase 1: Foundations (3/4)
+### Phase 1: Foundations (4/4) ✅
 - [x] Milestone 1: Storage Engine & Append-Only Log ✅
 - [x] Milestone 2: Topics, Partitions & Producer API ✅
 - [x] Milestone 3: Consumer Groups & Offset Management ✅
-- [ ] Milestone 4: Reliability - ACKs, Visibility & DLQ
+- [x] Milestone 4: Reliability - ACKs, Visibility & DLQ ✅
 
 ### Phase 2: Advanced Features (0/5)
 - [ ] Milestone 5: Native Delay & Scheduled Messages ⭐
@@ -71,6 +71,30 @@
 - **Chi router HTTP API** with middleware logging
 - **Long-polling** for message consumption (30s default timeout)
 
+### Milestone 4 - Reliability: ACKs, Visibility & DLQ ✅
+- **Hybrid ACK model** - Per-message ACK combined with offset-based commits (best of SQS + Kafka)
+- **Visibility timeout** - 30s default, configurable per-message, with heap-based tracking
+- **Receipt handles** - Unique per-delivery (`topic:partition:offset:deliveryCount:nonce`)
+- **Dead Letter Queue** - Per-topic DLQ with `.dlq` suffix, auto-creation, metadata preservation
+- **Retry with exponential backoff** - Base 1s, multiplier 2x, max 60s
+- **Max retries** - 3 attempts before DLQ routing
+- **Extend visibility API** - For long-running processing tasks
+- **ACK/NACK/Reject semantics**:
+  - ACK: Success, message deleted, offset may advance
+  - NACK: Transient failure, retry with backoff
+  - Reject: Permanent failure, immediate DLQ
+- **HTTP API endpoints**:
+  - `POST /messages/ack` - Acknowledge successful processing
+  - `POST /messages/nack` - Signal retry needed
+  - `POST /messages/reject` - Send to DLQ (poison message)
+  - `POST /messages/visibility` - Extend visibility timeout
+  - `GET /reliability/stats` - ACK manager, visibility tracker, DLQ stats
+- **Files created**:
+  - `internal/broker/inflight.go` - InFlightMessage, ReceiptHandle, DLQMessage, ReliabilityConfig
+  - `internal/broker/visibility_tracker.go` - Min-heap based timeout tracking
+  - `internal/broker/ack_manager.go` - Per-message ACK state, retry queue
+  - `internal/broker/dlq.go` - DLQ routing with auto-topic creation
+
 ### Technical Decisions Made
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
@@ -94,6 +118,13 @@
 | Auto-commit interval | 5s | Kafka default |
 | MemberID format | clientID-randomHex | Unique, traceable |
 | Poll timeout | 30s | Standard long-poll duration |
+| ACK model | Hybrid (per-msg + offset) | Best of SQS (per-msg) + Kafka (offset) |
+| Visibility timeout | 30s | SQS default, good for most workloads |
+| Max retries | 3 | Industry standard before DLQ |
+| Backoff strategy | Exponential (1s base, 2x) | Standard retry pattern |
+| DLQ naming | `{topic}.dlq` | Clear, discoverable |
+| Receipt handle format | `topic:partition:offset:deliveryCount:nonce` | Parseable, debuggable |
+| Visibility heap | Min-heap | O(1) peek, O(log n) operations |
 
 ## What's Left to Build
 
@@ -106,9 +137,9 @@
 - [x] HTTP API ✅
 - [x] Consumer groups ✅ (M3)
 - [x] Offset management ✅ (M3)
-- [ ] Per-message ACK (Milestone 4)
-- [ ] Visibility timeout (Milestone 4)
-- [ ] Dead letter queue (Milestone 4)
+- [x] Per-message ACK ✅ (M4)
+- [x] Visibility timeout ✅ (M4)
+- [x] Dead letter queue ✅ (M4)
 
 ### Differentiators (Key Features) ⭐
 - [ ] Native delay messages (timer wheel)
@@ -132,6 +163,13 @@
 *None currently*
 
 ## Lessons Learned
+
+### Session 4 - Milestone 4
+1. **Hybrid ACK model advantage** - Combining per-message ACK with offset commits gives both fine-grained control (retry single message) AND efficient progress tracking (offset-based recovery after crash).
+2. **Min-heap for visibility tracking** - O(1) to check next expiring message, O(log n) for add/remove. Perfect fit for timeout-based tracking with potentially thousands of in-flight messages.
+3. **Receipt handles encode location** - Including topic:partition:offset in receipt handle allows routing without database lookup. The nonce prevents replay attacks.
+4. **DLQ auto-creation is essential** - Can't require users to pre-create DLQ topics. Auto-create with same partition count as original, with `.dlq` suffix for discoverability.
+5. **Backpressure via MaxInFlightPerConsumer** - Without limits, a fast producer can exhaust memory. Default 1000 in-flight per consumer provides safe backpressure.
 
 ### Session 3 - Milestone 3
 1. **Chi router URL params** - chi uses `chi.URLParam(r, "name")` to get URL params, not explicit arguments. Test code must call through `router.ServeHTTP()` not individual handlers.
