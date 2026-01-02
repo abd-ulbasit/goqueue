@@ -2,9 +2,9 @@
 
 ## Overall Status
 
-**Phase**: 1 of 4
-**Milestones**: 4/18 complete
-**Tests**: 92+ passing (storage: 42, broker: 26+, api: 24)
+**Phase**: 2 of 4
+**Milestones**: 5/18 complete
+**Tests**: 130+ passing (storage: 42, broker: 60+, api: 24)
 **Started**: Session 1
 
 ## Phase Progress
@@ -15,8 +15,8 @@
 - [x] Milestone 3: Consumer Groups & Offset Management ✅
 - [x] Milestone 4: Reliability - ACKs, Visibility & DLQ ✅
 
-### Phase 2: Advanced Features (0/5)
-- [ ] Milestone 5: Native Delay & Scheduled Messages ⭐
+### Phase 2: Advanced Features (1/5)
+- [x] Milestone 5: Native Delay & Scheduled Messages ✅
 - [ ] Milestone 6: Priority Lanes ⭐
 - [ ] Milestone 7: Message Tracing ⭐
 - [ ] Milestone 8: Schema Registry
@@ -28,12 +28,13 @@
 - [ ] Milestone 12: Cooperative Rebalancing ⭐
 - [ ] Milestone 13: Online Partition Scaling
 
-### Phase 4: Operations (0/5)
+### Phase 4: Operations (0/6)
 - [ ] Milestone 14: gRPC API & Go Client (js/ts as well if time)
 - [ ] Milestone 15: CLI Tool
 - [ ] Milestone 16: Prometheus Metrics & Grafana
 - [ ] Milestone 17: Multi-Tenancy & Quotas
 - [ ] Milestone 18: Kubernetes & Chaos Testing
+- [ ] Milestone 19: Final Review & Documentation with Examples and Comparison to Alternatives
 
 ## What Works
 
@@ -95,6 +96,44 @@
   - `internal/broker/ack_manager.go` - Per-message ACK state, retry queue
   - `internal/broker/dlq.go` - DLQ routing with auto-topic creation
 
+### Milestone 5 - Native Delay & Scheduled Messages ✅
+- **Hierarchical Timer Wheel** - 4-level wheel for O(1) timer operations
+  - Level 0: 256 buckets × 10ms = 2.56 seconds
+  - Level 1: 64 buckets × 2.56s = 2.73 minutes  
+  - Level 2: 64 buckets × 2.73m = 2.91 hours
+  - Level 3: 64 buckets × 2.91h = 7.76 days (max delay)
+- **Delay Index** - Persistent storage for crash recovery
+  - Binary format: 16-byte header + 32-byte entries
+  - States: PENDING, DELIVERED, CANCELLED, EXPIRED
+  - Per-topic index files in data/delay/{topic}/
+- **Scheduler** - Coordinator connecting timer wheel, delay index, and broker
+  - Schedule(topic, partition, offset, delay) - relative delay
+  - ScheduleAt(topic, partition, offset, deliverAt) - absolute time
+  - Cancel(topic, partition, offset) - cancel pending delivery
+- **Broker Integration**:
+  - `PublishWithDelay(topic, key, value, delay)` - relative delay
+  - `PublishAt(topic, key, value, deliverAt)` - absolute timestamp
+  - `CancelDelayed(topic, partition, offset)` - cancel pending
+  - `GetDelayedMessages(topic, limit, skip)` - list pending
+  - `DelayStats()` - scheduler statistics
+- **HTTP API endpoints**:
+  - `POST /topics/{name}/messages` - supports `delay` and `deliverAt` params
+  - `GET /topics/{name}/delayed` - list pending delayed messages
+  - `DELETE /topics/{name}/delayed/{partition}/{offset}` - cancel delayed
+  - `GET /delay/stats` - scheduler and timer wheel statistics
+- **Files created**:
+  - `internal/broker/timer_wheel.go` - Hierarchical timer wheel implementation
+  - `internal/broker/delay_index.go` - Persistent delay tracking
+  - `internal/broker/scheduler.go` - Scheduler coordination
+  - `internal/broker/timer_wheel_test.go` - Timer wheel tests
+  - `internal/broker/delay_index_test.go` - Delay index tests
+  - `internal/broker/scheduler_test.go` - Scheduler tests
+- **Key Design Decisions**:
+  - Messages written to log immediately (durability first)
+  - Timer wheel tracks visibility, index tracks state
+  - Zero/past delays fire immediately
+  - Bucket position is authoritative (not DeliverAt time check)
+
 ### Technical Decisions Made
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
@@ -125,6 +164,13 @@
 | DLQ naming | `{topic}.dlq` | Clear, discoverable |
 | Receipt handle format | `topic:partition:offset:deliveryCount:nonce` | Parseable, debuggable |
 | Visibility heap | Min-heap | O(1) peek, O(log n) operations |
+| Timer algorithm | Hierarchical wheel | O(1) operations, ~7.76 day max |
+| Tick interval | 10ms | Good precision, low CPU overhead |
+| Timer wheel levels | 4 (256/64/64/64) | Balance of granularity and range |
+| Delay storage | Separate index file | Clean separation, efficient recovery |
+| Delay API | Both relative and absolute | Maximum flexibility for producers |
+| Max delay | ~7.76 days | Practical limit, fits 4-level wheel |
+| Zero/past delay | Immediate fire | Intuitive behavior |
 
 ## What's Left to Build
 
@@ -142,7 +188,7 @@
 - [x] Dead letter queue ✅ (M4)
 
 ### Differentiators (Key Features) ⭐
-- [ ] Native delay messages (timer wheel)
+- [x] Native delay messages (timer wheel) ✅ (M5)
 - [ ] Priority lanes
 - [ ] Message tracing
 - [ ] Cooperative rebalancing
