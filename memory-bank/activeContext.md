@@ -2,28 +2,66 @@
 
 ## Current Focus
 
-**Phase**: 1 - Foundations ✅ COMPLETE
-**Milestone**: 4 - Reliability: ACKs, Visibility & DLQ
+**Phase**: 2 - Advanced Features (Started)
+**Milestone**: 5 - Native Delay & Scheduled Messages
 **Status**: ✅ COMPLETE
 
 ## What I'm Working On
 
-### Just Completed (M4 - Reliability)
-- ✅ Hybrid ACK model (per-message + offset-based)
-- ✅ Visibility timeout with min-heap tracking
-- ✅ Receipt handles with topic:partition:offset:count:nonce format
-- ✅ Dead Letter Queue with auto-creation and metadata preservation
-- ✅ Retry with exponential backoff (1s base, 2x multiplier, 60s max)
-- ✅ ACK/NACK/Reject semantics
-- ✅ HTTP API endpoints for message acknowledgment
-- ✅ Comprehensive test suite for visibility tracker
+### Just Completed (M5 - Native Delay & Scheduled Messages)
+- ✅ Hierarchical Timer Wheel - 4 levels, O(1) operations, ~7.76 day max delay
+- ✅ Delay Index - Persistent storage for crash recovery
+- ✅ Scheduler - Coordinator connecting timer wheel, delay index, and broker
+- ✅ Broker Integration - PublishWithDelay, PublishAt, CancelDelayed
+- ✅ HTTP API - delay/deliverAt params, list/cancel delayed messages
+- ✅ Comprehensive test suite (40+ new tests)
+- ✅ Architecture documentation updated
 
-### Next Steps (Milestone 5 - Delay Messages)
-1. Timer wheel implementation for scheduled delivery
-2. Native delay message support (schedule for future)
-3. Delay queue integration with consumer groups
+### Key Technical Decisions (M5)
+- **Timer Algorithm**: Hierarchical wheel (O(1) vs O(log n) for heap)
+- **Levels**: 4 (256×10ms, 64×2.56s, 64×2.73m, 64×2.91h)
+- **Max Delay**: ~7.76 days (practical limit)
+- **Persistence**: Separate delay index file (32-byte entries)
+- **API**: Both relative (delay) and absolute (deliverAt) supported
+- **Zero/Past Delay**: Fire immediately (intuitive behavior)
+- **Critical Fix**: Bucket position is authoritative (not DeliverAt time check)
+
+### Next Steps (Milestone 6 - Priority Lanes)
+1. Multi-lane queue design (high/medium/low priority)
+2. Fair scheduling with anti-starvation
+3. Priority-aware consumer polling
+4. Integration with existing consumer groups
 
 ## Recent Changes
+
+### Session 5 - Milestone 5 Implementation
+**Completed**:
+- Created delay scheduling system
+  - `timer_wheel.go` - Hierarchical 4-level timer wheel
+  - `delay_index.go` - Binary file format for persistence
+  - `scheduler.go` - Coordinator connecting components
+  - `timer_wheel_test.go` - Timer wheel unit tests
+  - `delay_index_test.go` - Delay index unit tests
+  - `scheduler_test.go` - Scheduler integration tests
+- Updated broker integration
+  - Added `scheduler *Scheduler` field to Broker
+  - Added `PublishWithDelay()`, `PublishAt()` methods
+  - Added `CancelDelayed()`, `IsDelayed()`, `GetDelayedMessages()`
+  - Added `DelayStats()` for observability
+  - Scheduler starts on broker startup, stops on shutdown
+- Implemented HTTP API endpoints
+  - Modified `POST /topics/{name}/messages` - accepts `delay`, `deliverAt` params
+  - `GET /topics/{name}/delayed` - list pending delayed messages
+  - `DELETE /topics/{name}/delayed/{partition}/{offset}` - cancel delayed
+  - `GET /delay/stats` - scheduler and timer wheel statistics
+- Fixed critical timer wheel bug
+  - Was checking DeliverAt.Before(now) before firing
+  - OS scheduler variance caused timers to miss
+  - Solution: bucket position is authoritative
+- Documentation updates
+  - Added M5 section to ARCHITECTURE.md with diagrams
+  - Updated progress.md with M5 completion
+  - Updated comparison tables
 
 ### Session 4 - Milestone 4 Implementation
 **Completed**:

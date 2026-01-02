@@ -677,6 +677,162 @@ Legend: W = Writes to, R = Reads from, - = No direct interaction
 
 ---
 
+## Delay Scheduler Architecture (Milestone 5)
+
+### Overview
+
+GoQueue provides native support for delayed and scheduled message delivery - a feature that Kafka lacks natively and SQS limits to 15 minutes. Our implementation supports delays up to 7+ days with millisecond precision.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│                           DELAY SCHEDULER (Milestone 5)                                 │
+│                                                                                         │
+│  PublishWithDelay(topic, key, value, delay=30s)                                         │
+│         │                                                                               │
+│         ▼                                                                               │
+│  ┌─────────────────────────────────────────────────────────────────────────────────┐    │
+│  │  1. WRITE TO LOG (immediate, durable)                                           │    │
+│  │     → Message persisted instantly                                               │    │
+│  │     → Returns: partition=2, offset=1234                                         │    │
+│  │     → If crash happens here, message is recovered on restart                    │    │
+│  └─────────────────────────────────────────────────────────────────────────────────┘    │
+│         │                                                                               │
+│         ▼                                                                               │
+│  ┌─────────────────────────────────────────────────────────────────────────────────┐    │
+│  │  2. REGISTER WITH SCHEDULER                                                     │    │
+│  │                                                                                 │    │
+│  │     ┌─────────────────────┐     ┌─────────────────────┐                         │    │
+│  │     │ Timer Wheel (RAM)   │     │ Delay Index (Disk)  │                         │    │
+│  │     │                     │     │                     │                         │    │
+│  │     │ O(1) insert         │     │ Binary file format  │                         │    │
+│  │     │ O(1) cancel         │     │ 32-byte entries     │                         │    │
+│  │     │ 10ms tick interval  │     │ Crash recovery      │                         │    │
+│  │     └─────────────────────┘     └─────────────────────┘                         │    │
+│  └─────────────────────────────────────────────────────────────────────────────────┘    │
+│         │                                                                               │
+│         │  ... time passes (30 seconds) ...                                             │
+│         │                                                                               │
+│         ▼                                                                               │
+│  ┌─────────────────────────────────────────────────────────────────────────────────┐    │
+│  │  3. TIMER FIRES → MESSAGE BECOMES VISIBLE                                       │    │
+│  │     → Timer wheel callback triggers                                             │    │
+│  │     → Delay index entry marked as DELIVERED                                     │    │
+│  │     → Normal consumers now see this message                                     │    │
+│  └─────────────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                         │
+└─────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Hierarchical Timer Wheel
+
+The timer wheel uses a 4-level hierarchical structure for O(1) operations:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│                          HIERARCHICAL TIMER WHEEL                                       │
+│                                                                                         │
+│  ┌───────────────────────────────────────────────────────────────────────────────────┐  │
+│  │ LEVEL 0 (Fine)      256 buckets × 10ms = 2.56 seconds                             │  │
+│  │ ───────────────────────────────────────────────────────────────────────────────── │  │
+│  │ [0][1][2][3][4][5][6][7][8][9]...[254][255]                                       │  │
+│  │              ↑                                                                    │  │
+│  │           cursor (tick every 10ms)                                                │  │
+│  │                                                                                   │  │
+│  │  Most delayed messages land here first (short delays < 2.56s)                     │  │
+│  └───────────────────────────────────────────────────────────────────────────────────┘  │
+│                                          ↓ overflow                                     │
+│  ┌───────────────────────────────────────────────────────────────────────────────────┐  │
+│  │ LEVEL 1 (Medium)    64 buckets × 2.56s = 163.84 seconds (~2.7 min)                │  │
+│  │ ───────────────────────────────────────────────────────────────────────────────── │  │
+│  │ [0][1][2][3]...[63]                                                               │  │
+│  │                                                                                   │  │
+│  │  Delays 2.56s - 2.7 minutes                                                       │  │
+│  └───────────────────────────────────────────────────────────────────────────────────┘  │
+│                                          ↓ overflow                                     │
+│  ┌───────────────────────────────────────────────────────────────────────────────────┐  │
+│  │ LEVEL 2 (Coarse)    64 buckets × 2.73min = 174.9 minutes (~2.9 hours)             │  │
+│  │ ───────────────────────────────────────────────────────────────────────────────── │  │
+│  │ [0][1][2][3]...[63]                                                               │  │
+│  │                                                                                   │  │
+│  │  Delays 2.7 minutes - 2.9 hours                                                   │  │
+│  └───────────────────────────────────────────────────────────────────────────────────┘  │
+│                                          ↓ overflow                                     │
+│  ┌───────────────────────────────────────────────────────────────────────────────────┐  │
+│  │ LEVEL 3 (Long)      64 buckets × 2.91h = 186.4 hours (~7.76 days)                 │  │
+│  │ ───────────────────────────────────────────────────────────────────────────────── │  │
+│  │ [0][1][2][3]...[63]                                                               │  │
+│  │                                                                                   │  │
+│  │  Delays 2.9 hours - 7.76 days (MAXIMUM)                                           │  │
+│  └───────────────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                         │
+│  COMPLEXITY:                                                                            │
+│  • Insert:  O(1) - Calculate bucket from delay duration                                 │
+│  • Cancel:  O(1) - Direct lookup by timer ID                                            │
+│  • Tick:    O(1) amortized - Process current bucket, cascade from higher levels         │
+│  • Memory:  ~1KB per 1000 timers (pointer-based linked lists)                           │
+│                                                                                         │
+└─────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Delay Index Format (Persistence)
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│                             DELAY INDEX FILE FORMAT                                     │
+│                                                                                         │
+│  File: data/delay/{topic}/delay.idx                                                     │
+│                                                                                         │
+│  ┌───────────────────────────────────────────────────────────────────────────────────┐  │
+│  │ HEADER (16 bytes)                                                                 │  │
+│  │ ────────────────────────────────────────────────────────────────────────────────  │  │
+│  │ [0:4]   Magic: "GDIX" (0x47 0x44 0x49 0x58)                                       │  │
+│  │ [4:5]   Version: 1                                                                │  │
+│  │ [5:8]   Reserved (padding)                                                        │  │
+│  │ [8:16]  Entry count (uint64)                                                      │  │
+│  └───────────────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                         │
+│  ┌───────────────────────────────────────────────────────────────────────────────────┐  │
+│  │ ENTRIES (32 bytes each, repeated)                                                 │  │
+│  │ ────────────────────────────────────────────────────────────────────────────────  │  │
+│  │ [0:8]   Offset (int64)          Message offset in the log                         │  │
+│  │ [8:16]  DeliverAt (int64)       Unix nanos when to deliver                        │  │
+│  │ [16:18] Partition (uint16)      Partition number                                  │  │
+│  │ [18:19] State (uint8)           0=PENDING, 1=DELIVERED, 2=CANCELLED, 3=EXPIRED    │  │
+│  │ [19:32] Reserved (13 bytes)     Future use (priority, retry count, etc.)          │  │
+│  └───────────────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                         │
+│  Entry States:                                                                          │
+│  • PENDING (0)   - Waiting for delivery time                                            │
+│  • DELIVERED (1) - Timer fired, message visible to consumers                            │
+│  • CANCELLED (2) - Explicitly cancelled by producer                                     │
+│  • EXPIRED (3)   - TTL exceeded before delivery (if configured)                         │
+│                                                                                         │
+└─────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### API Endpoints (M5)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/topics/{name}/messages` | POST | Publish with `delay` or `deliverAt` params |
+| `/topics/{name}/delayed` | GET | List pending delayed messages |
+| `/topics/{name}/delayed/{partition}/{offset}` | DELETE | Cancel delayed message |
+| `/delay/stats` | GET | Scheduler statistics |
+
+### Comparison with Other Systems
+
+| Feature | GoQueue (M5) | Kafka | RabbitMQ | SQS |
+|---------|--------------|-------|----------|-----|
+| Native Delay | ✅ Yes | ❌ No | ❌ Plugin | ✅ Yes |
+| Max Delay | ~7.76 days | N/A | Varies | 15 minutes |
+| Precision | 10ms | N/A | Seconds | Seconds |
+| Persistence | ✅ Crash-safe | N/A | Varies | ✅ Managed |
+| Cancel Support | ✅ Yes | N/A | Plugin | ❌ No |
+| Algorithm | Timer Wheel | N/A | Timer | Unknown |
+| Complexity | O(1) | N/A | O(log n) | Unknown |
+
+---
+
 ## Comparison with Industry Systems
 
 | Feature | GoQueue | Kafka | RabbitMQ | SQS |
@@ -714,7 +870,7 @@ Legend: W = Writes to, R = Reads from, - = No direct interaction
 Phase 1: Foundations           Phase 2: Advanced            Phase 3: Distribution
 ────────────────────           ─────────────────            ─────────────────────
                                                             
- [M1] Storage ✅                [M5] Delay Queue ⭐          [M10] Cluster
+ [M1] Storage ✅                [M5] Delay Queue ✅          [M10] Cluster
       │                              │                            │
       ▼                              ▼                            ▼
  [M2] Topics ✅                 [M6] Priority ⭐             [M11] Replication
@@ -723,8 +879,8 @@ Phase 1: Foundations           Phase 2: Advanced            Phase 3: Distributio
  [M3] Consumer ✅               [M7] Tracing ⭐              [M12] Coop Rebalance ⭐
       │                              │                            │
       ▼                              ▼                            ▼
- [M4] Reliability              [M8] Schema                  [M13] Partition Scale
-      (CURRENT)                      │                       
+ [M4] Reliability ✅            [M8] Schema                  [M13] Partition Scale
+                                     │                       
                                      ▼                       
                                [M9] Transactions             
 
@@ -737,4 +893,4 @@ Phase 4: Operations
 
 ---
 
-*Last Updated: Milestone 3 Complete, Starting Milestone 4*
+*Last Updated: Milestone 5 Complete - Native Delay & Scheduled Messages*

@@ -157,6 +157,27 @@ func (s *Server) registerRoutes() {
 			// Messages
 			r.Post("/messages", s.publishMessages)
 
+			// ======================================================================
+			// DELAYED MESSAGES (M5)
+			// ======================================================================
+			//
+			// These endpoints provide delayed/scheduled message delivery.
+			//
+			// FLOW:
+			//   1. Producer publishes with delay/deliverAt parameter
+			//   2. Message is stored immediately but hidden from consumers
+			//   3. After delay expires, message becomes visible
+			//
+			// ENDPOINTS:
+			//   GET  /topics/{name}/delayed              List pending delayed messages
+			//   GET  /topics/{name}/delayed/{offset}    Get specific delayed message
+			//   DELETE /topics/{name}/delayed/{offset}  Cancel delayed message
+			//
+			// ======================================================================
+			r.Get("/delayed", s.listDelayedMessages)
+			r.Get("/delayed/{offset}", s.getDelayedMessage)
+			r.Delete("/delayed/{partition}/{offset}", s.cancelDelayedMessage)
+
 			// Partitions
 			r.Route("/partitions/{partitionID}", func(r chi.Router) {
 				r.Get("/messages", s.consumeMessages)
@@ -211,6 +232,9 @@ func (s *Server) registerRoutes() {
 
 	// Reliability Stats (M4)
 	s.router.Get("/reliability/stats", s.handleReliabilityStats)
+
+	// Delay Stats (M5)
+	s.router.Get("/delay/stats", s.handleDelayStats)
 }
 
 // loggingMiddleware logs all HTTP requests.
@@ -405,16 +429,28 @@ type PublishRequest struct {
 }
 
 // PublishMessage is a single message to publish.
+//
+// DELAY SUPPORT (M5):
+// Messages can be published with a delay using either:
+//   - delay: Duration string (e.g., "30s", "1h", "24h")
+//   - deliverAt: RFC3339 timestamp (e.g., "2024-01-15T09:30:00Z")
+//
+// If both are provided, delay takes precedence.
+// If neither is provided, message is delivered immediately.
 type PublishMessage struct {
 	Key       string `json:"key,omitempty"`
 	Value     string `json:"value"`
 	Partition *int   `json:"partition,omitempty"`
+	Delay     string `json:"delay,omitempty"`     // M5: Duration string ("30s", "1h")
+	DeliverAt string `json:"deliverAt,omitempty"` // M5: RFC3339 timestamp
 }
 
 // PublishResult is the result of publishing a single message.
 type PublishResult struct {
 	Partition int    `json:"partition"`
 	Offset    int64  `json:"offset"`
+	Delayed   bool   `json:"delayed,omitempty"`   // M5: true if message is delayed
+	DeliverAt string `json:"deliverAt,omitempty"` // M5: when message will be visible
 	Error     string `json:"error,omitempty"`
 }
 
@@ -453,18 +489,55 @@ func (s *Server) publishMessages(w http.ResponseWriter, r *http.Request) {
 
 		var partition int
 		var offset int64
+		var deliverAt time.Time
+		var isDelayed bool
 
-		if msg.Partition != nil {
+		// Parse delay parameters (M5)
+		if msg.Delay != "" {
+			delay, parseErr := time.ParseDuration(msg.Delay)
+			if parseErr != nil {
+				results[i] = PublishResult{Error: "invalid delay format: " + parseErr.Error()}
+				continue
+			}
+			deliverAt = time.Now().Add(delay)
+			isDelayed = delay > 0
+		} else if msg.DeliverAt != "" {
+			var parseErr error
+			deliverAt, parseErr = time.Parse(time.RFC3339, msg.DeliverAt)
+			if parseErr != nil {
+				results[i] = PublishResult{Error: "invalid deliverAt format: " + parseErr.Error()}
+				continue
+			}
+			isDelayed = deliverAt.After(time.Now())
+		}
+
+		// Publish with or without delay
+		if isDelayed {
+			// Delayed message (M5)
+			partition, offset, err = s.broker.PublishAt(topicName, key, value, deliverAt)
+			results[i] = PublishResult{
+				Partition: partition,
+				Offset:    offset,
+				Delayed:   true,
+				DeliverAt: deliverAt.Format(time.RFC3339),
+			}
+		} else if msg.Partition != nil {
+			// Direct partition publish
 			offset, err = topic.PublishToPartition(*msg.Partition, key, value)
 			partition = *msg.Partition
+			results[i] = PublishResult{
+				Partition: partition,
+				Offset:    offset,
+			}
 		} else {
+			// Normal publish (key-based routing)
 			partition, offset, err = topic.Publish(key, value)
+			results[i] = PublishResult{
+				Partition: partition,
+				Offset:    offset,
+			}
 		}
 
-		results[i] = PublishResult{
-			Partition: partition,
-			Offset:    offset,
-		}
 		if err != nil {
 			results[i].Error = err.Error()
 		}
@@ -1368,6 +1441,201 @@ func (s *Server) handleReliabilityStats(w http.ResponseWriter, r *http.Request) 
 			"routes_by_topic":  stats.DLQ.RoutesByTopic,
 			"create_errors":    stats.DLQ.CreateErrors,
 			"publish_errors":   stats.DLQ.PublishErrors,
+		},
+	})
+}
+
+// =============================================================================
+// MILESTONE 5: DELAYED MESSAGES API
+// =============================================================================
+//
+// These endpoints provide delayed/scheduled message delivery management.
+//
+// ENDPOINTS:
+//   GET    /topics/{name}/delayed               List pending delayed messages
+//   GET    /topics/{name}/delayed/{offset}      Get specific delayed message
+//   DELETE /topics/{name}/delayed/{p}/{offset}  Cancel delayed message
+//   GET    /delay/stats                         Scheduler statistics
+//
+// =============================================================================
+
+// DelayedMessageResponse represents a delayed message in API responses.
+type DelayedMessageResponse struct {
+	Topic         string `json:"topic"`
+	Partition     int    `json:"partition"`
+	Offset        int64  `json:"offset"`
+	DeliverAt     string `json:"deliver_at"`
+	TimeRemaining string `json:"time_remaining"`
+	State         string `json:"state"`
+}
+
+// listDelayedMessages handles GET /topics/{topicName}/delayed
+//
+// Returns all pending delayed messages for a topic.
+// Supports pagination via ?limit=N&skip=N query parameters.
+//
+// EXAMPLE:
+//
+//	curl http://localhost:8080/topics/orders/delayed?limit=100&skip=0
+func (s *Server) listDelayedMessages(w http.ResponseWriter, r *http.Request) {
+	topicName := chi.URLParam(r, "topicName")
+
+	// Parse pagination params
+	limit := 100
+	skip := 0
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+	if sk := r.URL.Query().Get("skip"); sk != "" {
+		if parsed, err := strconv.Atoi(sk); err == nil && parsed >= 0 {
+			skip = parsed
+		}
+	}
+
+	messages, err := s.broker.GetDelayedMessages(topicName, limit, skip)
+	if err != nil {
+		s.errorResponse(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Convert to API response format
+	response := make([]DelayedMessageResponse, len(messages))
+	for i, msg := range messages {
+		response[i] = DelayedMessageResponse{
+			Topic:         msg.Topic,
+			Partition:     msg.Partition,
+			Offset:        msg.Offset,
+			DeliverAt:     msg.DeliverAt.Format(time.RFC3339),
+			TimeRemaining: msg.TimeRemaining.String(),
+			State:         msg.State,
+		}
+	}
+
+	s.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"topic":    topicName,
+		"messages": response,
+		"count":    len(response),
+		"limit":    limit,
+		"skip":     skip,
+	})
+}
+
+// getDelayedMessage handles GET /topics/{topicName}/delayed/{offset}
+//
+// Returns details about a specific delayed message.
+// Note: This looks up by offset only - caller must know the partition.
+// For full lookup, use GET /topics/{name}/delayed to list all.
+//
+// EXAMPLE:
+//
+//	curl http://localhost:8080/topics/orders/delayed/1234
+func (s *Server) getDelayedMessage(w http.ResponseWriter, r *http.Request) {
+	topicName := chi.URLParam(r, "topicName")
+	offsetStr := chi.URLParam(r, "offset")
+
+	offset, err := strconv.ParseInt(offsetStr, 10, 64)
+	if err != nil {
+		s.errorResponse(w, http.StatusBadRequest, "invalid offset")
+		return
+	}
+
+	// Try to find the message in any partition
+	// This is a simple implementation - a production system might have
+	// a more efficient lookup if partition is known
+	messages, err := s.broker.GetDelayedMessages(topicName, 0, 0) // Get all
+	if err != nil {
+		s.errorResponse(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	for _, msg := range messages {
+		if msg.Offset == offset {
+			s.writeJSON(w, http.StatusOK, DelayedMessageResponse{
+				Topic:         msg.Topic,
+				Partition:     msg.Partition,
+				Offset:        msg.Offset,
+				DeliverAt:     msg.DeliverAt.Format(time.RFC3339),
+				TimeRemaining: msg.TimeRemaining.String(),
+				State:         msg.State,
+			})
+			return
+		}
+	}
+
+	s.errorResponse(w, http.StatusNotFound, "delayed message not found")
+}
+
+// cancelDelayedMessage handles DELETE /topics/{topicName}/delayed/{partition}/{offset}
+//
+// Cancels a pending delayed message. The message will never be delivered.
+// Returns 200 if cancelled, 404 if not found or already delivered.
+//
+// EXAMPLE:
+//
+//	curl -X DELETE http://localhost:8080/topics/orders/delayed/0/1234
+func (s *Server) cancelDelayedMessage(w http.ResponseWriter, r *http.Request) {
+	topicName := chi.URLParam(r, "topicName")
+	partitionStr := chi.URLParam(r, "partition")
+	offsetStr := chi.URLParam(r, "offset")
+
+	partition, err := strconv.Atoi(partitionStr)
+	if err != nil {
+		s.errorResponse(w, http.StatusBadRequest, "invalid partition")
+		return
+	}
+
+	offset, err := strconv.ParseInt(offsetStr, 10, 64)
+	if err != nil {
+		s.errorResponse(w, http.StatusBadRequest, "invalid offset")
+		return
+	}
+
+	cancelled, err := s.broker.CancelDelayed(topicName, partition, offset)
+	if err != nil {
+		s.errorResponse(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	if !cancelled {
+		s.errorResponse(w, http.StatusNotFound, "delayed message not found or already delivered")
+		return
+	}
+
+	s.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"cancelled": true,
+		"topic":     topicName,
+		"partition": partition,
+		"offset":    offset,
+	})
+}
+
+// handleDelayStats handles GET /delay/stats
+//
+// Returns statistics about the delay scheduling system:
+//   - Total scheduled, delivered, cancelled messages
+//   - Pending messages by topic
+//   - Timer wheel statistics
+//
+// EXAMPLE:
+//
+//	curl http://localhost:8080/delay/stats
+func (s *Server) handleDelayStats(w http.ResponseWriter, r *http.Request) {
+	stats := s.broker.DelayStats()
+
+	s.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"total_scheduled": stats.TotalScheduled,
+		"total_delivered": stats.TotalDelivered,
+		"total_cancelled": stats.TotalCancelled,
+		"total_pending":   stats.TotalPending,
+		"by_topic":        stats.ByTopic,
+		"timer_wheel": map[string]interface{}{
+			"total_scheduled": stats.TimerWheel.TotalScheduled,
+			"total_expired":   stats.TimerWheel.TotalExpired,
+			"total_cancelled": stats.TimerWheel.TotalCancelled,
+			"current_active":  stats.TimerWheel.CurrentActive,
+			"current_tick":    stats.TimerWheel.CurrentTick,
 		},
 	})
 }

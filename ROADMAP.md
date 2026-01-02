@@ -10,11 +10,11 @@ A durable, distributed message queue with consumer groups, replication, and part
                     ┌───────────────────┼───────────────────┐
                     ▼                   ▼                   ▼
             ┌───────────────────────────────────────────────────┐
-            │                    GoQueue Cluster                 │
-            │                                                    │
+            │                    GoQueue Cluster                │
+            │                                                   │
             │  ┌─────────────────────────────────────────────┐  │
-            │  │              Topic: "orders"                 │  │
-            │  │                                              │  │
+            │  │              Topic: "orders"                │  │
+            │  │                                             │  │
             │  │  ┌───────────┐ ┌───────────┐ ┌───────────┐  │  │
             │  │  │Partition 0│ │Partition 1│ │Partition 2│  │  │
             │  │  │  Leader:  │ │  Leader:  │ │  Leader:  │  │  │
@@ -23,20 +23,20 @@ A durable, distributed message queue with consumer groups, replication, and part
             │  │  │ Replicas: │ │ Replicas: │ │ Replicas: │  │  │
             │  │  │ Node 2,3  │ │ Node 1,3  │ │ Node 1,2  │  │  │
             │  │  └───────────┘ └───────────┘ └───────────┘  │  │
-            │  │                                              │  │
+            │  │                                             │  │
             │  └─────────────────────────────────────────────┘  │
-            │                                                    │
+            │                                                   │
             │  ┌─────────────────────────────────────────────┐  │
-            │  │           Consumer Group: "processors"       │  │
-            │  │                                              │  │
-            │  │  Consumer A ──► Partition 0                  │  │
-            │  │  Consumer B ──► Partition 1                  │  │
-            │  │  Consumer C ──► Partition 2                  │  │
-            │  │                                              │  │
+            │  │           Consumer Group: "processors"      │  │
+            │  │                                             │  │
+            │  │  Consumer A ──► Partition 0                 │  │
+            │  │  Consumer B ──► Partition 1                 │  │
+            │  │  Consumer C ──► Partition 2                 │  │
+            │  │                                             │  │
             │  │  Offsets: { P0: 1523, P1: 892, P2: 2341 }   │  │
             │  └─────────────────────────────────────────────┘  │
-            │                                                    │
-            └────────────────────────────────────────────────────┘
+            │                                                   │
+            └───────────────────────────────────────────────────┘
 ```
 
 ## Features

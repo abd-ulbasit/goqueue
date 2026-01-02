@@ -248,11 +248,6 @@ When explaining concurrency primitives:
 - Interface-based design
 - Table-driven tests
 
-**Learning next:**
-- LRU cache implementation
-- Lock-free data structures
-- Profiling with pprof
-- Load testing
 
 **Common mistakes I make:**
 - (Add as patterns emerge)
