@@ -308,7 +308,7 @@ func scanLogToEnd(file *os.File, baseOffset int64) (nextOffset int64, position i
 	position = 0
 
 	for {
-		// Try to read a message header
+		// Try to read the full header
 		header := make([]byte, HeaderSize)
 		n, err := io.ReadFull(reader, header)
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
@@ -330,13 +330,14 @@ func scanLogToEnd(file *os.File, baseOffset int64) (nextOffset int64, position i
 		}
 
 		// Extract lengths to know message size
-		keyLen := binary.BigEndian.Uint16(header[24:26])
-		valueLen := binary.BigEndian.Uint32(header[26:30])
-		totalSize := int64(HeaderSize) + int64(keyLen) + int64(valueLen)
+		// Header layout: KeyLen at [26:28], ValueLen at [28:32]
+		keyLen := binary.BigEndian.Uint16(header[26:28])
+		valueLen := binary.BigEndian.Uint32(header[28:32])
+		bodySize := int64(keyLen) + int64(valueLen)
+		totalSize := int64(HeaderSize) + bodySize
 
 		// Skip over key and value
-		remaining := int64(keyLen) + int64(valueLen)
-		if _, err := io.CopyN(io.Discard, reader, remaining); err != nil {
+		if _, err := io.CopyN(io.Discard, reader, bodySize); err != nil {
 			// Partial message body - stop here
 			break
 		}
@@ -387,6 +388,7 @@ func rebuildSegment(dir string, baseOffset int64) (*Segment, error) {
 	firstMessage := true
 
 	for {
+		// Read full header
 		header := make([]byte, HeaderSize)
 		n, err := io.ReadFull(reader, header)
 		if err == io.EOF || err == io.ErrUnexpectedEOF || n < HeaderSize {
@@ -400,10 +402,12 @@ func rebuildSegment(dir string, baseOffset int64) (*Segment, error) {
 			break
 		}
 
+		// Extract fields from 32-byte header
 		messageOffset := int64(binary.BigEndian.Uint64(header[8:16]))
-		keyLen := binary.BigEndian.Uint16(header[24:26])
-		valueLen := binary.BigEndian.Uint32(header[26:30])
-		totalSize := int64(HeaderSize) + int64(keyLen) + int64(valueLen)
+		keyLen := binary.BigEndian.Uint16(header[26:28])
+		valueLen := binary.BigEndian.Uint32(header[28:32])
+		bodySize := int64(keyLen) + int64(valueLen)
+		totalSize := int64(HeaderSize) + bodySize
 
 		// Add to index (force first entry, then respect granularity)
 		if firstMessage {
@@ -414,8 +418,7 @@ func rebuildSegment(dir string, baseOffset int64) (*Segment, error) {
 		}
 
 		// Skip body
-		remaining := int64(keyLen) + int64(valueLen)
-		if _, err := io.CopyN(io.Discard, reader, remaining); err != nil {
+		if _, err := io.CopyN(io.Discard, reader, bodySize); err != nil {
 			break
 		}
 
@@ -714,8 +717,21 @@ func (s *Segment) ReadFrom(startOffset int64, maxMessages int) ([]*Message, erro
 }
 
 // readOneMessage reads and decodes a single message from the reader.
+//
+// HEADER FORMAT (32 bytes):
+//
+//	[0:2]   Magic bytes ("GQ")
+//	[2]     Version (1)
+//	[3]     Flags
+//	[4:8]   CRC32
+//	[8:16]  Offset
+//	[16:24] Timestamp
+//	[24]    Priority
+//	[25]    Reserved
+//	[26:28] Key length
+//	[28:32] Value length
 func (s *Segment) readOneMessage(reader *bufio.Reader) (*Message, error) {
-	// Read header
+	// Read the full 32-byte header
 	header := make([]byte, HeaderSize)
 	if _, err := io.ReadFull(reader, header); err != nil {
 		return nil, err // EOF or read error
@@ -726,9 +742,9 @@ func (s *Segment) readOneMessage(reader *bufio.Reader) (*Message, error) {
 		return nil, ErrInvalidMagic
 	}
 
-	// Get sizes
-	keyLen := binary.BigEndian.Uint16(header[24:26])
-	valueLen := binary.BigEndian.Uint32(header[26:30])
+	// Get key and value lengths from fixed positions
+	keyLen := binary.BigEndian.Uint16(header[26:28])
+	valueLen := binary.BigEndian.Uint32(header[28:32])
 
 	// Read body (key + value)
 	body := make([]byte, int(keyLen)+int(valueLen))

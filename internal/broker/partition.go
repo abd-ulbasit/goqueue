@@ -49,13 +49,15 @@ import (
 
 // Partition represents a single partition within a topic.
 type Partition struct {
-	topic     string       // topic is the name of the topic this partition belongs to
-	id        int          // id is the partition number within the topic (0, 1, 2, ...)
-	log       *storage.Log // log is the underlying storage engine
-	dir       string       // dir is the directory containing partition data
-	mu        sync.RWMutex // mu protects metadata access
-	createdAt time.Time    // createdAt is when the partition was created
-	closed    bool         // closed tracks if partition is closed
+	topic             string             // topic is the name of the topic this partition belongs to
+	id                int                // id is the partition number within the topic (0, 1, 2, ...)
+	log               *storage.Log       // log is the underlying storage engine
+	dir               string             // dir is the directory containing partition data
+	priorityIndex     *PriorityIndex     // priorityIndex tracks messages by priority
+	priorityScheduler *PriorityScheduler // priorityScheduler for WFQ consumption
+	mu                sync.RWMutex       // mu protects metadata access
+	createdAt         time.Time          // createdAt is when the partition was created
+	closed            bool               // closed tracks if partition is closed
 }
 
 // =============================================================================
@@ -77,11 +79,13 @@ func NewPartition(baseDir string, topic string, id int) (*Partition, error) {
 	}
 
 	return &Partition{
-		topic:     topic,
-		id:        id,
-		log:       log,
-		dir:       dir,
-		createdAt: time.Now(),
+		topic:             topic,
+		id:                id,
+		log:               log,
+		dir:               dir,
+		priorityIndex:     NewPriorityIndex(),
+		priorityScheduler: NewPriorityScheduler(DefaultPrioritySchedulerConfig()),
+		createdAt:         time.Now(),
 	}, nil
 }
 
@@ -100,14 +104,24 @@ func LoadPartition(baseDir string, topic string, id int) (*Partition, error) {
 		return nil, fmt.Errorf("failed to load log: %w", err)
 	}
 
-	return &Partition{
-		topic: topic,
-		id:    id,
-		log:   log,
-		dir:   dir,
+	p := &Partition{
+		topic:             topic,
+		id:                id,
+		log:               log,
+		dir:               dir,
+		priorityIndex:     NewPriorityIndex(),
+		priorityScheduler: NewPriorityScheduler(DefaultPrioritySchedulerConfig()),
 		// TODO: Can we load actual creation time from file metadata
 		createdAt: time.Now(), //  We don't persist creation time yet
-	}, nil
+	}
+
+	// Rebuild priority index and scheduler from log
+	if err := p.rebuildPriorityState(); err != nil {
+		log.Close()
+		return nil, fmt.Errorf("failed to rebuild priority state: %w", err)
+	}
+
+	return p, nil
 }
 
 // =============================================================================
@@ -123,7 +137,7 @@ func (p *Partition) Produce(key, value []byte) (int64, error) {
 	}
 	p.mu.RUnlock()
 
-	// Create message
+	// Create message (defaults to priority 0 - highest)
 	msg := storage.NewMessage(key, value)
 
 	// Append to log
@@ -132,10 +146,17 @@ func (p *Partition) Produce(key, value []byte) (int64, error) {
 		return 0, fmt.Errorf("failed to append message: %w", err)
 	}
 
+	// Update priority index and scheduler
+	// The log.Append sets msg.Offset, so we can use the full message
+	msg.Offset = offset
+	p.priorityIndex.AddMessage(msg)
+	p.priorityScheduler.Enqueue(msg)
+
 	return offset, nil
 }
 
 // ProduceMessage appends a pre-built message to the partition.
+// This is the primary path for priority-aware message production.
 func (p *Partition) ProduceMessage(msg *storage.Message) (int64, error) {
 	p.mu.RLock()
 	if p.closed {
@@ -149,15 +170,117 @@ func (p *Partition) ProduceMessage(msg *storage.Message) (int64, error) {
 		return 0, fmt.Errorf("failed to append message: %w", err)
 	}
 
+	// Update priority index and scheduler
+	// The log.Append sets msg.Offset, so we can use the full message
+	msg.Offset = offset
+	p.priorityIndex.AddMessage(msg)
+	p.priorityScheduler.Enqueue(msg)
+
 	return offset, nil
 }
 
 // =============================================================================
 // CONSUMER OPERATIONS
 // =============================================================================
+//
+// DEFAULT BEHAVIOR: Priority-aware consumption (highest priority first).
+// Messages with the same priority are returned in FIFO order.
+//
+// WHY PRIORITY-FIRST AS DEFAULT?
+//   - Most queue systems expect higher priority = delivered first
+//   - SQS, RabbitMQ, traditional MQs all prioritize by default
+//   - Use ConsumeByOffset() for explicit FIFO (log-like) consumption
+//
+// =============================================================================
 
-// Consume reads messages starting from the given offset.
+// Consume reads messages in priority order (highest priority first).
+// This is the default consumption mode - messages are returned with
+// Priority 0 (Critical) before Priority 1 (High), etc.
+// Within the same priority level, messages are returned in FIFO order.
+//
+// PARAMETERS:
+//   - fromOffset: Starting offset (inclusive) - messages from this offset onwards
+//   - maxMessages: Maximum messages to return
+//
+// For offset-sequential consumption (Kafka-like), use ConsumeByOffset().
 func (p *Partition) Consume(fromOffset int64, maxMessages int) ([]*storage.Message, error) {
+	p.mu.RLock()
+	if p.closed {
+		p.mu.RUnlock()
+		return nil, fmt.Errorf("partition %s-%d is closed", p.topic, p.id)
+	}
+	p.mu.RUnlock()
+
+	// ============================================================================
+	// PRIORITY-AWARE CONSUMPTION (DEFAULT)
+	// ============================================================================
+	//
+	// BEHAVIOR: Returns messages in strict priority order (highest priority first).
+	//           Within the same priority, messages are returned in FIFO order.
+	//
+	// WHY DEFAULT: Most queue use cases want "important messages first". This aligns
+	//              with SQS FIFO's high-throughput mode and traditional MQ semantics.
+	//              For offset-ordered (Kafka-like) consumption, use ConsumeByOffset().
+	//
+	// PARAMETERS:
+	//   - fromOffset: Starting offset (inclusive) - offset N returns message at N
+	//   - maxMessages: Maximum messages to return (0 = no limit, return all available)
+	//
+	// OFFSET SEMANTICS: All methods in goqueue use INCLUSIVE offsets.
+	//   fromOffset = 0 → returns message at offset 0 (if exists)
+	//   fromOffset = 5 → returns messages starting from offset 5
+	//
+	// FLOW:
+	//   Priority 0 (Critical):  [msg@5, msg@12] ──► Consumed first
+	//   Priority 1 (High):      [msg@3, msg@8]  ──► Consumed second
+	//   Priority 2 (Normal):    [msg@1, msg@10] ──► Consumed third
+	//   ...
+	//
+
+	// Use strict priority ordering: highest priority first, FIFO within priority
+	initialCapacity := maxMessages
+	if initialCapacity == 0 {
+		initialCapacity = 64 // Reasonable default for unlimited reads
+	}
+	messages := make([]*storage.Message, 0, initialCapacity)
+
+	// Track current position for iteration (starts at fromOffset)
+	currentOffset := fromOffset
+
+	// Loop until we hit maxMessages limit (or no more messages if maxMessages == 0)
+	for {
+		// Check limit: maxMessages == 0 means no limit
+		if maxMessages > 0 && len(messages) >= maxMessages {
+			break
+		}
+
+		offset, _, found := p.priorityIndex.GetNextAcrossPriorities(currentOffset)
+		if !found {
+			break
+		}
+
+		msg, err := p.log.Read(offset)
+		if err != nil {
+			// Skip unreadable messages (may have been deleted by retention)
+			currentOffset = offset + 1
+			continue
+		}
+
+		messages = append(messages, msg)
+		currentOffset = offset + 1 // Move past this offset for next iteration
+	}
+
+	return messages, nil
+}
+
+// ConsumeByOffset reads messages sequentially by offset (FIFO, ignoring priority).
+// This is Kafka-like behavior where you consume the log in offset order.
+//
+// Use this when:
+//   - You need strict offset ordering (e.g., replication, replay)
+//   - You want to consume ALL messages regardless of priority
+//   - You're treating the partition as an append-only log
+func (p *Partition) ConsumeByOffset(fromOffset int64, maxMessages int) ([]*storage.Message, error) {
 	p.mu.RLock()
 	if p.closed {
 		p.mu.RUnlock()
@@ -295,6 +418,57 @@ func (p *Partition) Delete() error {
 }
 
 // =============================================================================
+// PRIORITY STATE REBUILD
+// =============================================================================
+//
+// WHY: On partition load (restart/recovery), we need to rebuild in-memory
+// priority structures from the persisted log. This ensures:
+//   1. PriorityIndex tracks all message offsets by priority
+//   2. PriorityScheduler is populated with pending messages for WFQ
+//
+// HOW IT WORKS:
+//   1. Scan all messages in the log from earliest to latest
+//   2. For each message, add its offset to the priority index
+//   3. Enqueue each message into the WFQ scheduler
+//
+// NOTE: This scans the entire log, which can be slow for large partitions.
+// Future optimization: persist priority index separately or use checkpoints.
+//
+// =============================================================================
+
+// rebuildPriorityState scans the log and rebuilds priority index + scheduler.
+// Called on partition load to restore in-memory state from persisted messages.
+func (p *Partition) rebuildPriorityState() error {
+	// Get offset range to scan
+	earliest := p.log.EarliestOffset()
+	latest := p.log.LatestOffset()
+
+	// Empty partition - nothing to rebuild
+	if latest < 0 || earliest > latest {
+		return nil
+	}
+
+	// Scan all messages and rebuild state
+	for offset := earliest; offset <= latest; offset++ {
+		msg, err := p.log.Read(offset)
+		if err != nil {
+			// Log gap or corrupted message - skip but log warning
+			// TODO: Add proper logging
+			continue
+		}
+
+		// Add to priority index (tracks offsets by priority for range queries)
+		p.priorityIndex.AddMessage(msg)
+
+		// Enqueue to scheduler for WFQ consumption
+		// The scheduler tracks pending messages and applies WFQ ordering
+		p.priorityScheduler.Enqueue(msg)
+	}
+
+	return nil
+}
+
+// =============================================================================
 // RETENTION & CLEANUP
 // =============================================================================
 
@@ -308,4 +482,149 @@ func (p *Partition) DeleteMessagesBefore(offset int64) error {
 	p.mu.RUnlock()
 
 	return p.log.DeleteSegmentsBefore(offset)
+}
+
+// =============================================================================
+// PRIORITY-AWARE PRODUCE
+// =============================================================================
+//
+// WHY: Standard Produce() uses default priority (0). ProduceWithPriority allows
+// callers to specify a priority level for the message, enabling priority-based
+// consumption via WFQ or strict priority ordering.
+//
+// =============================================================================
+
+// ProduceWithPriority appends a message with the specified priority level.
+// Priority must be 0-4 where 0 is highest (Critical) and 4 is lowest (BestEffort).
+func (p *Partition) ProduceWithPriority(key, value []byte, priority storage.Priority) (int64, error) {
+	p.mu.RLock()
+	if p.closed {
+		p.mu.RUnlock()
+		return 0, fmt.Errorf("partition %s-%d is closed", p.topic, p.id)
+	}
+	p.mu.RUnlock()
+
+	// Create message with specified priority
+	msg := storage.NewMessageWithPriority(key, value, priority)
+
+	// Append to log
+	offset, err := p.log.Append(msg)
+	if err != nil {
+		return 0, fmt.Errorf("failed to append message: %w", err)
+	}
+
+	// Update priority index and scheduler
+	msg.Offset = offset
+	p.priorityIndex.AddMessage(msg)
+	p.priorityScheduler.Enqueue(msg)
+
+	return offset, nil
+}
+
+// =============================================================================
+// PRIORITY-AWARE CONSUME
+// =============================================================================
+//
+// WHY: Normal Consume() reads sequentially by offset. Priority-aware consumption
+// allows reading messages in priority order using either strict priority or WFQ.
+//
+// DESIGN: The scheduler is owned by the partition and populated on produce.
+// Consume just dequeues from the scheduler and reads from log.
+//
+// =============================================================================
+
+// ConsumeByPriority reads messages using strict priority ordering.
+// Messages are returned highest priority first (0 before 1 before 2, etc.)
+// Messages at the same priority are returned in FIFO order.
+//
+// PARAMETERS:
+//   - fromOffset: Starting offset (inclusive) - message at this offset can be returned
+//   - maxMessages: Maximum messages to return
+func (p *Partition) ConsumeByPriority(fromOffset int64, maxMessages int) ([]*storage.Message, error) {
+	p.mu.RLock()
+	if p.closed {
+		p.mu.RUnlock()
+		return nil, fmt.Errorf("partition %s-%d is closed", p.topic, p.id)
+	}
+	p.mu.RUnlock()
+
+	// Query the priority index for unconsumed offsets in priority order
+	// This uses strict priority - highest first, FIFO within same priority
+	messages := make([]*storage.Message, 0, maxMessages)
+	currentOffset := fromOffset
+
+	for len(messages) < maxMessages {
+		offset, _, found := p.priorityIndex.GetNextAcrossPriorities(currentOffset)
+		if !found {
+			break
+		}
+
+		msg, err := p.log.Read(offset)
+		if err != nil {
+			// Skip unreadable messages (may have been deleted by retention)
+			currentOffset = offset + 1
+			continue
+		}
+
+		messages = append(messages, msg)
+		currentOffset = offset + 1 // Move past this offset for next iteration
+	}
+
+	return messages, nil
+}
+
+// ConsumeByPriorityWFQ reads messages using Weighted Fair Queuing.
+// The scheduler is owned by the partition and maintains deficit counters
+// for fair distribution across priorities based on configured weights.
+//
+// PARAMETERS:
+//   - fromOffset: Starting offset (inclusive) - messages below this are filtered out
+//   - maxMessages: Maximum messages to return
+//
+// NOTE: The scheduler parameter is ignored - we use the partition's own scheduler.
+// This signature is kept for compatibility during refactoring.
+func (p *Partition) ConsumeByPriorityWFQ(fromOffset int64, maxMessages int, _ *PriorityScheduler) ([]*storage.Message, error) {
+	p.mu.RLock()
+	if p.closed {
+		p.mu.RUnlock()
+		return nil, fmt.Errorf("partition %s-%d is closed", p.topic, p.id)
+	}
+	p.mu.RUnlock()
+
+	// Dequeue from WFQ scheduler (applies deficit round robin)
+	msgs := p.priorityScheduler.DequeueN(maxMessages)
+
+	// Filter messages below fromOffset and read from log
+	// (scheduler stores *storage.Message which may be stale, so we re-read)
+	messages := make([]*storage.Message, 0, len(msgs))
+	for _, msg := range msgs {
+		if msg.Offset < fromOffset {
+			continue
+		}
+
+		// Re-read from log to get fresh data
+		freshMsg, err := p.log.Read(msg.Offset)
+		if err != nil {
+			// Skip unreadable messages
+			continue
+		}
+		messages = append(messages, freshMsg)
+	}
+
+	return messages, nil
+}
+
+// =============================================================================
+// PRIORITY INDEX OPERATIONS
+// =============================================================================
+
+// MarkConsumed marks a message as consumed in the priority index.
+// This removes it from future priority queries.
+func (p *Partition) MarkConsumed(offset int64) {
+	p.priorityIndex.MarkConsumed(offset)
+}
+
+// PriorityMetrics returns per-priority metrics for this partition.
+func (p *Partition) PriorityMetrics() []PriorityMetricsSnapshot {
+	return p.priorityIndex.GetMetricsSnapshot()
 }
