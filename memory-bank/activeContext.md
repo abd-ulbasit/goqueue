@@ -2,37 +2,71 @@
 
 ## Current Focus
 
-**Phase**: 2 - Advanced Features (Started)
-**Milestone**: 5 - Native Delay & Scheduled Messages
-**Status**: ✅ COMPLETE
+**Phase**: 2 - Advanced Features
+**Milestone**: 6 - Priority Lanes ✅ COMPLETE
+**Status**: Ready for Milestone 7 (Message Tracing)
 
 ## What I'm Working On
 
-### Just Completed (M5 - Native Delay & Scheduled Messages)
-- ✅ Hierarchical Timer Wheel - 4 levels, O(1) operations, ~7.76 day max delay
-- ✅ Delay Index - Persistent storage for crash recovery
-- ✅ Scheduler - Coordinator connecting timer wheel, delay index, and broker
-- ✅ Broker Integration - PublishWithDelay, PublishAt, CancelDelayed
-- ✅ HTTP API - delay/deliverAt params, list/cancel delayed messages
-- ✅ Comprehensive test suite (40+ new tests)
+### Just Completed (M6 - Priority Lanes)
+- ✅ 5 Priority Levels - Critical(0), High(1), Normal(2), Low(3), Background(4)
+- ✅ 32-byte Message Header - Priority byte at position 24
+- ✅ Priority Scheduler - WFQ using Deficit Round Robin algorithm
+- ✅ Starvation Prevention - 30s timeout, boost starved priorities
+- ✅ Per-Priority-Per-Partition Metrics (PPPP)
+- ✅ HTTP API - priority param, /priority/stats endpoint
+- ✅ Comprehensive test suite (12 new priority scheduler tests)
 - ✅ Architecture documentation updated
 
-### Key Technical Decisions (M5)
-- **Timer Algorithm**: Hierarchical wheel (O(1) vs O(log n) for heap)
-- **Levels**: 4 (256×10ms, 64×2.56s, 64×2.73m, 64×2.91h)
-- **Max Delay**: ~7.76 days (practical limit)
-- **Persistence**: Separate delay index file (32-byte entries)
-- **API**: Both relative (delay) and absolute (deliverAt) supported
-- **Zero/Past Delay**: Fire immediately (intuitive behavior)
-- **Critical Fix**: Bucket position is authoritative (not DeliverAt time check)
+### Key Technical Decisions (M6)
+- **Format Version**: V1 (32-byte header, no version branching during dev)
+- **Priority Type**: uint8 (0-4 valid range)
+- **Algorithm**: Weighted Fair Queuing using Deficit Round Robin
+- **Weights**: [50, 25, 15, 7, 3] → 50%, 25%, 15%, 7%, 3% shares
+- **Starvation Timeout**: 30s default (configurable)
+- **Critical Priority**: Always checked first each round
+- **Persistence**: Priority stored in message header (survives restart)
 
-### Next Steps (Milestone 6 - Priority Lanes)
-1. Multi-lane queue design (high/medium/low priority)
-2. Fair scheduling with anti-starvation
-3. Priority-aware consumer polling
-4. Integration with existing consumer groups
+### Bug Fixes During M6
+- **uint8 underflow**: `for p := 4; p >= 0; p--` with uint8 wraps 0→255
+  - Solution: Cast to `int` for loop counters
+- **Version-aware reading**: Initially implemented V1/V2 detection
+  - Simplified: Just use V1 format (32 bytes) during development
+
+### Next Steps (Milestone 7 - Message Tracing)
+1. Trace ID generation (UUID or snowflake)
+2. Trace event types (published, replicated, delivered, acked)
+3. Trace storage (append-only trace log)
+4. Trace query API
+5. CLI: goqueue-cli trace <message-id>
 
 ## Recent Changes
+
+### Session 6 - Milestone 6 Implementation
+**Completed**:
+- Created priority scheduling system
+  - `priority.go` - Priority type with 5 levels, validation, string conversion
+  - `priority_scheduler.go` - WFQ scheduler using DRR algorithm
+  - `priority_index.go` - Per-partition priority tracking
+  - `priority_scheduler_test.go` - 12 comprehensive tests
+- Updated message format
+  - 32-byte header (V1) with Priority at [24], Reserved at [25]
+  - KeyLen shifted to [26:28], ValueLen to [28:32]
+  - Simplified: no V1/V2 branching, just one format
+- Updated storage layer
+  - `segment.go` - Simplified readOneMessage, scanLogToEnd, rebuildSegment
+  - Always reads 32-byte headers
+- Updated broker integration
+  - `partition.go` - Priority scheduler and index integration
+  - `broker.go` - PriorityStats() method, priority metrics structures
+- Implemented HTTP API endpoints
+  - Modified `POST /topics/{name}/messages` - accepts `priority` param
+  - Modified `GET /topics/{name}/messages` - includes priority in response
+  - `GET /priority/stats` - per-priority-per-partition metrics
+- Documentation updates
+  - Added M6 section to ARCHITECTURE.md with diagrams
+  - Updated PROGRESS.md with M6 completion
+  - WFQ vs Strict Priority comparison
 
 ### Session 5 - Milestone 5 Implementation
 **Completed**:

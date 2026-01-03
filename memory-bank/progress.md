@@ -3,8 +3,8 @@
 ## Overall Status
 
 **Phase**: 2 of 4
-**Milestones**: 5/18 complete
-**Tests**: 130+ passing (storage: 42, broker: 60+, api: 24)
+**Milestones**: 6/18 complete
+**Tests**: 140+ passing (storage: 42, broker: 70+, api: 24)
 **Started**: Session 1
 
 ## Phase Progress
@@ -15,9 +15,9 @@
 - [x] Milestone 3: Consumer Groups & Offset Management ✅
 - [x] Milestone 4: Reliability - ACKs, Visibility & DLQ ✅
 
-### Phase 2: Advanced Features (1/5)
+### Phase 2: Advanced Features (2/5)
 - [x] Milestone 5: Native Delay & Scheduled Messages ✅
-- [ ] Milestone 6: Priority Lanes ⭐
+- [x] Milestone 6: Priority Lanes ✅ ⭐
 - [ ] Milestone 7: Message Tracing ⭐
 - [ ] Milestone 8: Schema Registry
 - [ ] Milestone 9: Transactional Publish
@@ -133,6 +133,54 @@
   - Timer wheel tracks visibility, index tracks state
   - Zero/past delays fire immediately
   - Bucket position is authoritative (not DeliverAt time check)
+
+### Milestone 6 - Priority Lanes ✅ ⭐
+- **5 Priority Levels** - Critical(0), High(1), Normal(2), Low(3), Background(4)
+  - Critical: Emergencies, circuit breakers (50% share)
+  - High: Paid users, real-time updates (25% share)
+  - Normal: Default traffic (15% share)
+  - Low: Batch jobs, reports (7% share)
+  - Background: Analytics, cleanup tasks (3% share)
+- **32-byte Message Header** - Priority stored at position [24]
+  - Format: Magic(2) + Version(1) + Flags(1) + CRC(4) + Offset(8) + Timestamp(8) + Priority(1) + Reserved(1) + KeyLen(2) + ValueLen(4)
+  - Version: 1 (simplified, no V1/V2 branching during development)
+- **Weighted Fair Queuing (WFQ)** - Deficit Round Robin algorithm
+  - Weights: [50, 25, 15, 7, 3] for priorities 0-4
+  - Each priority gets proportional share, not strict ordering
+  - Critical always checked first each round
+  - Deficit counter tracks fairness across rounds
+- **Starvation Prevention** - 30s default timeout
+  - If any priority hasn't been served for 30s, it gets boosted
+  - Prevents low-priority messages from waiting forever
+  - Configurable per scheduler
+- **Per-Priority-Per-Partition Metrics (PPPP)**:
+  - Ready count per priority
+  - In-flight count per priority
+  - Enqueue/dequeue rates per priority
+  - Last served timestamps per priority
+- **Broker Integration**:
+  - `PublishWithPriority(topic, key, value, priority)` - publish with priority
+  - Priority-aware consume respects WFQ ordering
+  - `PriorityStats()` - per-priority-per-partition metrics
+- **HTTP API endpoints**:
+  - `POST /topics/{name}/messages` - supports `priority` param
+  - `GET /topics/{name}/messages` - includes priority in response
+  - `GET /priority/stats` - per-priority-per-partition metrics
+- **Files created/modified**:
+  - `internal/storage/priority.go` - Priority type, constants, validation
+  - `internal/storage/message.go` - 32-byte header with Priority field
+  - `internal/broker/priority_scheduler.go` - WFQ scheduler using DRR
+  - `internal/broker/priority_index.go` - Per-partition priority tracking
+  - `internal/broker/priority_scheduler_test.go` - 12 comprehensive tests
+  - `internal/storage/segment.go` - Simplified reading (32-byte always)
+- **Key Design Decisions**:
+  - WFQ over strict priority (fairness > starvation risk)
+  - DRR algorithm: O(1) dequeue, simple implementation
+  - Priority persisted in message (survives restart)
+  - Simplified versioning (V1 only during dev phase)
+- **Bugs Fixed**:
+  - uint8 underflow in loops (0 decrement → 255)
+  - Segment reading always uses 32-byte header
 
 ### Technical Decisions Made
 | Decision | Choice | Rationale |

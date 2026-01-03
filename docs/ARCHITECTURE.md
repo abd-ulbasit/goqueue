@@ -89,8 +89,8 @@
 │  │  │  │  │ Timer Wheel   │  │ Priority      │  │ Message       │                 │  │  ││
 │  │  │  │  │ (Delay Queue) │  │ Lanes         │  │ Tracer        │                 │  │  ││
 │  │  │  │  │               │  │               │  │               │                 │  │  ││
-│  │  │  │  │ • Hierarchical│  │ • High/Med/Lo │  │ • Trace ID    │                 │  │  ││
-│  │  │  │  │ • O(1) insert │  │ • Fair queue  │  │ • Event log   │                 │  │  ││
+│  │  │  │  │ • Hierarchical│  │ • 5 Levels    │  │ • Trace ID    │                 │  │  ││
+│  │  │  │  │ • O(1) insert │  │ • WFQ (DRR)   │  │ • Event log   │                 │  │  ││
 │  │  │  │  │ • Persistent  │  │ • Anti-starve │  │ • Query API   │                 │  │  ││
 │  │  │  │  └───────────────┘  └───────────────┘  └───────────────┘                 │  │  ││
 │  │  │  └──────────────────────────────────────────────────────────────────────────┘  │  ││
@@ -833,6 +833,190 @@ The timer wheel uses a 4-level hierarchical structure for O(1) operations:
 
 ---
 
+## Milestone 6: Priority Lanes ★ UNIQUE
+
+Priority Lanes allow messages to be processed in priority order while preventing starvation of lower-priority messages through Weighted Fair Queuing.
+
+### Priority Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│                           PRIORITY LANES ARCHITECTURE                                   │
+│                                                                                         │
+│  ┌───────────────────────────────────────────────────────────────────────────────────┐  │
+│  │                         Message Header (32 bytes)                                 │  │
+│  │  ┌───────┬────────┬───────┬───────┬────────┬──────────┬──────────┬──────────────┐ │  │
+│  │  │ Magic │Version │ Flags │ CRC32 │ Offset │Timestamp │ Priority │ KeyLen+Value │ │  │
+│  │  │  2B   │  1B    │  1B   │  4B   │   8B   │    8B    │  1B+1B   │   2B + 4B    │ │  │
+│  │  │ "GQ"  │  0x01  │       │       │        │          │ 0-4 + R  │              │ │  │
+│  │  └───────┴────────┴───────┴───────┴────────┴──────────┴──────────┴──────────────┘ │  │
+│  │                                                    ▲                              │  │
+│  │                                                    │                              │  │
+│  │                              Priority byte: 0=Critical, 1=High, 2=Normal,         │  │
+│  │                                             3=Low, 4=Background                   │  │
+│  └───────────────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                         │
+│  ┌───────────────────────────────────────────────────────────────────────────────────┐  │
+│  │                     Per-Partition Priority Scheduler                              │  │
+│  │                                                                                   │  │
+│  │   ┌─────────────────────────────────────────────────────────────────────────────┐ │  │
+│  │   │  Weighted Fair Queuing (Deficit Round Robin Algorithm)                      │ │  │
+│  │   │                                                                             │ │  │
+│  │   │  Priority       Weight   Quantum   Share     Use Case                       │ │  │
+│  │   │  ─────────────────────────────────────────────────────────────────────────  │ │  │
+│  │   │  Critical (0)   50       50        50%       Circuit breakers, emergencies  │ │  │
+│  │   │  High (1)       25       25        25%       Paid users, real-time updates  │ │  │
+│  │   │  Normal (2)     15       15        15%       Default traffic                │ │  │
+│  │   │  Low (3)         7        7         7%       Batch jobs, reports            │ │  │
+│  │   │  Background (4)  3        3         3%       Analytics, cleanup tasks       │ │  │
+│  │   │                                                                             │ │  │
+│  │   │  HOW DRR WORKS:                                                             │ │  │
+│  │   │  1. Each priority has a deficit counter (starts at 0)                       │ │  │
+│  │   │  2. Add quantum to deficit when visiting priority                           │ │  │
+│  │   │  3. Dequeue messages while deficit > 0 and queue not empty                  │ │  │
+│  │   │  4. Move to next priority (Critical checked first every round)              │ │  │
+│  │   │  5. Reset deficit when queue empties                                        │ │  │
+│  │   └─────────────────────────────────────────────────────────────────────────────┘ │  │
+│  │                                                                                   │  │
+│  │   ┌─────────────────────────────────────────────────────────────────────────────┐ │  │
+│  │   │                    Starvation Prevention                                    │ │  │
+│  │   │                                                                             │ │  │
+│  │   │   Problem: Low priority messages could wait forever if high priority        │ │  │
+│  │   │            traffic is constant                                              │ │  │
+│  │   │                                                                             │ │  │
+│  │   │   Solution: Starvation Timeout (default 30s)                                │ │  │
+│  │   │                                                                             │ │  │
+│  │   │   ┌─────────────┐                     ┌─────────────┐                       │ │  │
+│  │   │   │ Background  │  wait > 30s         │ Temporarily │                       │ │  │
+│  │   │   │ message     │ ──────────────────► │ boosted to  │ ──► Served            │ │  │
+│  │   │   │ waiting     │                     │ Critical    │                       │ │  │
+│  │   │   └─────────────┘                     └─────────────┘                       │ │  │
+│  │   │                                                                             │ │  │
+│  │   │   Each dequeue checks: if oldest message at any priority has waited         │ │  │
+│  │   │   longer than threshold, it gets served regardless of WFQ state             │ │  │
+│  │   └─────────────────────────────────────────────────────────────────────────────┘ │  │
+│  └───────────────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                         │
+│  ┌───────────────────────────────────────────────────────────────────────────────────┐  │
+│  │                          Priority Flow Diagram                                    │  │
+│  │                                                                                   │  │
+│  │   Producer                    Partition                         Consumer          │  │
+│  │      │                           │                                 │              │  │
+│  │      │  Publish(priority=High)   │                                 │              │  │
+│  │      │ ─────────────────────────►│                                 │              │  │
+│  │      │                           │                                 │              │  │
+│  │      │                     ┌─────┴─────┐                           │              │  │
+│  │      │                     │  Log      │ ← All messages written    │              │  │
+│  │      │                     │ (append)  │   in arrival order        │              │  │
+│  │      │                     └─────┬─────┘                           │              │  │
+│  │      │                           │                                 │              │  │
+│  │      │                     ┌─────┴─────┐                           │              │  │
+│  │      │                     │ Priority  │ ← Enqueued by priority    │              │  │
+│  │      │                     │ Scheduler │                           │              │  │
+│  │      │                     │  [C][H][N][L][B]                      │              │  │
+│  │      │                     └─────┬─────┘                           │              │  │
+│  │      │                           │                                 │              │  │
+│  │      │                           │  WFQ selects next message       │              │  │
+│  │      │                           │ ───────────────────────────────►│              │  │
+│  │      │                           │                                 │              │  │
+│  └───────────────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                         │
+└─────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Per-Priority-Per-Partition Metrics (PPPP)
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│                         PRIORITY METRICS ARCHITECTURE                                   │
+│                                                                                         │
+│  GET /priority/stats                                                                    │
+│                                                                                         │
+│  Response:                                                                              │
+│  {                                                                                      │
+│    "topics": {                                                                          │
+│      "orders": {                                                                        │
+│        "partitions": {                                                                  │
+│          "0": {                                                                         │
+│            "ready": [100, 50, 200, 30, 10],      // per priority [C,H,N,L,B]            │
+│            "in_flight": [5, 2, 10, 1, 0],        // being processed                     │
+│            "enqueue_rate": [10.5, 5.2, 20.0, 3.0, 1.0],  // msg/sec                     │
+│            "dequeue_rate": [10.0, 5.0, 19.5, 2.8, 0.9],  // msg/sec                     │
+│            "last_served": [                       // Unix timestamps                    │
+│              "2026-01-03T12:00:00Z",                                                    │
+│              "2026-01-03T12:00:01Z",                                                    │
+│              "2026-01-03T12:00:00Z",                                                    │
+│              "2026-01-03T11:59:45Z",                                                    │
+│              "2026-01-03T11:59:30Z"                                                     │
+│            ]                                                                            │
+│          },                                                                             │
+│          "1": { ... }                                                                   │
+│        }                                                                                │
+│      }                                                                                  │
+│    }                                                                                    │
+│  }                                                                                      │
+│                                                                                         │
+│  Key Metrics per Priority:                                                              │
+│  • ready       - Messages waiting to be consumed                                        │
+│  • in_flight   - Messages delivered but not yet acknowledged                            │
+│  • enqueue_rate - Moving average of publish rate (msg/sec)                              │
+│  • dequeue_rate - Moving average of consume rate (msg/sec)                              │
+│  • last_served  - Timestamp of last message dequeued (for starvation detection)         │
+│                                                                                         │
+└─────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### API Endpoints (M6)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/topics/{name}/messages` | POST | Publish with `priority` param (critical/high/normal/low/background) |
+| `/topics/{name}/messages` | GET | Consume respects priority ordering via WFQ |
+| `/priority/stats` | GET | Per-priority-per-partition metrics |
+
+### Priority Comparison with Other Systems
+
+| Feature | GoQueue (M6) | Kafka | RabbitMQ | SQS |
+|---------|--------------|-------|----------|-----|
+| Priority Support | ✅ 5 levels | ❌ No | ✅ 10 levels | ❌ No |
+| Algorithm | WFQ (DRR) | N/A | Strict | N/A |
+| Fairness | ✅ Weighted | N/A | ❌ Strict | N/A |
+| Starvation Prevention | ✅ 30s timeout | N/A | ❌ No | N/A |
+| Per-partition | ✅ Yes | N/A | Per-queue | N/A |
+| Persistence | ✅ In message | N/A | Memory only | N/A |
+
+### Why WFQ over Strict Priority?
+
+```
+STRICT PRIORITY (RabbitMQ style):
+─────────────────────────────────
+  High priority ALWAYS before low priority
+  
+  Problem: Starvation
+  ┌────────────────────────────────────────┐
+  │ High traffic: ████████████████████████ │ ← Always served
+  │ Low traffic:  ░░░░░░░░░░░░░░░░░░░░░░░░ │ ← Never served!
+  └────────────────────────────────────────┘
+
+
+WEIGHTED FAIR QUEUING (GoQueue):
+────────────────────────────────
+  Higher priority gets MORE, but all get SOME
+  
+  Distribution (over 100 messages):
+  ┌────────────────────────────────────────┐
+  │ Critical:   ██████████████████████████████████████████████████ (50)
+  │ High:       █████████████████████████ (25)
+  │ Normal:     ███████████████ (15)
+  │ Low:        ███████ (7)
+  │ Background: ███ (3)
+  └────────────────────────────────────────┘
+  
+  Every priority gets served proportionally to its weight!
+```
+
+---
+
 ## Comparison with Industry Systems
 
 | Feature | GoQueue | Kafka | RabbitMQ | SQS |
@@ -873,7 +1057,7 @@ Phase 1: Foundations           Phase 2: Advanced            Phase 3: Distributio
  [M1] Storage ✅                [M5] Delay Queue ✅          [M10] Cluster
       │                              │                            │
       ▼                              ▼                            ▼
- [M2] Topics ✅                 [M6] Priority ⭐             [M11] Replication
+ [M2] Topics ✅                 [M6] Priority ✅ ⭐           [M11] Replication
       │                              │                            │
       ▼                              ▼                            ▼
  [M3] Consumer ✅               [M7] Tracing ⭐              [M12] Coop Rebalance ⭐
@@ -893,4 +1077,4 @@ Phase 4: Operations
 
 ---
 
-*Last Updated: Milestone 5 Complete - Native Delay & Scheduled Messages*
+*Last Updated: Milestone 6 Complete - Priority Lanes with WFQ*

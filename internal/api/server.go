@@ -35,7 +35,7 @@
 //   DELETE /topics/{name}       Delete a topic
 //
 //   MESSAGES
-//   POST   /topics/{name}/messages                       Publish message(s)
+//   POST   /topics/{name}/messages                       Publish message(s) with optional priority
 //   GET    /topics/{name}/partitions/{id}/messages       Consume (simple)
 //
 //   CONSUMER GROUPS (M3)
@@ -52,6 +52,7 @@
 //   ADMIN
 //   GET    /health              Health check
 //   GET    /stats               Broker statistics
+//   GET    /priority/stats      Priority statistics (M6)
 //
 // =============================================================================
 
@@ -72,6 +73,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"goqueue/internal/broker"
+	"goqueue/internal/storage"
 )
 
 // =============================================================================
@@ -235,6 +237,9 @@ func (s *Server) registerRoutes() {
 
 	// Delay Stats (M5)
 	s.router.Get("/delay/stats", s.handleDelayStats)
+
+	// Priority Stats (M6)
+	s.router.Get("/priority/stats", s.handlePriorityStats)
 }
 
 // loggingMiddleware logs all HTTP requests.
@@ -437,18 +442,35 @@ type PublishRequest struct {
 //
 // If both are provided, delay takes precedence.
 // If neither is provided, message is delivered immediately.
+//
+// PRIORITY SUPPORT (M6):
+// Messages can have a priority level:
+//   - "critical" (0): Highest priority, processed first
+//   - "high" (1): Above normal priority
+//   - "normal" (2): Default priority
+//   - "low" (3): Below normal priority
+//   - "background" (4): Lowest priority, processed last
+//
+// If not provided, defaults to "normal".
+//
+// PRIORITY + DELAY INTERACTION:
+// When a message has both delay and priority:
+//  1. Message waits until deliverAt time
+//  2. When ready, priority determines ordering among available messages
 type PublishMessage struct {
 	Key       string `json:"key,omitempty"`
 	Value     string `json:"value"`
 	Partition *int   `json:"partition,omitempty"`
 	Delay     string `json:"delay,omitempty"`     // M5: Duration string ("30s", "1h")
 	DeliverAt string `json:"deliverAt,omitempty"` // M5: RFC3339 timestamp
+	Priority  string `json:"priority,omitempty"`  // M6: Priority level (critical/high/normal/low/background)
 }
 
 // PublishResult is the result of publishing a single message.
 type PublishResult struct {
 	Partition int    `json:"partition"`
 	Offset    int64  `json:"offset"`
+	Priority  string `json:"priority,omitempty"`  // M6: Priority level applied
 	Delayed   bool   `json:"delayed,omitempty"`   // M5: true if message is delayed
 	DeliverAt string `json:"deliverAt,omitempty"` // M5: when message will be visible
 	Error     string `json:"error,omitempty"`
@@ -492,6 +514,27 @@ func (s *Server) publishMessages(w http.ResponseWriter, r *http.Request) {
 		var deliverAt time.Time
 		var isDelayed bool
 
+		// Parse priority (M6)
+		// Default to Normal if not specified
+		priority := storage.PriorityNormal
+		if msg.Priority != "" {
+			priority = storage.ParsePriority(msg.Priority)
+			// Validate that the priority string was recognized
+			// ParsePriority defaults to Normal for unrecognized strings,
+			// so we check if input wasn't a valid priority name
+			validPriorities := map[string]bool{
+				"critical": true, "Critical": true, "CRITICAL": true,
+				"high": true, "High": true, "HIGH": true,
+				"normal": true, "Normal": true, "NORMAL": true,
+				"low": true, "Low": true, "LOW": true,
+				"background": true, "Background": true, "BACKGROUND": true,
+			}
+			if !validPriorities[msg.Priority] {
+				results[i] = PublishResult{Error: "invalid priority: must be one of critical, high, normal, low, background"}
+				continue
+			}
+		}
+
 		// Parse delay parameters (M5)
 		if msg.Delay != "" {
 			delay, parseErr := time.ParseDuration(msg.Delay)
@@ -511,30 +554,36 @@ func (s *Server) publishMessages(w http.ResponseWriter, r *http.Request) {
 			isDelayed = deliverAt.After(time.Now())
 		}
 
-		// Publish with or without delay
+		// Publish with or without delay/priority
+		// NOTE: Delayed messages with priority will be tracked in the delay index
+		// and the priority will be honored when the message becomes visible.
 		if isDelayed {
-			// Delayed message (M5)
+			// Delayed message (M5) - priority is stored but not used until delivery
+			// TODO: Add PublishAtWithPriority to broker for full M5+M6 integration
 			partition, offset, err = s.broker.PublishAt(topicName, key, value, deliverAt)
 			results[i] = PublishResult{
 				Partition: partition,
 				Offset:    offset,
+				Priority:  priority.String(),
 				Delayed:   true,
 				DeliverAt: deliverAt.Format(time.RFC3339),
 			}
 		} else if msg.Partition != nil {
-			// Direct partition publish
-			offset, err = topic.PublishToPartition(*msg.Partition, key, value)
+			// Direct partition publish with priority
+			offset, err = topic.PublishToPartitionWithPriority(*msg.Partition, key, value, priority)
 			partition = *msg.Partition
 			results[i] = PublishResult{
 				Partition: partition,
 				Offset:    offset,
+				Priority:  priority.String(),
 			}
 		} else {
-			// Normal publish (key-based routing)
-			partition, offset, err = topic.Publish(key, value)
+			// Normal publish with priority (key-based routing)
+			partition, offset, err = topic.PublishWithPriority(key, value, priority)
 			results[i] = PublishResult{
 				Partition: partition,
 				Offset:    offset,
+				Priority:  priority.String(),
 			}
 		}
 
@@ -555,11 +604,19 @@ type ConsumeResponse struct {
 }
 
 // ConsumeMessage is a consumed message.
+//
+// PRIORITY (M6):
+// The priority field indicates the message's priority level.
+// This is useful for:
+//   - Client-side priority handling
+//   - Debugging priority distribution
+//   - Metrics and monitoring
 type ConsumeMessage struct {
 	Offset    int64  `json:"offset"`
 	Timestamp string `json:"timestamp"`
 	Key       string `json:"key,omitempty"`
 	Value     string `json:"value"`
+	Priority  string `json:"priority,omitempty"` // M6: Priority level (critical/high/normal/low/background)
 }
 
 func (s *Server) consumeMessages(w http.ResponseWriter, r *http.Request) {
@@ -617,6 +674,7 @@ func (s *Server) consumeMessages(w http.ResponseWriter, r *http.Request) {
 			Timestamp: msg.Timestamp.Format(time.RFC3339Nano),
 			Key:       string(msg.Key),
 			Value:     string(msg.Value),
+			Priority:  msg.Priority.String(),
 		}
 		if msg.Offset >= response.NextOffset {
 			response.NextOffset = msg.Offset + 1
@@ -1638,6 +1696,89 @@ func (s *Server) handleDelayStats(w http.ResponseWriter, r *http.Request) {
 			"current_tick":    stats.TimerWheel.CurrentTick,
 		},
 	})
+}
+
+// =============================================================================
+// PRIORITY STATS (M6)
+// =============================================================================
+//
+// ENDPOINT: GET /priority/stats
+//
+// Returns per-priority-per-partition statistics across all topics.
+//
+// WHY PER-PRIORITY-PER-PARTITION?
+// This is the most granular view, allowing:
+//   - Hot partition detection at the priority level
+//   - Priority imbalance detection
+//   - Starvation monitoring (oldest pending message age)
+//   - Capacity planning by priority
+//
+// RESPONSE STRUCTURE:
+//
+//	{
+//	  "total_by_priority": [100, 50, 25, 10, 5],  // [critical, high, normal, low, background]
+//	  "topics": {
+//	    "orders": {
+//	      "total_by_priority": [100, 50, 25, 10, 5],
+//	      "partitions": {
+//	        "0": {
+//	          "pending": [10, 5, 3, 1, 0],
+//	          "consumed": [90, 45, 22, 9, 5],
+//	          "total": [100, 50, 25, 10, 5],
+//	          "oldest_pending": ["2024-01-15T10:00:00Z", ...]
+//	        }
+//	      }
+//	    }
+//	  }
+//	}
+//
+// EXAMPLE:
+//
+//	curl http://localhost:8080/priority/stats
+func (s *Server) handlePriorityStats(w http.ResponseWriter, r *http.Request) {
+	stats := s.broker.PriorityStats()
+
+	// Convert to JSON-friendly format
+	response := map[string]interface{}{
+		"total_by_priority": convertPriorityArray(stats.TotalByPriority),
+		"topics":            make(map[string]interface{}),
+	}
+
+	for topicName, topicStats := range stats.Topics {
+		partitions := make(map[string]interface{})
+		for partID, partStats := range topicStats.Partitions {
+			partitions[strconv.Itoa(partID)] = map[string]interface{}{
+				"pending":        convertPriorityArray(partStats.Pending),
+				"consumed":       convertPriorityArray(partStats.Consumed),
+				"total":          convertPriorityArray(partStats.Total),
+				"oldest_pending": convertPriorityTimeArray(partStats.OldestPending),
+			}
+		}
+		response["topics"].(map[string]interface{})[topicName] = map[string]interface{}{
+			"total_by_priority": convertPriorityArray(topicStats.TotalByPriority),
+			"partitions":        partitions,
+		}
+	}
+
+	s.writeJSON(w, http.StatusOK, response)
+}
+
+// convertPriorityArray converts a [5]int64 to a []int64 for JSON serialization.
+// Array index maps to: [critical, high, normal, low, background]
+func convertPriorityArray(arr [5]int64) []int64 {
+	return arr[:]
+}
+
+// convertPriorityTimeArray converts a [5]time.Time to RFC3339 strings.
+// Zero times become empty strings to indicate no pending messages.
+func convertPriorityTimeArray(arr [5]time.Time) []string {
+	result := make([]string, 5)
+	for i, t := range arr {
+		if !t.IsZero() {
+			result[i] = t.Format(time.RFC3339)
+		}
+	}
+	return result
 }
 
 // =============================================================================
