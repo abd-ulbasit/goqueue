@@ -132,6 +132,45 @@ Hierarchical timing wheel for O(1) delay scheduling:
 └─────────────────────────────────────────────────────────────────┘
 ```
 
+### 4.5 Priority Lanes with Weighted Fair Queuing
+
+Per-partition priority scheduling using Deficit Round Robin:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                 Priority Scheduler (per Partition)               │
+│                                                                  │
+│  Priority Queues:                                                │
+│  ┌────────────────────────────────────────────────────────────┐ │
+│  │ Critical (0) │████████████████████████████████████████████│ │ Weight 50
+│  │ High     (1) │████████████████████████                    │ │ Weight 25
+│  │ Normal   (2) │███████████████                             │ │ Weight 15
+│  │ Low      (3) │███████                                     │ │ Weight 7
+│  │ Background(4)│███                                         │ │ Weight 3
+│  └────────────────────────────────────────────────────────────┘ │
+│                                                                  │
+│  Deficit Round Robin Algorithm:                                  │
+│  1. Add quantum (weight) to deficit counter                      │
+│  2. Dequeue while deficit > 0 AND queue not empty                │
+│  3. Subtract 1 from deficit for each dequeue                     │
+│  4. Move to next priority (Critical always checked first)        │
+│  5. Reset deficit when queue empties                             │
+│                                                                  │
+│  Starvation Prevention:                                          │
+│  - Track last-served timestamp per priority                      │
+│  - If wait > 30s, temporarily boost to Critical                  │
+│  - Serve boosted message, reset timer                            │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+
+Message Header Layout (32 bytes):
+┌───────┬────────┬───────┬───────┬────────┬──────────┬──────────┬──────────┐
+│ Magic │Version │ Flags │ CRC32 │ Offset │Timestamp │ Priority │ KeyLen+  │
+│  2B   │  1B    │  1B   │  4B   │   8B   │    8B    │  1B+1B   │ ValueLen │
+│ "GQ"  │  0x01  │       │       │        │          │ 0-4 + R  │  2B+4B   │
+└───────┴────────┴───────┴───────┴────────┴──────────┴──────────┴──────────┘
+```
+
 ### 5. Visibility Timeout State Machine
 
 ```

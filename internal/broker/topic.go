@@ -331,6 +331,43 @@ func (t *Topic) hashPartition(key []byte, numPartitions int) int {
 	return DefaultPartitioner.Partition(key, nil, numPartitions)
 }
 
+// PublishWithPriority writes a message with specified priority to the topic.
+// Routes to partition based on key (hash) or round-robin (nil key).
+//
+// PARAMETERS:
+//   - key: Routing key (determines partition). nil = round-robin.
+//   - value: Message payload
+//   - priority: Message priority level (Critical, High, Normal, Low, Background)
+//
+// Priority affects consumption order when using ConsumeByPriority or WFQ.
+func (t *Topic) PublishWithPriority(key, value []byte, priority storage.Priority) (partition int, offset int64, err error) {
+	t.mu.RLock()
+	if t.closed {
+		t.mu.RUnlock()
+		return 0, 0, ErrTopicClosed
+	}
+	numPartitions := len(t.partitions)
+	t.mu.RUnlock()
+
+	// Determine target partition (same logic as Publish)
+	if key != nil {
+		partition = t.hashPartition(key, numPartitions)
+	} else {
+		t.mu.Lock()
+		partition = int(t.roundRobinCounter % uint64(numPartitions))
+		t.roundRobinCounter++
+		t.mu.Unlock()
+	}
+
+	// Write to partition with priority
+	offset, err = t.partitions[partition].ProduceWithPriority(key, value, priority)
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to publish to partition %d: %w", partition, err)
+	}
+
+	return partition, offset, nil
+}
+
 // PublishToPartition writes directly to a specific partition.
 // Use with caution - bypasses routing logic.
 func (t *Topic) PublishToPartition(partition int, key, value []byte) (int64, error) {
@@ -347,6 +384,22 @@ func (t *Topic) PublishToPartition(partition int, key, value []byte) (int64, err
 	return p.Produce(key, value)
 }
 
+// PublishToPartitionWithPriority writes directly to a specific partition with priority.
+// Use with caution - bypasses routing logic.
+func (t *Topic) PublishToPartitionWithPriority(partition int, key, value []byte, priority storage.Priority) (int64, error) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	if t.closed {
+		return 0, ErrTopicClosed
+	}
+	if partition < 0 || partition >= len(t.partitions) {
+		return 0, fmt.Errorf("invalid partition %d (topic has %d partitions)", partition, len(t.partitions))
+	}
+	p := t.partitions[partition]
+
+	return p.ProduceWithPriority(key, value, priority)
+}
+
 // =============================================================================
 // CONSUMER OPERATIONS
 // =============================================================================
@@ -355,12 +408,20 @@ func (t *Topic) PublishToPartition(partition int, key, value []byte) (int64, err
 //
 // PARAMETERS:
 //   - partition: Which partition to read from
-//   - fromOffset: Starting offset (inclusive)
-//   - maxMessages: Maximum messages to return
+//   - fromOffset: Starting offset (inclusive) - message at this offset can be returned
+//   - maxMessages: Maximum messages to return (0 = no limit)
+//
+// OFFSET SEMANTICS: All consume methods use INCLUSIVE offsets.
+//
+//	fromOffset = 0 → returns message at offset 0 (if exists)
+//	fromOffset = 5 → returns messages starting from offset 5
 //
 // CONSUMER MODEL:
 // Each consumer reads from specific partitions at specific offsets.
 // The topic doesn't track consumer state - that's the consumer's job.
+//
+// DEFAULT BEHAVIOR: Priority-aware consumption (highest priority first).
+// For offset-sequential consumption, use ConsumeByOffset().
 func (t *Topic) Consume(partition int, fromOffset int64, maxMessages int) ([]*storage.Message, error) {
 	t.mu.RLock()
 	if t.closed {
@@ -375,6 +436,24 @@ func (t *Topic) Consume(partition int, fromOffset int64, maxMessages int) ([]*st
 	t.mu.RUnlock()
 
 	return p.Consume(fromOffset, maxMessages)
+}
+
+// ConsumeByOffset reads messages sequentially by offset (FIFO, ignoring priority).
+// Use this for Kafka-like behavior where you consume the log in offset order.
+func (t *Topic) ConsumeByOffset(partition int, fromOffset int64, maxMessages int) ([]*storage.Message, error) {
+	t.mu.RLock()
+	if t.closed {
+		t.mu.RUnlock()
+		return nil, ErrTopicClosed
+	}
+	if partition < 0 || partition >= len(t.partitions) {
+		t.mu.RUnlock()
+		return nil, fmt.Errorf("invalid partition %d", partition)
+	}
+	p := t.partitions[partition]
+	t.mu.RUnlock()
+
+	return p.ConsumeByOffset(fromOffset, maxMessages)
 }
 
 // ConsumeAll reads messages from all partitions (for single-partition topics).

@@ -1,10 +1,10 @@
 # GoQueue Development Progress
 
-## Status: Phase 1 - In Progress
+## Status: Phase 2 - In Progress
 
 **Target Milestones**: 18
-**Completed**: 2
-**Current**: Milestone 3 (Consumer Groups)
+**Completed**: 6
+**Current**: Milestone 7 (Message Tracing)
 
 ---
 
@@ -125,7 +125,7 @@ AckMode Enum (forward-compatible):
 
 ---
 
-### Milestone 3: Consumer Groups & Offset Management ⏳ CURRENT
+### Milestone 3: Consumer Groups & Offset Management ✅ COMPLETE
 
 **Goal:** Multiple consumers sharing partition load with reliable offset tracking.
 
@@ -136,20 +136,20 @@ AckMode Enum (forward-compatible):
 - The rebalancing problem (and why Kafka's is painful)
 
 **Deliverables:**
-- [ ] Consumer group registry
-- [ ] Partition assignment (range strategy first)
-- [ ] Offset storage (file-based per group)
-- [ ] Manual commit API
-- [ ] Auto-commit with configurable interval
-- [ ] Consumer heartbeat mechanism
-- [ ] Long-polling message fetch
-- [ ] Basic rebalancing on join/leave
-- [ ] HTTP API for consumer operations
-- [ ] Session timeout detection
+- [x] Consumer group registry
+- [x] Partition assignment (range strategy first)
+- [x] Offset storage (file-based per group)
+- [x] Manual commit API
+- [x] Auto-commit with configurable interval
+- [x] Consumer heartbeat mechanism
+- [x] Long-polling message fetch
+- [x] Basic rebalancing on join/leave
+- [x] HTTP API for consumer operations
+- [x] Session timeout detection
 
 ---
 
-### Milestone 4: Reliability - ACKs, Visibility & DLQ
+### Milestone 4: Reliability - ACKs, Visibility & DLQ ✅ COMPLETE
 
 **Goal:** At-least-once delivery with per-message acknowledgment.
 
@@ -160,21 +160,21 @@ AckMode Enum (forward-compatible):
 - Retry strategies with exponential backoff
 
 **Deliverables:**
-- [ ] Per-message ACK/NACK API
-- [ ] Visibility timeout tracking
-- [ ] In-flight message index
-- [ ] Retry counter per message
-- [ ] Dead letter queue routing
-- [ ] DLQ topic auto-creation
-- [ ] Backpressure (max unacked per consumer)
-- [ ] Consumer lag calculation
-- [ ] Message TTL (expire unprocessed)
+- [x] Per-message ACK/NACK API
+- [x] Visibility timeout tracking
+- [x] In-flight message index
+- [x] Retry counter per message
+- [x] Dead letter queue routing
+- [x] DLQ topic auto-creation
+- [x] Backpressure (max unacked per consumer)
+- [x] Consumer lag calculation
+- [x] Message TTL (expire unprocessed)
 
 ---
 
 ## Phase 2: Advanced Features (Milestones 5-9)
 
-### Milestone 5: Native Delay & Scheduled Messages ⭐ UNIQUE
+### Milestone 5: Native Delay & Scheduled Messages ✅ COMPLETE ⭐ UNIQUE
 
 **Goal:** First-class delayed message delivery.
 
@@ -185,13 +185,13 @@ AckMode Enum (forward-compatible):
 - Trade-offs: memory vs disk for delay tracking
 
 **Deliverables:**
-- [ ] Hierarchical timer wheel implementation
-- [ ] Delay index (persistent)
-- [ ] Publish with delay parameter
-- [ ] Publish with deliver-at timestamp
-- [ ] Delay bucket optimization
-- [ ] Timer tick goroutine
-- [ ] Cancel delayed message
+- [x] Hierarchical timer wheel implementation
+- [x] Delay index (persistent)
+- [x] Publish with delay parameter
+- [x] Publish with deliver-at timestamp
+- [x] Delay bucket optimization
+- [x] Timer tick goroutine
+- [x] Cancel delayed message
 - [ ] Benchmark: 1M delayed messages
 
 **Why This Matters:**
@@ -199,7 +199,7 @@ AckMode Enum (forward-compatible):
 
 ---
 
-### Milestone 6: Priority Lanes ⭐ UNIQUE
+### Milestone 6: Priority Lanes ✅ COMPLETE ⭐ UNIQUE
 
 **Goal:** Fast-track high-priority messages within partitions.
 
@@ -207,15 +207,96 @@ AckMode Enum (forward-compatible):
 - Priority queue data structures
 - Fairness vs strict priority trade-offs
 - Starvation prevention
+- Weighted Fair Queuing (WFQ) using Deficit Round Robin
 
 **Deliverables:**
-- [ ] Priority levels (high, normal, low)
-- [ ] Per-partition priority queues
-- [ ] Weighted fair queuing option
-- [ ] Priority in message format
-- [ ] Priority-aware consumer fetch
-- [ ] Anti-starvation (low priority timeout)
-- [ ] Priority metrics per lane
+- [x] Priority levels (Critical, High, Normal, Low, Background)
+- [x] Per-partition priority queues
+- [x] Weighted fair queuing (Deficit Round Robin)
+- [x] Priority in message format (32-byte header V2)
+- [x] Priority-aware consumer fetch
+- [x] Anti-starvation (configurable timeout, 30s default)
+- [x] Priority metrics per lane (per-priority-per-partition)
+- [x] HTTP API with `/priority/stats` endpoint
+
+**Implementation Notes:**
+```
+Message Header V2 (32 bytes - Breaking Change):
+┌───────┬────────┬───────┬───────┬────────┬──────────┬──────────┬──────────┬─────────┬──────────┐
+│ Magic │Version │ Flags │ CRC32 │ Offset │Timestamp │ Priority │ Reserved │ KeyLen  │ ValueLen │
+│  2B   │  1B    │  1B   │  4B   │   8B   │    8B    │    1B    │    1B    │   2B    │    4B    │
+└───────┴────────┴───────┴───────┴────────┴──────────┴──────────┴──────────┴─────────┴──────────┘
+
+Priority Levels:
+  PriorityCritical   = 0  (emergencies, circuit breakers)
+  PriorityHigh       = 1  (paid users, real-time)
+  PriorityNormal     = 2  (default)
+  PriorityLow        = 3  (batch jobs, reports)
+  PriorityBackground = 4  (analytics, cleanup)
+
+Weighted Fair Queuing (Deficit Round Robin):
+  ┌─────────────────────────────────────────────────────────┐
+  │          Priority Scheduler (DRR Algorithm)             │
+  │                                                         │
+  │  Priority    Weight   Quantum   Share                   │
+  │  ─────────────────────────────────────                  │
+  │  Critical    50       50        50%                     │
+  │  High        25       25        25%                     │
+  │  Normal      15       15        15%                     │
+  │  Low          7        7         7%                     │
+  │  Background   3        3         3%                     │
+  │                                                         │
+  │  Deficit Round Robin:                                   │
+  │  1. Add quantum to deficit counter                      │
+  │  2. Dequeue while deficit > 0 and queue not empty       │
+  │  3. Move to next priority                               │
+  │  4. Reset deficit when queue empties                    │
+  └─────────────────────────────────────────────────────────┘
+
+Starvation Prevention:
+  ┌─────────────────────────────────────────────────────────┐
+  │ If lower priority hasn't been served for 30s:           │
+  │   → Temporarily boost to Critical priority              │
+  │   → Serve boosted message                               │
+  │   → Reset starvation timer                              │
+  │   → Restore original priority tracking                  │
+  └─────────────────────────────────────────────────────────┘
+
+Per-Priority-Per-Partition Metrics (PPPP):
+  GET /priority/stats
+  {
+    "topics": {
+      "orders": {
+        "partitions": {
+          "0": {
+            "ready": [100, 50, 200, 30, 10],  // per priority
+            "in_flight": [5, 2, 10, 1, 0],
+            "enqueue_rate": [10.5, 5.2, 20.0, 3.0, 1.0],
+            "dequeue_rate": [10.0, 5.0, 19.5, 2.8, 0.9]
+          }
+        }
+      }
+    }
+  }
+```
+
+**Tests:**
+- [x] Basic enqueue/dequeue operations
+- [x] Priority ordering (higher always first when available)
+- [x] WFQ distribution follows weights
+- [x] Critical priority always served first
+- [x] Starvation prevention triggers after timeout
+- [x] Single priority mode (no starvation timeout)
+- [x] DequeueByPriority for priority-specific consumption
+- [x] DequeueN batch operations
+- [x] EnqueueBatch for bulk inserts
+- [x] Stats collection and reporting
+
+**Key Learnings:**
+- WFQ provides fairness while respecting priority
+- Deficit Round Robin is O(1) for dequeue, simple to implement
+- uint8 types in Go cause infinite loops when decremented below 0 (wrap to 255)
+- Message format versioning critical for backward compatibility
 
 ---
 

@@ -65,6 +65,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"goqueue/internal/storage"
 )
 
 // =============================================================================
@@ -573,26 +575,117 @@ func (b *Broker) PublishBatch(topic string, messages []struct {
 }
 
 // =============================================================================
+// PRIORITY-AWARE PRODUCER INTERFACE (M6)
+// =============================================================================
+
+// PublishWithPriority writes a message with specified priority to a topic.
+//
+// PARAMETERS:
+//   - topic: Topic name
+//   - key: Routing key (for partition selection). nil = round-robin.
+//   - value: Message payload
+//   - priority: Message priority (Critical, High, Normal, Low, Background)
+//
+// Priority determines the order of delivery to consumers when using
+// ConsumeByPriority or ConsumeByPriorityWFQ.
+//
+// EXAMPLE:
+//
+//	// High priority payment message
+//	p, o, err := broker.PublishWithPriority("orders", orderID, data, storage.PriorityHigh)
+//
+//	// Background analytics event
+//	p, o, err := broker.PublishWithPriority("events", nil, data, storage.PriorityBackground)
+func (b *Broker) PublishWithPriority(topic string, key, value []byte, priority storage.Priority) (partition int, offset int64, err error) {
+	b.mu.RLock()
+	if b.closed {
+		b.mu.RUnlock()
+		return 0, 0, ErrBrokerClosed
+	}
+
+	t, exists := b.topics[topic]
+	if !exists {
+		b.mu.RUnlock()
+		return 0, 0, fmt.Errorf("%w: %s", ErrTopicNotFound, topic)
+	}
+	b.mu.RUnlock()
+
+	return t.PublishWithPriority(key, value, priority)
+}
+
+// PublishBatchWithPriority writes multiple messages with priorities to a topic.
+//
+// Each message can have its own priority, enabling mixed-priority batch writes.
+//
+// RETURNS:
+//   - Slice of results (partition, offset) for each message
+//   - Error if any publish fails (partial writes may have occurred)
+func (b *Broker) PublishBatchWithPriority(topic string, messages []struct {
+	Key      []byte
+	Value    []byte
+	Priority storage.Priority
+}) ([]struct {
+	Partition int
+	Offset    int64
+}, error) {
+	b.mu.RLock()
+	if b.closed {
+		b.mu.RUnlock()
+		return nil, ErrBrokerClosed
+	}
+
+	t, exists := b.topics[topic]
+	if !exists {
+		b.mu.RUnlock()
+		return nil, fmt.Errorf("%w: %s", ErrTopicNotFound, topic)
+	}
+	b.mu.RUnlock()
+
+	results := make([]struct {
+		Partition int
+		Offset    int64
+	}, len(messages))
+
+	for i, msg := range messages {
+		partition, offset, err := t.PublishWithPriority(msg.Key, msg.Value, msg.Priority)
+		if err != nil {
+			return results[:i], fmt.Errorf("failed at message %d: %w", i, err)
+		}
+		results[i] = struct {
+			Partition int
+			Offset    int64
+		}{partition, offset}
+	}
+
+	return results, nil
+}
+
+// =============================================================================
 // CONSUMER INTERFACE
 // =============================================================================
 
-// Consume reads messages from a topic partition.
+// Consume reads messages from a topic partition in priority order.
+//
+// DEFAULT BEHAVIOR: Messages are returned highest-priority-first.
+//   - Priority 0 (Critical) before Priority 1 (High)
+//   - Within same priority, FIFO order is maintained
 //
 // PARAMETERS:
 //   - topic: Topic name
 //   - partition: Partition number
-//   - fromOffset: Starting offset (inclusive)
+//   - fromOffset: Starting offset (inclusive) - message at this offset can be returned
 //   - maxMessages: Max messages to return (0 = no limit)
+//
+// OFFSET SEMANTICS: All consume methods use INCLUSIVE offsets.
+//
+//	fromOffset = 0 → returns message at offset 0 (if exists)
+//	fromOffset = 5 → returns messages starting from offset 5
 //
 // RETURNS:
 //   - Slice of messages (may be empty if no new messages)
 //   - Error if read fails
 //
-// This is the main consumer API. Consumers:
-//  1. Track their own offset ("I've processed up to offset 100")
-//  2. Call Consume to get next batch
-//  3. Process messages
-//  4. Update their tracked offset
+// For offset-sequential consumption (Kafka-like FIFO), use ConsumeByOffset().
 func (b *Broker) Consume(topic string, partition int, fromOffset int64, maxMessages int) ([]Message, error) {
 	b.mu.RLock()
 	if b.closed {
@@ -622,10 +715,190 @@ func (b *Broker) Consume(topic string, partition int, fromOffset int64, maxMessa
 			Timestamp: time.Unix(0, sm.Timestamp),
 			Key:       sm.Key,
 			Value:     sm.Value,
+			Priority:  sm.Priority,
 		}
 	}
 
 	return messages, nil
+}
+
+// ConsumeByOffset reads messages sequentially by offset (FIFO, ignoring priority).
+// This is Kafka-like behavior where you consume the log in strict offset order.
+//
+// Use this when:
+//   - You need strict offset ordering (e.g., replication, replay)
+//   - You want to consume ALL messages regardless of priority
+//   - You're treating the partition as an append-only log
+func (b *Broker) ConsumeByOffset(topic string, partition int, fromOffset int64, maxMessages int) ([]Message, error) {
+	b.mu.RLock()
+	if b.closed {
+		b.mu.RUnlock()
+		return nil, ErrBrokerClosed
+	}
+
+	t, exists := b.topics[topic]
+	if !exists {
+		b.mu.RUnlock()
+		return nil, fmt.Errorf("%w: %s", ErrTopicNotFound, topic)
+	}
+	b.mu.RUnlock()
+
+	storageMessages, err := t.ConsumeByOffset(partition, fromOffset, maxMessages)
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert storage.Message to broker.Message for API
+	messages := make([]Message, len(storageMessages))
+	for i, sm := range storageMessages {
+		messages[i] = Message{
+			Topic:     topic,
+			Partition: partition,
+			Offset:    sm.Offset,
+			Timestamp: time.Unix(0, sm.Timestamp),
+			Key:       sm.Key,
+			Value:     sm.Value,
+			Priority:  sm.Priority,
+		}
+	}
+
+	return messages, nil
+}
+
+// =============================================================================
+// PRIORITY-AWARE CONSUMER INTERFACE (M6)
+// =============================================================================
+
+// ConsumeByPriority reads messages from a partition respecting strict priority order.
+// Higher priority messages are returned before lower priority ones.
+//
+// NOTE: This is now the same as default Consume(). Kept for explicit API clarity.
+//
+// PARAMETERS:
+//   - topic: Topic name
+//   - partition: Partition number
+//   - fromOffset: Starting offset (inclusive) - message at this offset can be returned
+//   - maxMessages: Maximum messages to return
+//
+// This uses strict priority (Critical first, then High, etc.)
+// For Weighted Fair Queuing, use ConsumeByPriorityWFQ.
+func (b *Broker) ConsumeByPriority(topic string, partition int, fromOffset int64, maxMessages int) ([]Message, error) {
+	b.mu.RLock()
+	if b.closed {
+		b.mu.RUnlock()
+		return nil, ErrBrokerClosed
+	}
+
+	t, exists := b.topics[topic]
+	if !exists {
+		b.mu.RUnlock()
+		return nil, fmt.Errorf("%w: %s", ErrTopicNotFound, topic)
+	}
+	b.mu.RUnlock()
+
+	p, err := t.Partition(partition)
+	if err != nil {
+		return nil, err
+	}
+
+	storageMessages, err := p.ConsumeByPriority(fromOffset, maxMessages)
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert to API messages
+	messages := make([]Message, len(storageMessages))
+	for i, sm := range storageMessages {
+		messages[i] = Message{
+			Topic:     topic,
+			Partition: partition,
+			Offset:    sm.Offset,
+			Timestamp: time.Unix(0, sm.Timestamp),
+			Key:       sm.Key,
+			Value:     sm.Value,
+			Priority:  sm.Priority,
+		}
+	}
+
+	return messages, nil
+}
+
+// ConsumeByPriorityWFQ reads messages using Weighted Fair Queuing.
+// This provides fair distribution across priorities based on configurable weights.
+//
+// PARAMETERS:
+//   - topic: Topic name
+//   - partition: Partition number
+//   - fromOffset: Starting offset (inclusive) - messages below this are filtered
+//   - maxMessages: Maximum messages to return
+//   - scheduler: The WFQ scheduler to use (maintains fairness state)
+//
+// NOTE: The scheduler should be maintained across calls for proper WFQ behavior.
+// Create one scheduler per consumer for best results.
+func (b *Broker) ConsumeByPriorityWFQ(topic string, partition int, fromOffset int64, maxMessages int, scheduler *PriorityScheduler) ([]Message, error) {
+	b.mu.RLock()
+	if b.closed {
+		b.mu.RUnlock()
+		return nil, ErrBrokerClosed
+	}
+
+	t, exists := b.topics[topic]
+	if !exists {
+		b.mu.RUnlock()
+		return nil, fmt.Errorf("%w: %s", ErrTopicNotFound, topic)
+	}
+	b.mu.RUnlock()
+
+	p, err := t.Partition(partition)
+	if err != nil {
+		return nil, err
+	}
+
+	storageMessages, err := p.ConsumeByPriorityWFQ(fromOffset, maxMessages, scheduler)
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert to API messages
+	messages := make([]Message, len(storageMessages))
+	for i, sm := range storageMessages {
+		messages[i] = Message{
+			Topic:     topic,
+			Partition: partition,
+			Offset:    sm.Offset,
+			Timestamp: time.Unix(0, sm.Timestamp),
+			Key:       sm.Key,
+			Value:     sm.Value,
+			Priority:  sm.Priority,
+		}
+	}
+
+	return messages, nil
+}
+
+// MarkConsumed marks a message as consumed in the priority index.
+// Call this after processing to filter out the message from future priority queries.
+func (b *Broker) MarkConsumed(topic string, partition int, offset int64) error {
+	b.mu.RLock()
+	if b.closed {
+		b.mu.RUnlock()
+		return ErrBrokerClosed
+	}
+
+	t, exists := b.topics[topic]
+	if !exists {
+		b.mu.RUnlock()
+		return fmt.Errorf("%w: %s", ErrTopicNotFound, topic)
+	}
+	b.mu.RUnlock()
+
+	p, err := t.Partition(partition)
+	if err != nil {
+		return err
+	}
+
+	p.MarkConsumed(offset)
+	return nil
 }
 
 // GetOffsetBounds returns the earliest and latest offsets for a partition.
@@ -665,6 +938,7 @@ type Message struct {
 	Timestamp time.Time
 	Key       []byte
 	Value     []byte
+	Priority  storage.Priority // Priority level (0=Critical to 4=Background)
 }
 
 // =============================================================================
@@ -687,6 +961,72 @@ type TopicStats struct {
 	TotalSize     int64
 }
 
+// =============================================================================
+// PRIORITY STATISTICS (MILESTONE 6)
+// =============================================================================
+//
+// Per-priority-per-partition metrics provide maximum granularity for:
+//   - Understanding message distribution across priorities
+//   - Monitoring queue health at the priority level
+//   - Detecting priority imbalances or starvation
+//   - Capacity planning based on priority patterns
+//
+// STRUCTURE:
+//   BrokerPriorityStats
+//     └── TopicPriorityStats (per topic)
+//           └── PartitionPriorityStats (per partition)
+//                 └── PriorityLevelStats (per priority level)
+//
+// COMPARISON WITH OTHER SYSTEMS:
+//   - RabbitMQ: Queue-level priority stats only (no partition concept)
+//   - Kafka: No native priority support
+//   - SQS: Per-queue stats, no priority breakdown
+//   - goqueue: Full per-priority-per-partition granularity
+//
+// =============================================================================
+
+// BrokerPriorityStats provides aggregated priority statistics across all topics.
+type BrokerPriorityStats struct {
+	// TotalByPriority aggregates message counts across all topics/partitions
+	TotalByPriority [5]int64
+
+	// Topics maps topic name to its priority stats
+	Topics map[string]*TopicPriorityStats
+}
+
+// TopicPriorityStats provides priority statistics for a single topic.
+type TopicPriorityStats struct {
+	Name string
+
+	// TotalByPriority aggregates message counts across all partitions
+	TotalByPriority [5]int64
+
+	// Partitions maps partition ID to its priority stats
+	Partitions map[int]*PartitionPriorityStats
+}
+
+// PartitionPriorityStats provides detailed priority metrics for a partition.
+type PartitionPriorityStats struct {
+	PartitionID int
+
+	// Pending counts unconsumed messages at each priority level
+	Pending [5]int64
+
+	// Consumed counts messages marked as consumed at each priority
+	Consumed [5]int64
+
+	// Total is Pending + Consumed for each priority
+	Total [5]int64
+
+	// OldestPending tracks the timestamp of oldest pending message per priority
+	// Zero time means no pending messages at that priority
+	OldestPending [5]time.Time
+
+	// AvgWaitTime tracks average wait time for consumed messages per priority
+	// This helps identify if lower priorities are experiencing starvation
+	AvgWaitTime [5]time.Duration
+}
+
 func (b *Broker) Stats() BrokerStats {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
@@ -707,6 +1047,99 @@ func (b *Broker) Stats() BrokerStats {
 		}
 		stats.TopicStats[name] = ts
 		stats.TotalSize += ts.TotalSize
+	}
+
+	return stats
+}
+
+// =============================================================================
+// PriorityStats - Per-Priority-Per-Partition Statistics
+// =============================================================================
+//
+// WHAT: Collects detailed priority metrics from all topics and partitions.
+//
+// WHY: The user requested "per priority per partition" metrics - the most
+// granular option. This enables:
+//   - Monitoring priority distribution across the cluster
+//   - Detecting priority starvation before it impacts SLAs
+//   - Understanding message flow patterns by priority
+//   - Capacity planning based on priority usage
+//
+// HOW IT WORKS:
+//  1. Iterates through all topics
+//  2. For each topic, iterates through all partitions
+//  3. Collects PriorityMetrics from each partition's priority index
+//  4. Aggregates up to topic and broker levels
+//
+// PERFORMANCE NOTE:
+// This method acquires read locks and iterates the entire broker state.
+// For large deployments, consider caching or sampling strategies.
+//
+// =============================================================================
+func (b *Broker) PriorityStats() BrokerPriorityStats {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	stats := BrokerPriorityStats{
+		Topics: make(map[string]*TopicPriorityStats),
+	}
+
+	for name, topic := range b.topics {
+		topicStats := &TopicPriorityStats{
+			Name:       name,
+			Partitions: make(map[int]*PartitionPriorityStats),
+		}
+
+		// Collect stats from each partition
+		numPartitions := topic.NumPartitions()
+		for i := 0; i < numPartitions; i++ {
+			partition, err := topic.Partition(i)
+			if err != nil || partition == nil {
+				continue
+			}
+
+			// Get priority metrics from the partition's priority index
+			// Returns a slice with one snapshot per priority level
+			metricsSlice := partition.PriorityMetrics()
+
+			partitionStats := &PartitionPriorityStats{
+				PartitionID: i,
+			}
+
+			// Process each priority level's metrics
+			for _, m := range metricsSlice {
+				p := int(m.Priority)
+				if p < 0 || p >= 5 {
+					continue
+				}
+
+				// Pending = unconsumed messages at this priority
+				partitionStats.Pending[p] = int64(m.PendingMessages)
+
+				// Total = all-time message count at this priority
+				partitionStats.Total[p] = m.TotalMessages
+
+				// Consumed = Total - Pending
+				partitionStats.Consumed[p] = m.TotalMessages - int64(m.PendingMessages)
+
+				// OldestPending timestamp conversion
+				if m.OldestPendingTimestamp > 0 {
+					partitionStats.OldestPending[p] = time.Unix(0, m.OldestPendingTimestamp)
+				}
+
+				// Aggregate to topic level
+				topicStats.TotalByPriority[p] += m.TotalMessages
+			}
+
+			topicStats.Partitions[i] = partitionStats
+		}
+
+		// Aggregate to broker level
+		for p := 0; p < 5; p++ {
+			stats.TotalByPriority[p] += topicStats.TotalByPriority[p]
+		}
+
+		stats.Topics[name] = topicStats
 	}
 
 	return stats
