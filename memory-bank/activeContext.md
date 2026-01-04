@@ -3,42 +3,54 @@
 ## Current Focus
 
 **Phase**: 2 - Advanced Features
-**Milestone**: 6 - Priority Lanes ✅ COMPLETE
-**Status**: Ready for Milestone 7 (Message Tracing)
+**Milestone**: 7 - Message Tracing ✅ COMPLETE
+**Status**: Ready for Milestone 8 (Schema Registry)
 
 ## What I'm Working On
 
-### Just Completed (M6 - Priority Lanes)
-- ✅ 5 Priority Levels - Critical(0), High(1), Normal(2), Low(3), Background(4)
-- ✅ 32-byte Message Header - Priority byte at position 24
-- ✅ Priority Scheduler - WFQ using Deficit Round Robin algorithm
-- ✅ Starvation Prevention - 30s timeout, boost starved priorities
-- ✅ Per-Priority-Per-Partition Metrics (PPPP)
-- ✅ HTTP API - priority param, /priority/stats endpoint
-- ✅ Comprehensive test suite (12 new priority scheduler tests)
-- ✅ Architecture documentation updated
+### Just Completed (M7 - Message Tracing)
+- ✅ W3C Trace Context Format - Industry standard for trace propagation
+- ✅ 34-byte Message Header - Added HeaderLen field for trace headers
+- ✅ Complete Span Event Types - publish, consume, ack, nack, reject, delay, dlq
+- ✅ Ring Buffer Storage - In-memory fast access with 10,000 span capacity
+- ✅ File Exporter - Persistent JSONL traces with rotation
+- ✅ OTLP Exporter - OpenTelemetry Protocol support
+- ✅ Jaeger Exporter - Jaeger Thrift UDP support
+- ✅ Query Interface - GetTrace, GetRecentTraces, SearchTraces
+- ✅ HTTP API - /traces, /traces/{id}, /traces/search, /traces/stats
+- ✅ Broker Integration - Automatic span recording for all operations
+- ✅ 22 comprehensive tracer tests
 
-### Key Technical Decisions (M6)
-- **Format Version**: V1 (32-byte header, no version branching during dev)
-- **Priority Type**: uint8 (0-4 valid range)
-- **Algorithm**: Weighted Fair Queuing using Deficit Round Robin
-- **Weights**: [50, 25, 15, 7, 3] → 50%, 25%, 15%, 7%, 3% shares
-- **Starvation Timeout**: 30s default (configurable)
-- **Critical Priority**: Always checked first each round
-- **Persistence**: Priority stored in message header (survives restart)
+### Key Technical Decisions (M7)
+- **Trace Format**: W3C Trace Context (interoperability with existing tools)
+- **TraceID**: 16 bytes (128 bits), hex encoded to 32 chars
+- **SpanID**: 8 bytes (64 bits), hex encoded to 16 chars
+- **Header Size**: 34 bytes (added 2-byte HeaderLen at [32:34])
+- **Headers Encoding**: Count(2) + [KeyLen(2) + Key + ValLen(2) + Val] × N
+- **Storage**: Ring buffer (in-memory) + File export (persistent)
+- **Sampling**: Configurable rate (1.0 = 100%)
+- **Exporters**: Stdout, File (JSONL), OTLP, Jaeger
 
-### Bug Fixes During M6
-- **uint8 underflow**: `for p := 4; p >= 0; p--` with uint8 wraps 0→255
-  - Solution: Cast to `int` for loop counters
-- **Version-aware reading**: Initially implemented V1/V2 detection
-  - Simplified: Just use V1 format (32 bytes) during development
+### Files Created/Modified (M7)
+- **Created**:
+  - `internal/broker/tracer.go` - Complete tracing implementation (~1700 lines)
+  - `internal/broker/tracer_test.go` - 22 comprehensive tests
+- **Modified**:
+  - `internal/storage/message.go` - 34-byte header, Headers field, encode/decode
+  - `internal/storage/message_test.go` - Header encoding tests
+  - `internal/broker/broker.go` - Tracer integration, span recording
+  - `internal/api/server.go` - Trace API endpoints
 
-### Next Steps (Milestone 7 - Message Tracing)
-1. Trace ID generation (UUID or snowflake)
-2. Trace event types (published, replicated, delivered, acked)
-3. Trace storage (append-only trace log)
-4. Trace query API
-5. CLI: goqueue-cli trace <message-id>
+### Bug Fixes During M7
+- **Message Size calculation**: Headers need 2-byte count prefix even when empty
+- **API mismatches in tests**: RingBuffer uses Push/Count, not Add/Len
+
+### Next Steps (Milestone 8 - Schema Registry)
+1. Schema storage (Avro, Protobuf, JSON Schema)
+2. Schema versioning and compatibility checking
+3. Producer schema validation
+4. Consumer schema evolution
+5. HTTP API for schema management
 
 ## Recent Changes
 

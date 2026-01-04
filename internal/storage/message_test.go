@@ -105,7 +105,7 @@ func TestMessage_Size(t *testing.T) {
 		Key:   []byte("key"),   // 3 bytes
 		Value: []byte("value"), // 5 bytes
 	}
-	expectedSize := HeaderSize + 3 + 5 // 30 + 3 + 5 = 38
+	expectedSize := HeaderSize + 3 + 5 // 34 + 3 + 5 = 42 (updated for 34-byte header)
 
 	if msg.Size() != expectedSize {
 		t.Errorf("Size() = %d, want %d", msg.Size(), expectedSize)
@@ -115,6 +115,154 @@ func TestMessage_Size(t *testing.T) {
 	encoded, _ := msg.Encode()
 	if len(encoded) != expectedSize {
 		t.Errorf("Encoded size = %d, want %d", len(encoded), expectedSize)
+	}
+}
+
+// =============================================================================
+// HEADERS ENCODING/DECODING
+// =============================================================================
+
+func TestMessage_Headers_EncodeDecodeRoundtrip(t *testing.T) {
+	testCases := []struct {
+		name    string
+		headers map[string]string
+	}{
+		{
+			name:    "no headers",
+			headers: nil,
+		},
+		{
+			name:    "empty headers map",
+			headers: map[string]string{},
+		},
+		{
+			name: "single header",
+			headers: map[string]string{
+				"traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+			},
+		},
+		{
+			name: "multiple headers",
+			headers: map[string]string{
+				"traceparent":    "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+				"correlation_id": "user-123-order-456",
+				"x-custom":       "custom-value",
+			},
+		},
+		{
+			name: "unicode header values",
+			headers: map[string]string{
+				"greeting": "Hello, 世界!",
+				"emoji":    "🚀",
+			},
+		},
+		{
+			name: "empty value header",
+			headers: map[string]string{
+				"empty-value": "",
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Create message with headers
+			original := &Message{
+				Offset:    12345,
+				Timestamp: 1234567890,
+				Key:       []byte("test-key"),
+				Value:     []byte("test-value"),
+				Flags:     0,
+				Priority:  PriorityNormal,
+				Headers:   tc.headers,
+			}
+
+			// Encode
+			encoded, err := original.Encode()
+			if err != nil {
+				t.Fatalf("Encode failed: %v", err)
+			}
+
+			// Decode
+			decoded, err := Decode(encoded)
+			if err != nil {
+				t.Fatalf("Decode failed: %v", err)
+			}
+
+			// Verify headers match
+			if len(decoded.Headers) != len(tc.headers) {
+				t.Errorf("Headers count mismatch: got %d, want %d",
+					len(decoded.Headers), len(tc.headers))
+			}
+
+			for k, v := range tc.headers {
+				if decoded.Headers[k] != v {
+					t.Errorf("Header %q mismatch: got %q, want %q",
+						k, decoded.Headers[k], v)
+				}
+			}
+		})
+	}
+}
+
+func TestMessage_Headers_SizeCalculation(t *testing.T) {
+	// Message with headers
+	headers := map[string]string{
+		"traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01", // 55 chars
+	}
+
+	msg := &Message{
+		Key:     []byte("key"),   // 3 bytes
+		Value:   []byte("value"), // 5 bytes
+		Headers: headers,
+	}
+
+	// Header encoding: Count(2) + [KeyLen(2) + Key + ValLen(2) + Val] × N
+	// "traceparent" = 11 bytes, value = 55 bytes
+	// Total headers: 2 (count) + 2 + 11 + 2 + 55 = 72 bytes
+	expectedHeadersSize := 2 // count prefix
+	for k, v := range headers {
+		expectedHeadersSize += 2 + len(k) + 2 + len(v)
+	}
+	expectedSize := HeaderSize + 3 + 5 + expectedHeadersSize // 34 + 3 + 5 + 72 = 114
+
+	if msg.Size() != expectedSize {
+		t.Errorf("Size() = %d, want %d", msg.Size(), expectedSize)
+	}
+
+	// Verify encoded size matches Size()
+	encoded, _ := msg.Encode()
+	if len(encoded) != msg.Size() {
+		t.Errorf("Encoded size = %d, want Size() = %d", len(encoded), msg.Size())
+	}
+}
+
+func TestNewMessageWithHeaders(t *testing.T) {
+	headers := map[string]string{
+		"traceparent": "00-abc123-def456-01",
+		"custom":      "value",
+	}
+
+	msg := NewMessageWithHeaders([]byte("key"), []byte("value"), headers)
+
+	// Verify headers are copied (not referenced)
+	if len(msg.Headers) != 2 {
+		t.Errorf("Headers count mismatch: got %d, want 2", len(msg.Headers))
+	}
+
+	// Modify original - should not affect message
+	headers["new"] = "should-not-appear"
+
+	if _, exists := msg.Headers["new"]; exists {
+		t.Error("Headers should be copied, not referenced")
+	}
+
+	// Verify specific headers
+	if msg.Headers["traceparent"] != "00-abc123-def456-01" {
+		t.Errorf("traceparent header mismatch")
+	}
+	if msg.Headers["custom"] != "value" {
+		t.Errorf("custom header mismatch")
 	}
 }
 
