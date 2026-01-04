@@ -162,6 +162,32 @@ type Broker struct {
 	// ==========================================================================
 	scheduler *Scheduler
 
+	// ==========================================================================
+	// MILESTONE 7: MESSAGE TRACER
+	// ==========================================================================
+	//
+	// The tracer records spans for each message operation, enabling end-to-end
+	// visibility into message lifecycle:
+	//   - publish.received → publish.partitioned → publish.persisted
+	//   - consume.fetched → consume.acked / consume.nacked / consume.rejected
+	//   - delay.scheduled → delay.ready
+	//
+	// Trace context is propagated via message headers using W3C Trace Context
+	// format (traceparent header).
+	//
+	// QUERY CAPABILITIES:
+	//   - GetTrace(traceID) - Get all spans for a message
+	//   - GetRecentTraces(limit) - Recent traces
+	//   - SearchTraces(query) - Filter by topic, partition, consumer
+	//
+	// STORAGE:
+	//   - Ring buffer for fast in-memory access
+	//   - Optional file export for persistence
+	//   - Optional OTLP/Jaeger export for external systems
+	//
+	// ==========================================================================
+	tracer *Tracer
+
 	// mu protects topics map
 	mu sync.RWMutex
 
@@ -260,8 +286,40 @@ func NewBroker(config BrokerConfig) (*Broker, error) {
 		return nil, fmt.Errorf("failed to start scheduler: %w", err)
 	}
 
+	// ==========================================================================
+	// MILESTONE 7: INITIALIZE MESSAGE TRACER
+	// ==========================================================================
+	//
+	// The tracer provides end-to-end visibility into message lifecycle.
+	// It records spans for all operations (publish, consume, ack, etc.)
+	// and supports querying by trace ID, time range, or custom criteria.
+	//
+	// STORAGE:
+	//   - In-memory ring buffer for fast access to recent traces
+	//   - File-based JSON export for persistence (optional)
+	//   - OTLP/Jaeger export for external systems (optional)
+	//
+	// STARTUP FLOW:
+	//   1. Create tracer with data directory for files
+	//   2. Configure exporters (ring buffer always enabled)
+	//   3. Ready to record spans
+	//
+	// ==========================================================================
+	traceDir := filepath.Join(config.DataDir, "traces")
+	tracerConfig := DefaultTracerConfig(traceDir)
+	tracerConfig.NodeID = config.NodeID
+
+	tracer, err := NewTracer(tracerConfig)
+	if err != nil {
+		scheduler.Close()
+		groupCoordinator.Close()
+		return nil, fmt.Errorf("failed to create tracer: %w", err)
+	}
+	broker.tracer = tracer
+
 	// Discover and load existing topics
 	if err := broker.loadExistingTopics(); err != nil {
+		tracer.Shutdown()
 		scheduler.Close()
 		groupCoordinator.Close()
 		return nil, fmt.Errorf("failed to load existing topics: %w", err)
@@ -275,7 +333,8 @@ func NewBroker(config BrokerConfig) (*Broker, error) {
 		"max_retries", reliabilityConfig.MaxRetries,
 		"dlq_enabled", reliabilityConfig.DLQEnabled,
 		"delay_scheduler", "enabled",
-		"max_delay", schedulerConfig.MaxDelay.String())
+		"max_delay", schedulerConfig.MaxDelay.String(),
+		"tracing", tracerConfig.Enabled)
 
 	return broker, nil
 }
@@ -345,6 +404,13 @@ func (b *Broker) Close() error {
 	if b.scheduler != nil {
 		if err := b.scheduler.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("scheduler: %w", err))
+		}
+	}
+
+	// Close tracer (flushes pending spans to file)
+	if b.tracer != nil {
+		if err := b.tracer.Shutdown(); err != nil {
+			errs = append(errs, fmt.Errorf("tracer: %w", err))
 		}
 	}
 
@@ -513,6 +579,21 @@ func (b *Broker) TopicExists(name string) bool {
 //  3. Appends message to partition's log
 //  4. Returns offset for producer acknowledgment
 func (b *Broker) Publish(topic string, key, value []byte) (partition int, offset int64, err error) {
+	return b.PublishWithTrace(topic, key, value, TraceContext{})
+}
+
+// PublishWithTrace writes a message with trace context propagation.
+// If traceCtx is empty (zero TraceID), a new trace is started.
+// This enables end-to-end tracing across services.
+func (b *Broker) PublishWithTrace(topic string, key, value []byte, traceCtx TraceContext) (partition int, offset int64, err error) {
+	// Start or continue trace
+	var ctx TraceContext
+	if traceCtx.TraceID.IsZero() {
+		ctx = b.tracer.StartTrace(topic, 0, 0) // offset unknown yet
+	} else {
+		ctx = traceCtx
+	}
+
 	b.mu.RLock()
 	if b.closed {
 		b.mu.RUnlock()
@@ -526,7 +607,33 @@ func (b *Broker) Publish(topic string, key, value []byte) (partition int, offset
 	}
 	b.mu.RUnlock()
 
-	return t.Publish(key, value)
+	// Record publish.received span
+	if !ctx.TraceID.IsZero() {
+		span := NewSpan(ctx.TraceID, SpanEventPublishReceived, topic, 0, 0)
+		span.WithAttribute("key_size", fmt.Sprintf("%d", len(key)))
+		span.WithAttribute("value_size", fmt.Sprintf("%d", len(value)))
+		b.tracer.RecordSpan(span)
+	}
+
+	// Perform publish (includes partitioning and persistence)
+	partition, offset, err = t.Publish(key, value)
+	if err != nil {
+		// Record error span
+		if !ctx.TraceID.IsZero() {
+			span := NewSpan(ctx.TraceID, SpanEventPublishReceived, topic, partition, offset)
+			span.WithError(err)
+			b.tracer.RecordSpan(span)
+		}
+		return 0, 0, err
+	}
+
+	// Record publish.persisted span
+	if !ctx.TraceID.IsZero() {
+		span := NewSpan(ctx.TraceID, SpanEventPublishPersisted, topic, partition, offset)
+		b.tracer.RecordSpan(span)
+	}
+
+	return partition, offset, nil
 }
 
 // PublishBatch writes multiple messages to a topic.
@@ -716,6 +823,16 @@ func (b *Broker) Consume(topic string, partition int, fromOffset int64, maxMessa
 			Key:       sm.Key,
 			Value:     sm.Value,
 			Priority:  sm.Priority,
+		}
+
+		// Record consume.fetched span for each message
+		// Note: We don't have trace context from message headers yet (M7 enhancement)
+		// For now, create a new trace for each consumed message
+		ctx := b.tracer.StartTrace(topic, partition, sm.Offset)
+		if !ctx.TraceID.IsZero() {
+			span := NewSpan(ctx.TraceID, SpanEventConsumeFetched, topic, partition, sm.Offset)
+			span.WithAttribute("priority", fmt.Sprintf("%d", sm.Priority))
+			b.tracer.RecordSpan(span)
 		}
 	}
 
@@ -1202,6 +1319,12 @@ func (b *Broker) AckManager() *AckManager {
 	return b.ackManager
 }
 
+// Tracer returns the broker's message tracer for observability.
+// Used by the API layer for trace query operations.
+func (b *Broker) Tracer() *Tracer {
+	return b.tracer
+}
+
 // ReliabilityConfig returns the current reliability configuration.
 func (b *Broker) ReliabilityConfig() ReliabilityConfig {
 	return b.reliabilityConfig
@@ -1278,7 +1401,21 @@ type MessageWithReceipt struct {
 //   - Will not be redelivered
 //   - Committed offset may advance (if contiguous)
 func (b *Broker) Ack(receiptHandle string) (*AckResult, error) {
-	return b.ackManager.Ack(receiptHandle)
+	result, err := b.ackManager.Ack(receiptHandle)
+	if err != nil {
+		return nil, err
+	}
+
+	// Record consume.acked span
+	ctx := b.tracer.StartTrace(result.Topic, result.Partition, result.Offset)
+	if !ctx.TraceID.IsZero() {
+		span := NewSpan(ctx.TraceID, SpanEventConsumeAcked, result.Topic, result.Partition, result.Offset)
+		span.WithAttribute("new_committed_offset", fmt.Sprintf("%d", result.NewCommittedOffset))
+		span.WithAttribute("offset_advanced", fmt.Sprintf("%t", result.OffsetAdvanced))
+		b.tracer.RecordSpan(span)
+	}
+
+	return result, nil
 }
 
 // Nack indicates processing failed and message should be retried.
@@ -1292,7 +1429,24 @@ func (b *Broker) Ack(receiptHandle string) (*AckResult, error) {
 //   - Each NACK increments delivery count
 //   - After MaxRetries, message goes to DLQ
 func (b *Broker) Nack(receiptHandle, reason string) (*AckResult, error) {
-	return b.ackManager.Nack(receiptHandle, reason)
+	result, err := b.ackManager.Nack(receiptHandle, reason)
+	if err != nil {
+		return nil, err
+	}
+
+	// Record consume.nacked span
+	ctx := b.tracer.StartTrace(result.Topic, result.Partition, result.Offset)
+	if !ctx.TraceID.IsZero() {
+		span := NewSpan(ctx.TraceID, SpanEventConsumeNacked, result.Topic, result.Partition, result.Offset)
+		span.WithAttribute("reason", reason)
+		span.WithAttribute("delivery_count", fmt.Sprintf("%d", result.DeliveryCount))
+		if !result.NextVisibleAt.IsZero() {
+			span.WithAttribute("next_visible_at", result.NextVisibleAt.Format(time.RFC3339))
+		}
+		b.tracer.RecordSpan(span)
+	}
+
+	return result, nil
 }
 
 // Reject sends a message directly to the dead letter queue.
@@ -1309,7 +1463,23 @@ func (b *Broker) Nack(receiptHandle, reason string) (*AckResult, error) {
 //   - Message format is invalid
 //   - Business logic determines message is unprocessable
 func (b *Broker) Reject(receiptHandle, reason string) (*AckResult, error) {
-	return b.ackManager.Reject(receiptHandle, reason)
+	result, err := b.ackManager.Reject(receiptHandle, reason)
+	if err != nil {
+		return nil, err
+	}
+
+	// Record consume.rejected span
+	ctx := b.tracer.StartTrace(result.Topic, result.Partition, result.Offset)
+	if !ctx.TraceID.IsZero() {
+		span := NewSpan(ctx.TraceID, SpanEventConsumeRejected, result.Topic, result.Partition, result.Offset)
+		span.WithAttribute("reason", reason)
+		if result.DLQTopic != "" {
+			span.WithAttribute("dlq_topic", result.DLQTopic)
+		}
+		b.tracer.RecordSpan(span)
+	}
+
+	return result, nil
 }
 
 // ExtendVisibility extends the visibility timeout for a message.
