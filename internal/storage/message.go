@@ -20,22 +20,29 @@
 //   - SQS: JSON over HTTP (no priority, uses separate queues)
 //   - Redis Streams: RESP protocol (no priority)
 //
-// OUR MESSAGE FORMAT (on disk) - VERSION 2:
+// OUR MESSAGE FORMAT (on disk) - VERSION 1 WITH HEADERS:
 // ┌──────────────────────────────────────────────────────────────────────────┐
-// │ HEADER (fixed 32 bytes)                                                  │
+// │ HEADER (fixed 34 bytes)                                                  │
 // ├──────────────────────────────────────────────────────────────────────────┤
 // │ Magic (2B) │ Version (1B) │ Flags (1B) │ CRC32 (4B) │ Offset (8B)        │
 // │ Timestamp (8B) │ Priority (1B) │ Reserved (1B) │ KeyLen (2B) │ ValLen(4B)│
+// │ HeaderLen (2B)                                                           │
 // ├──────────────────────────────────────────────────────────────────────────┤
 // │ BODY (variable)                                                          │
 // ├──────────────────────────────────────────────────────────────────────────┤
-// │ Key (0-65535 bytes) │ Value (0-4GB bytes)                                │
+// │ Key (0-65535 bytes) │ Value (0-4GB bytes) │ Headers (0-65535 bytes)      │
 // └──────────────────────────────────────────────────────────────────────────┘
 //
-// WHY 32 BYTES?
-// - Power of 2 for better memory alignment and cache line efficiency
-// - Room for Priority (1B) and Reserved (1B) for future extensions
-// - Reserved byte can be used for: compression algorithm, delivery hints, etc.
+// HEADERS FORMAT (when HeaderLen > 0):
+// ┌──────────────────────────────────────────────────────────────────────────┐
+// │ Count (2B) │ [KeyLen (2B) │ Key bytes │ ValLen (2B) │ Val bytes] × N     │
+// └──────────────────────────────────────────────────────────────────────────┘
+//
+// WHY 34 BYTES?
+// - Extended from 32 bytes to add HeaderLen field for trace context
+// - Headers enable W3C Trace Context propagation (M7: Message Tracing)
+// - Headers can carry: traceparent, tracestate, custom metadata
+// - Most messages have no headers (HeaderLen=0), minimal overhead
 //
 // FIELD EXPLANATIONS:
 //
@@ -112,19 +119,19 @@ const (
 	MagicByte2 = 0x51
 
 	// FormatVersion allows future format changes while maintaining compatibility
-	// Version 1: Current 32-byte header with Priority field
+	// Version 1: 34-byte header with Priority and Headers support
 	// (Versioning complexity deferred until production - just use one format during dev)
 	FormatVersion = 1
 
 	// HeaderSize is the fixed size of message header in bytes
 	// Magic(2) + Version(1) + Flags(1) + CRC(4) + Offset(8) + Timestamp(8) +
-	// Priority(1) + Reserved(1) + KeyLen(2) + ValueLen(4) = 32
+	// Priority(1) + Reserved(1) + KeyLen(2) + ValueLen(4) + HeaderLen(2) = 34
 	//
-	// WHY 32 BYTES?
-	// - Power of 2 for better memory alignment
-	// - CPU cache lines are typically 64 bytes - two headers fit perfectly
-	// - Leaves room for future extensions without another version bump
-	HeaderSize = 32
+	// WHY 34 BYTES?
+	// - Extended from 32 to support message headers for tracing (M7)
+	// - Headers enable W3C Trace Context propagation
+	// - HeaderLen(2) supports up to 64KB of headers
+	HeaderSize = 34
 
 	// MaxKeySize is the maximum key length (64KB)
 	// Keys are used for partition routing - they should be small identifiers
@@ -133,6 +140,10 @@ const (
 	// MaxValueSize is the maximum payload size (16MB default, configurable)
 	// Larger messages should be chunked or stored externally
 	MaxValueSize = 16 * 1024 * 1024
+
+	// MaxHeadersSize is the maximum total headers size (64KB)
+	// Headers are for metadata like trace context, not large data
+	MaxHeadersSize = 65535
 )
 
 // Message flags - bit positions in the flags byte
@@ -292,10 +303,12 @@ var (
 //   - Key is optional (nil = round-robin partition assignment)
 //   - Value is the actual payload (can be any bytes)
 //   - Priority determines consumption ordering (lower = higher priority)
+//   - Headers carry metadata like trace context (W3C traceparent/tracestate)
 //
 // COMPARISON WITH KAFKA:
 //   - Kafka has "record batches" that group messages for efficiency
 //   - Kafka has no native priority (requires separate topics)
+//   - Kafka has headers (added in 0.11.0) - we support the same concept
 //   - We keep it simpler for now (one message at a time)
 //   - Batching will be added at the producer API level
 type Message struct {
@@ -322,6 +335,17 @@ type Message struct {
 	// Lower values indicate higher priority
 	// Default is PriorityNormal (2) if not specified
 	Priority Priority
+
+	// Headers contains message metadata as key-value pairs
+	// Used for: trace context (traceparent, tracestate), custom metadata
+	// Most messages have nil/empty headers for efficiency
+	//
+	// COMMON HEADERS:
+	//   - "traceparent": W3C trace context (e.g., "00-{trace-id}-{span-id}-01")
+	//   - "tracestate": Vendor-specific trace state
+	//   - "content-type": Payload format hint (e.g., "application/json")
+	//   - "correlation-id": For request-response patterns
+	Headers map[string]string
 }
 
 // =============================================================================
@@ -369,10 +393,10 @@ func calculateCRC(data []byte) uint32 {
 
 // Encode serializes the message to binary format for storage.
 //
-// BYTE LAYOUT (Version 2 - 32 byte header):
+// BYTE LAYOUT (34-byte header with headers support):
 //
 //	[0:2]   Magic bytes (0x47, 0x51 = "GQ")
-//	[2:3]   Version (2)
+//	[2:3]   Version (1)
 //	[3:4]   Flags
 //	[4:8]   CRC32 of bytes [8:end]
 //	[8:16]  Offset (int64, big-endian)
@@ -381,8 +405,14 @@ func calculateCRC(data []byte) uint32 {
 //	[25:26] Reserved (uint8, must be 0)
 //	[26:28] Key length (uint16, big-endian)
 //	[28:32] Value length (uint32, big-endian)
-//	[32:32+keyLen] Key bytes
-//	[32+keyLen:end] Value bytes
+//	[32:34] Headers length (uint16, big-endian)
+//	[34:34+keyLen] Key bytes
+//	[34+keyLen:34+keyLen+valueLen] Value bytes
+//	[34+keyLen+valueLen:end] Headers bytes (if any)
+//
+// HEADERS FORMAT (when HeaderLen > 0):
+//
+//	Count (2 bytes) + [KeyLen(2) + Key + ValLen(2) + Val] × N
 //
 // WHY BIG-ENDIAN?
 // Network byte order convention. Also makes hex dumps more readable
@@ -405,16 +435,28 @@ func (m *Message) Encode() ([]byte, error) {
 	}
 
 	// -------------------------------------------------------------------------
-	// STEP 2: Calculate total size and allocate buffer
+	// STEP 2: Encode headers (if any)
+	// -------------------------------------------------------------------------
+	var headersBytes []byte
+	if len(m.Headers) > 0 {
+		headersBytes = encodeHeaders(m.Headers)
+		if len(headersBytes) > MaxHeadersSize {
+			return nil, fmt.Errorf("headers exceed maximum size: %d > %d",
+				len(headersBytes), MaxHeadersSize)
+		}
+	}
+
+	// -------------------------------------------------------------------------
+	// STEP 3: Calculate total size and allocate buffer
 	// -------------------------------------------------------------------------
 	// Pre-allocating the exact size is important for performance:
 	// - Avoids multiple allocations as slice grows
 	// - Reduces GC pressure
-	totalSize := HeaderSize + len(m.Key) + len(m.Value)
+	totalSize := HeaderSize + len(m.Key) + len(m.Value) + len(headersBytes)
 	buf := make([]byte, totalSize)
 
 	// -------------------------------------------------------------------------
-	// STEP 3: Write header fields
+	// STEP 4: Write header fields
 	// -------------------------------------------------------------------------
 	// We write fields in order, using binary.BigEndian for multi-byte integers.
 	// BigEndian means most significant byte first (network byte order).
@@ -426,11 +468,15 @@ func (m *Message) Encode() ([]byte, error) {
 	// Version - allows future format evolution
 	buf[2] = FormatVersion
 
-	// Flags - message attributes
-	buf[3] = m.Flags
+	// Flags - message attributes (set FlagHasHeaders if we have headers)
+	flags := m.Flags
+	if len(headersBytes) > 0 {
+		flags |= FlagHasHeaders
+	}
+	buf[3] = flags
 
 	// Skip CRC for now (bytes 4-7), we'll fill it after writing everything else
-	// CRC covers bytes 8 onwards (offset through value)
+	// CRC covers bytes 8 onwards (offset through value and headers)
 
 	// Offset - unique position in partition
 	binary.BigEndian.PutUint64(buf[8:16], uint64(m.Offset))
@@ -447,19 +493,28 @@ func (m *Message) Encode() ([]byte, error) {
 	// Key length - needed to know where key ends and value begins
 	binary.BigEndian.PutUint16(buf[26:28], uint16(len(m.Key)))
 
-	// Value length - needed to know where message ends
+	// Value length - needed to know where value ends
 	binary.BigEndian.PutUint32(buf[28:32], uint32(len(m.Value)))
 
+	// Headers length - needed to know if headers are present
+	binary.BigEndian.PutUint16(buf[32:34], uint16(len(headersBytes)))
+
 	// -------------------------------------------------------------------------
-	// STEP 4: Write key and value
+	// STEP 5: Write key, value, and headers
 	// -------------------------------------------------------------------------
 	// copy() is optimized in Go - uses memmove internally
 	keyEnd := HeaderSize + len(m.Key)
 	copy(buf[HeaderSize:keyEnd], m.Key)
-	copy(buf[keyEnd:], m.Value)
+
+	valueEnd := keyEnd + len(m.Value)
+	copy(buf[keyEnd:valueEnd], m.Value)
+
+	if len(headersBytes) > 0 {
+		copy(buf[valueEnd:], headersBytes)
+	}
 
 	// -------------------------------------------------------------------------
-	// STEP 5: Calculate and write CRC
+	// STEP 6: Calculate and write CRC
 	// -------------------------------------------------------------------------
 	// CRC covers everything from offset onwards (bytes 8 to end)
 	// This protects the actual message data, not just the framing
@@ -467,6 +522,84 @@ func (m *Message) Encode() ([]byte, error) {
 	binary.BigEndian.PutUint32(buf[4:8], crc)
 
 	return buf, nil
+}
+
+// encodeHeaders serializes headers map to binary format.
+// Format: Count(2) + [KeyLen(2) + Key + ValLen(2) + Val] × N
+func encodeHeaders(headers map[string]string) []byte {
+	if len(headers) == 0 {
+		return nil
+	}
+
+	// Calculate size
+	size := 2 // count
+	for k, v := range headers {
+		size += 2 + len(k) + 2 + len(v)
+	}
+
+	buf := make([]byte, size)
+	binary.BigEndian.PutUint16(buf[0:2], uint16(len(headers)))
+
+	pos := 2
+	for k, v := range headers {
+		// write key length and key
+		binary.BigEndian.PutUint16(buf[pos:pos+2], uint16(len(k)))
+		pos += 2
+		copy(buf[pos:], k)
+		pos += len(k)
+		// write value length and value
+		binary.BigEndian.PutUint16(buf[pos:pos+2], uint16(len(v)))
+		pos += 2
+		copy(buf[pos:], v)
+		pos += len(v)
+	}
+
+	return buf
+}
+
+// decodeHeaders deserializes headers from binary format.
+func decodeHeaders(data []byte) (map[string]string, error) {
+	if len(data) < 2 {
+		return nil, nil
+	}
+
+	count := binary.BigEndian.Uint16(data[0:2])
+	if count == 0 {
+		return nil, nil
+	}
+
+	headers := make(map[string]string, count)
+	pos := 2
+
+	for i := uint16(0); i < count; i++ {
+		if pos+2 > len(data) {
+			return nil, fmt.Errorf("truncated header key length at position %d", pos)
+		}
+		keyLen := int(binary.BigEndian.Uint16(data[pos : pos+2]))
+		pos += 2
+
+		if pos+keyLen > len(data) {
+			return nil, fmt.Errorf("truncated header key at position %d", pos)
+		}
+		key := string(data[pos : pos+keyLen])
+		pos += keyLen
+
+		if pos+2 > len(data) {
+			return nil, fmt.Errorf("truncated header value length at position %d", pos)
+		}
+		valLen := int(binary.BigEndian.Uint16(data[pos : pos+2]))
+		pos += 2
+
+		if pos+valLen > len(data) {
+			return nil, fmt.Errorf("truncated header value at position %d", pos)
+		}
+		val := string(data[pos : pos+valLen])
+		pos += valLen
+
+		headers[key] = val
+	}
+
+	return headers, nil
 }
 
 // =============================================================================
@@ -488,9 +621,19 @@ func (m *Message) Encode() ([]byte, error) {
 // IMPORTANT: This validates the message integrity using CRC.
 // If CRC doesn't match, the message is corrupted and we return an error.
 //
-// VERSION HANDLING:
-// - Version 1 (30-byte header): Legacy format, Priority defaults to Normal
-// - Version 2 (32-byte header): Current format with Priority field
+// HEADER FORMAT (34 bytes):
+//
+//	[0:2]   Magic bytes
+//	[2:3]   Version
+//	[3:4]   Flags
+//	[4:8]   CRC32
+//	[8:16]  Offset
+//	[16:24] Timestamp
+//	[24:25] Priority
+//	[25:26] Reserved
+//	[26:28] Key length
+//	[28:32] Value length
+//	[32:34] Headers length
 func Decode(data []byte) (*Message, error) {
 	// -------------------------------------------------------------------------
 	// STEP 1: Check minimum size (need at least magic + version to proceed)
@@ -519,7 +662,7 @@ func Decode(data []byte) (*Message, error) {
 	}
 
 	// -------------------------------------------------------------------------
-	// STEP 4: Decode 32-byte header format
+	// STEP 4: Decode 34-byte header format
 	// -------------------------------------------------------------------------
 	if len(data) < HeaderSize {
 		return nil, fmt.Errorf("%w: data too short (%d bytes, need at least %d)",
@@ -534,6 +677,7 @@ func Decode(data []byte) (*Message, error) {
 	// data[25] is reserved, we ignore it
 	keyLen := binary.BigEndian.Uint16(data[26:28])
 	valueLen := binary.BigEndian.Uint32(data[28:32])
+	headersLen := binary.BigEndian.Uint16(data[32:34])
 
 	// Validate priority
 	if !priority.IsValid() {
@@ -542,26 +686,42 @@ func Decode(data []byte) (*Message, error) {
 			ErrInvalidPriority, priority, PriorityCount-1)
 	}
 
-	expectedSize := HeaderSize + int(keyLen) + int(valueLen)
+	expectedSize := HeaderSize + int(keyLen) + int(valueLen) + int(headersLen)
 	if len(data) < expectedSize {
 		return nil, fmt.Errorf("%w: data is %d bytes, but header claims %d",
 			ErrInvalidMessage, len(data), expectedSize)
 	}
 
+	// CRC covers everything from offset onwards (bytes 8 to end)
 	calculatedCRC := calculateCRC(data[8:expectedSize])
 	if calculatedCRC != storedCRC {
 		return nil, fmt.Errorf("%w: stored CRC 0x%08x, calculated 0x%08x",
 			ErrCorruptedMessage, storedCRC, calculatedCRC)
 	}
 
+	// Extract key
 	var key []byte
+	keyStart := HeaderSize
 	if keyLen > 0 {
 		key = make([]byte, keyLen)
-		copy(key, data[HeaderSize:HeaderSize+int(keyLen)])
+		copy(key, data[keyStart:keyStart+int(keyLen)])
 	}
 
+	// Extract value
+	valueStart := keyStart + int(keyLen)
 	value := make([]byte, valueLen)
-	copy(value, data[HeaderSize+int(keyLen):expectedSize])
+	copy(value, data[valueStart:valueStart+int(valueLen)])
+
+	// Extract headers (if present)
+	var headers map[string]string
+	if headersLen > 0 {
+		headersStart := valueStart + int(valueLen)
+		var err error
+		headers, err = decodeHeaders(data[headersStart : headersStart+int(headersLen)])
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode headers: %w", err)
+		}
+	}
 
 	return &Message{
 		Offset:    offset,
@@ -570,6 +730,7 @@ func Decode(data []byte) (*Message, error) {
 		Value:     value,
 		Flags:     flags,
 		Priority:  priority,
+		Headers:   headers,
 	}, nil
 }
 
@@ -579,8 +740,29 @@ func Decode(data []byte) (*Message, error) {
 
 // Size returns the total encoded size of the message in bytes.
 // Useful for pre-allocating buffers and calculating segment usage.
+//
+// SIZE CALCULATION:
+//
+//	HeaderSize (34) + len(Key) + len(Value) + encoded headers size
+//
+// HEADERS FORMAT:
+//
+//	Count(2) + [KeyLen(2) + Key + ValLen(2) + Val] × N
+//
+// NOTE: Headers are encoded as length-prefixed key-value pairs with a count prefix.
 func (m *Message) Size() int {
-	return HeaderSize + len(m.Key) + len(m.Value)
+	size := HeaderSize + len(m.Key) + len(m.Value)
+
+	// Calculate headers size
+	// Format: Count(2) + [KeyLen(2) + Key + ValLen(2) + Val] × N
+	if len(m.Headers) > 0 {
+		size += 2 // count prefix
+		for k, v := range m.Headers {
+			size += 2 + len(k) + 2 + len(v)
+		}
+	}
+
+	return size
 }
 
 // NewMessage creates a new message with current timestamp and default priority (Normal).
@@ -593,6 +775,7 @@ func NewMessage(key, value []byte) *Message {
 		Value:     value,
 		Flags:     0,
 		Priority:  PriorityNormal,
+		Headers:   make(map[string]string),
 	}
 }
 
@@ -613,6 +796,35 @@ func NewMessageWithPriority(key, value []byte, priority Priority) *Message {
 		Value:     value,
 		Flags:     0,
 		Priority:  priority,
+		Headers:   make(map[string]string),
+	}
+}
+
+// NewMessageWithHeaders creates a new message with custom headers for tracing and metadata.
+// Headers are used for trace context propagation (W3C traceparent) and custom metadata.
+//
+// COMMON HEADERS:
+//   - "traceparent": W3C Trace Context (e.g., "00-trace_id-span_id-01")
+//   - "correlation_id": Application-level correlation
+//   - Custom application headers
+//
+// USAGE:
+//
+//	headers := map[string]string{"traceparent": "00-abc123...-def456...-01"}
+//	msg := storage.NewMessageWithHeaders(key, value, headers)
+func NewMessageWithHeaders(key, value []byte, headers map[string]string) *Message {
+	h := make(map[string]string, len(headers))
+	for k, v := range headers {
+		h[k] = v
+	}
+	return &Message{
+		Offset:    0,
+		Timestamp: time.Now().UnixNano(),
+		Key:       key,
+		Value:     value,
+		Flags:     0,
+		Priority:  PriorityNormal,
+		Headers:   h,
 	}
 }
 

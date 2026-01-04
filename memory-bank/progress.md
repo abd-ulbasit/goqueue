@@ -3,8 +3,8 @@
 ## Overall Status
 
 **Phase**: 2 of 4
-**Milestones**: 6/18 complete
-**Tests**: 140+ passing (storage: 42, broker: 70+, api: 24)
+**Milestones**: 7/18 complete
+**Tests**: 165+ passing (storage: 50, broker: 90+, api: 24)
 **Started**: Session 1
 
 ## Phase Progress
@@ -15,10 +15,10 @@
 - [x] Milestone 3: Consumer Groups & Offset Management ✅
 - [x] Milestone 4: Reliability - ACKs, Visibility & DLQ ✅
 
-### Phase 2: Advanced Features (2/5)
+### Phase 2: Advanced Features (3/5)
 - [x] Milestone 5: Native Delay & Scheduled Messages ✅
 - [x] Milestone 6: Priority Lanes ✅ ⭐
-- [ ] Milestone 7: Message Tracing ⭐
+- [x] Milestone 7: Message Tracing ✅ ⭐
 - [ ] Milestone 8: Schema Registry
 - [ ] Milestone 9: Transactional Publish
 
@@ -181,6 +181,77 @@
 - **Bugs Fixed**:
   - uint8 underflow in loops (0 decrement → 255)
   - Segment reading always uses 32-byte header
+
+### Milestone 7 - Message Tracing ✅ ⭐
+- **W3C Trace Context Format** - Industry standard trace propagation
+  - TraceID: 16 bytes (128 bits), hex encoded to 32 chars
+  - SpanID: 8 bytes (64 bits), hex encoded to 16 chars
+  - Traceparent format: `00-{trace_id}-{span_id}-{flags}`
+  - Example: `00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01`
+- **34-byte Message Header** - Added HeaderLen field for trace context
+  - Format: Magic(2) + Version(1) + Flags(1) + CRC(4) + Offset(8) + Timestamp(8) + Priority(1) + Reserved(1) + KeyLen(2) + ValueLen(4) + HeaderLen(2)
+  - Headers encoded as: Count(2) + [KeyLen(2) + Key + ValLen(2) + Val] × N
+  - Enables trace context propagation via `traceparent` header
+- **Span Event Types** - Complete message lifecycle coverage
+  - Publish: `publish.received`, `publish.partitioned`, `publish.persisted`
+  - Consume: `consume.fetched`, `consume.acked`, `consume.nacked`, `consume.rejected`
+  - Delay: `delay.scheduled`, `delay.ready`, `delay.cancelled`, `delay.expired`
+  - Visibility: `visibility.timeout`, `visibility.extended`
+  - DLQ: `dlq.routed`
+- **Ring Buffer Storage** - In-memory fast access
+  - Configurable capacity (default 10,000 spans)
+  - Thread-safe with RWMutex
+  - Methods: Push(), Count(), GetRecent(), GetByTraceID(), GetByTimeRange()
+  - Automatic eviction of oldest spans on overflow
+- **File Exporter** - Persistent JSON traces
+  - JSONL format (one JSON object per line)
+  - File rotation by size (default 10MB)
+  - Directory: data/traces/traces-{date}-{seq}.json
+- **Stdout Exporter** - Real-time trace output for debugging
+  - JSON format with pretty printing option
+  - Configurable writer (default: os.Stdout)
+- **OTLP Exporter** - OpenTelemetry Protocol support
+  - HTTP transport with protobuf encoding
+  - Batching for efficiency
+  - Configurable endpoint and headers
+- **Jaeger Exporter** - Jaeger Thrift UDP support
+  - Direct UDP transport (agent mode)
+  - Compact Thrift serialization
+  - Configurable agent host/port
+- **Query Interface**:
+  - GetTrace(traceID) - Complete trace by ID
+  - GetRecentTraces(limit) - Most recent traces
+  - SearchTraces(query) - Filter by topic, partition, time range, status
+  - Stats() - Buffer usage, exporter status, sampling rate
+- **Trace Struct** - Complete trace view
+  - TraceID, Topic, Partition, Offset
+  - StartTime, EndTime, Duration
+  - Status: completed, pending, error
+  - Spans array sorted by timestamp
+- **Broker Integration**:
+  - Tracer initialized on broker startup
+  - Publish operations record spans automatically
+  - Consume operations record spans automatically
+  - Ack/Nack/Reject operations record spans
+  - Configurable per-topic tracing enable/disable
+  - Sampling rate support (1.0 = 100%)
+- **HTTP API endpoints**:
+  - `GET /traces` - List recent traces (limit param)
+  - `GET /traces/{traceID}` - Get specific trace with all spans
+  - `GET /traces/search` - Search with filters (topic, partition, time, status)
+  - `GET /traces/stats` - Tracer statistics
+- **Files created**:
+  - `internal/broker/tracer.go` - Complete tracing implementation (~1700 lines)
+  - `internal/broker/tracer_test.go` - 22 comprehensive tests
+  - `internal/storage/message.go` - Updated to 34-byte header with headers support
+  - `internal/api/server.go` - Trace API endpoints
+- **Key Design Decisions**:
+  - W3C Trace Context for interoperability (not custom format)
+  - Ring buffer for fast recent access (no DB dependency)
+  - File export for persistence (simple, portable)
+  - Sampling support for high-throughput scenarios
+  - Span-per-event (not span-per-message) for granular visibility
+  - Headers in message format (not out-of-band) for durability
 
 ### Technical Decisions Made
 | Decision | Choice | Rationale |
