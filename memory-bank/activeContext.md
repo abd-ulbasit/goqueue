@@ -3,54 +3,65 @@
 ## Current Focus
 
 **Phase**: 2 - Advanced Features
-**Milestone**: 7 - Message Tracing ✅ COMPLETE
-**Status**: Ready for Milestone 8 (Schema Registry)
+**Milestone**: 8 - Schema Registry ✅ COMPLETE
+**Status**: Ready for Milestone 9 (Transactional Publish)
 
 ## What I'm Working On
 
-### Just Completed (M7 - Message Tracing)
-- ✅ W3C Trace Context Format - Industry standard for trace propagation
-- ✅ 34-byte Message Header - Added HeaderLen field for trace headers
-- ✅ Complete Span Event Types - publish, consume, ack, nack, reject, delay, dlq
-- ✅ Ring Buffer Storage - In-memory fast access with 10,000 span capacity
-- ✅ File Exporter - Persistent JSONL traces with rotation
-- ✅ OTLP Exporter - OpenTelemetry Protocol support
-- ✅ Jaeger Exporter - Jaeger Thrift UDP support
-- ✅ Query Interface - GetTrace, GetRecentTraces, SearchTraces
-- ✅ HTTP API - /traces, /traces/{id}, /traces/search, /traces/stats
-- ✅ Broker Integration - Automatic span recording for all operations
-- ✅ 22 comprehensive tracer tests
+### Just Completed (M8 - Schema Registry)
+- ✅ Schema Registry Core - Centralized schema management (~1200 lines)
+- ✅ JSON Schema Validator - Pure Go Draft 7 implementation (~500 lines)
+- ✅ Compatibility Modes - BACKWARD (default), FORWARD, FULL, NONE
+- ✅ Subject Naming - TopicNameStrategy (subject = topic name)
+- ✅ Version Management - Sequential per subject, global unique IDs
+- ✅ File Persistence - data/schemas/{subject}/v{N}.json
+- ✅ Broker Integration - Validation in publish path, per-subject toggle
+- ✅ HTTP API - Confluent-compatible endpoints (15 handlers)
+- ✅ 30+ comprehensive schema registry tests
 
-### Key Technical Decisions (M7)
-- **Trace Format**: W3C Trace Context (interoperability with existing tools)
-- **TraceID**: 16 bytes (128 bits), hex encoded to 32 chars
-- **SpanID**: 8 bytes (64 bits), hex encoded to 16 chars
-- **Header Size**: 34 bytes (added 2-byte HeaderLen at [32:34])
-- **Headers Encoding**: Count(2) + [KeyLen(2) + Key + ValLen(2) + Val] × N
-- **Storage**: Ring buffer (in-memory) + File export (persistent)
-- **Sampling**: Configurable rate (1.0 = 100%)
-- **Exporters**: Stdout, File (JSONL), OTLP, Jaeger
+### Key Technical Decisions (M8)
+- **Schema Format**: JSON Schema only (Protobuf deferred, noted for future)
+- **Storage**: File-based JSON (matches existing patterns, debuggable)
+- **Subject Naming**: TopicNameStrategy (subject = topic name, 1:1 mapping)
+- **Compatibility Default**: BACKWARD (Confluent default, safest)
+- **Schema ID Location**: Message header field `schema-id`
+- **Validation Point**: Broker-side with per-subject toggle
+- **Versioning**: Sequential integers, auto-incremented global IDs
+- **Validation Failure**: Reject with 400 error (fail fast)
 
-### Files Created/Modified (M7)
+### Files Created/Modified (M8)
 - **Created**:
-  - `internal/broker/tracer.go` - Complete tracing implementation (~1700 lines)
-  - `internal/broker/tracer_test.go` - 22 comprehensive tests
+  - `internal/broker/schema_registry.go` - Core registry implementation
+  - `internal/broker/json_schema_validator.go` - JSON Schema validator
+  - `internal/broker/schema_registry_test.go` - Comprehensive tests
 - **Modified**:
-  - `internal/storage/message.go` - 34-byte header, Headers field, encode/decode
-  - `internal/storage/message_test.go` - Header encoding tests
-  - `internal/broker/broker.go` - Tracer integration, span recording
-  - `internal/api/server.go` - Trace API endpoints
+  - `internal/broker/broker.go` - Schema registry integration
+  - `internal/api/server.go` - Schema API endpoints (15 handlers)
 
-### Bug Fixes During M7
-- **Message Size calculation**: Headers need 2-byte count prefix even when empty
-- **API mismatches in tests**: RingBuffer uses Push/Count, not Add/Len
+### Schema Registry API Endpoints
+```
+POST   /schemas/subjects/{subject}/versions     Register new schema
+GET    /schemas/subjects/{subject}/versions     List versions
+GET    /schemas/subjects/{subject}/versions/latest  Get latest
+GET    /schemas/subjects/{subject}/versions/{version}  Get specific
+DELETE /schemas/subjects/{subject}/versions/{version}  Delete version
+GET    /schemas/subjects                        List subjects
+POST   /schemas/subjects/{subject}              Check schema exists
+DELETE /schemas/subjects/{subject}              Delete subject
+GET    /schemas/ids/{id}                        Get by global ID
+POST   /schemas/compatibility/.../versions/{v}  Test compatibility
+GET/PUT /schemas/config                         Global config
+GET/PUT /schemas/config/{subject}               Subject config
+GET    /schemas/stats                           Statistics
+```
 
-### Next Steps (Milestone 8 - Schema Registry)
-1. Schema storage (Avro, Protobuf, JSON Schema)
-2. Schema versioning and compatibility checking
-3. Producer schema validation
-4. Consumer schema evolution
-5. HTTP API for schema management
+### Next Steps (Milestone 9 - Transactional Publish)
+1. Producer ID assignment for idempotency
+2. Sequence number tracking per partition
+3. Transaction coordinator implementation
+4. Begin/commit/abort transaction API
+5. Idempotent message deduplication
+6. Transaction timeout handling
 
 ## Recent Changes
 
