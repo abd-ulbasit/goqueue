@@ -188,6 +188,38 @@ type Broker struct {
 	// ==========================================================================
 	tracer *Tracer
 
+	// ==========================================================================
+	// MILESTONE 8: SCHEMA REGISTRY
+	// ==========================================================================
+	//
+	// The schema registry manages message schemas for validation and evolution.
+	// It provides:
+	//   - Schema storage and versioning
+	//   - Compatibility checking (BACKWARD, FORWARD, FULL, NONE)
+	//   - Message validation against registered schemas
+	//   - Schema ID in message headers for consumer awareness
+	//
+	// FLOW:
+	//   ┌──────────┐  register   ┌─────────────────┐
+	//   │ Producer │────────────►│ Schema Registry │
+	//   └──────────┘             └────────┬────────┘
+	//        │                            │
+	//        │ publish                    │ validate
+	//        ▼                            ▼
+	//   ┌──────────┐             ┌─────────────────┐
+	//   │  Broker  │◄────────────│ JSON Schema     │
+	//   └──────────┘  reject if  │ Validator       │
+	//                 invalid    └─────────────────┘
+	//
+	// SUBJECT NAMING: TopicNameStrategy (subject = topic name)
+	// SCHEMA FORMAT: JSON Schema (Draft 7)
+	// SCHEMA ID: Stored in message header "schema-id"
+	//
+	// FUTURE: Protobuf support (noted for later implementation)
+	//
+	// ==========================================================================
+	schemaRegistry *SchemaRegistry
+
 	// mu protects topics map
 	mu sync.RWMutex
 
@@ -317,8 +349,34 @@ func NewBroker(config BrokerConfig) (*Broker, error) {
 	}
 	broker.tracer = tracer
 
+	// ==========================================================================
+	// MILESTONE 8: INITIALIZE SCHEMA REGISTRY
+	// ==========================================================================
+	//
+	// The schema registry manages message schemas for validation and evolution.
+	// It stores schemas on disk and validates messages against registered schemas
+	// during publish.
+	//
+	// STARTUP FLOW:
+	//   1. Create registry with schema storage directory
+	//   2. Load existing schemas from disk into memory cache
+	//   3. Compile validators for each schema
+	//   4. Ready to validate messages
+	//
+	// ==========================================================================
+	schemaRegistryConfig := DefaultSchemaRegistryConfig(config.DataDir)
+	schemaRegistry, err := NewSchemaRegistry(schemaRegistryConfig)
+	if err != nil {
+		tracer.Shutdown()
+		scheduler.Close()
+		groupCoordinator.Close()
+		return nil, fmt.Errorf("failed to create schema registry: %w", err)
+	}
+	broker.schemaRegistry = schemaRegistry
+
 	// Discover and load existing topics
 	if err := broker.loadExistingTopics(); err != nil {
+		schemaRegistry.Close()
 		tracer.Shutdown()
 		scheduler.Close()
 		groupCoordinator.Close()
@@ -334,7 +392,8 @@ func NewBroker(config BrokerConfig) (*Broker, error) {
 		"dlq_enabled", reliabilityConfig.DLQEnabled,
 		"delay_scheduler", "enabled",
 		"max_delay", schedulerConfig.MaxDelay.String(),
-		"tracing", tracerConfig.Enabled)
+		"tracing", tracerConfig.Enabled,
+		"schema_registry", "enabled")
 
 	return broker, nil
 }
@@ -411,6 +470,13 @@ func (b *Broker) Close() error {
 	if b.tracer != nil {
 		if err := b.tracer.Shutdown(); err != nil {
 			errs = append(errs, fmt.Errorf("tracer: %w", err))
+		}
+	}
+
+	// Close schema registry
+	if b.schemaRegistry != nil {
+		if err := b.schemaRegistry.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("schema registry: %w", err))
 		}
 	}
 
@@ -606,6 +672,34 @@ func (b *Broker) PublishWithTrace(topic string, key, value []byte, traceCtx Trac
 		return 0, 0, fmt.Errorf("%w: %s", ErrTopicNotFound, topic)
 	}
 	b.mu.RUnlock()
+
+	// =========================================================================
+	// MILESTONE 8: SCHEMA VALIDATION
+	// =========================================================================
+	//
+	// If schema validation is enabled for this topic (subject), validate the
+	// message value against the registered schema before persisting.
+	//
+	// VALIDATION FLOW:
+	//   1. Check if validation is enabled for topic
+	//   2. Get latest schema for topic (subject = topic name)
+	//   3. Validate message JSON against schema
+	//   4. Reject with 400 error if invalid
+	//
+	// This ensures data quality at publish time - invalid messages never enter
+	// the log, preventing downstream consumer failures.
+	//
+	// =========================================================================
+	if err := b.schemaRegistry.ValidateMessage(topic, value); err != nil {
+		// Record validation failure span
+		if !ctx.TraceID.IsZero() {
+			span := NewSpan(ctx.TraceID, SpanEventValidationFailed, topic, 0, 0)
+			span.WithError(err)
+			span.WithAttribute("error_type", "schema_validation")
+			b.tracer.RecordSpan(span)
+		}
+		return 0, 0, fmt.Errorf("schema validation failed: %w", err)
+	}
 
 	// Record publish.received span
 	if !ctx.TraceID.IsZero() {
@@ -1845,4 +1939,22 @@ func (b *Broker) DelayStats() DelayStats {
 		ByTopic:        stats.ByTopic,
 		TimerWheel:     b.scheduler.timerWheel.Stats(),
 	}
+}
+
+// =============================================================================
+// SCHEMA REGISTRY INTERFACE (M8)
+// =============================================================================
+
+// SchemaRegistry returns the broker's schema registry.
+// Used by the API layer for schema operations.
+func (b *Broker) SchemaRegistry() *SchemaRegistry {
+	return b.schemaRegistry
+}
+
+// SchemaStats returns statistics about the schema registry.
+func (b *Broker) SchemaStats() SchemaRegistryStats {
+	if b.schemaRegistry == nil {
+		return SchemaRegistryStats{}
+	}
+	return b.schemaRegistry.Stats()
 }

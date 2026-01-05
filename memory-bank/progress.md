@@ -3,8 +3,8 @@
 ## Overall Status
 
 **Phase**: 2 of 4
-**Milestones**: 7/18 complete
-**Tests**: 165+ passing (storage: 50, broker: 90+, api: 24)
+**Milestones**: 8/18 complete
+**Tests**: 195+ passing (storage: 50, broker: 120+, api: 24)
 **Started**: Session 1
 
 ## Phase Progress
@@ -15,11 +15,11 @@
 - [x] Milestone 3: Consumer Groups & Offset Management ✅
 - [x] Milestone 4: Reliability - ACKs, Visibility & DLQ ✅
 
-### Phase 2: Advanced Features (3/5)
+### Phase 2: Advanced Features (4/5)
 - [x] Milestone 5: Native Delay & Scheduled Messages ✅
 - [x] Milestone 6: Priority Lanes ✅ ⭐
 - [x] Milestone 7: Message Tracing ✅ ⭐
-- [ ] Milestone 8: Schema Registry
+- [x] Milestone 8: Schema Registry ✅
 - [ ] Milestone 9: Transactional Publish
 
 ### Phase 3: Distribution (0/4)
@@ -253,6 +253,70 @@
   - Span-per-event (not span-per-message) for granular visibility
   - Headers in message format (not out-of-band) for durability
 
+### Milestone 8 - Schema Registry ✅
+- **JSON Schema Validation** - Draft 7 compatible pure-Go validator
+  - Type validation: string, integer, number, boolean, array, object, null
+  - Property validation: properties, required, additionalProperties
+  - Constraints: minimum/maximum, minLength/maxLength, pattern, enum
+  - Array support: items, minItems, maxItems, uniqueItems
+  - Nested objects with recursive validation
+  - Local $ref support for schema composition
+- **Compatibility Modes** - Safe schema evolution
+  - BACKWARD (default): New schema reads old data (Confluent default)
+  - FORWARD: Old schema reads new data
+  - FULL: Both BACKWARD and FORWARD compatible
+  - NONE: No compatibility checking (development/testing)
+- **Subject Naming** - TopicNameStrategy
+  - Subject = Topic name (1:1 mapping)
+  - Simple and intuitive for most use cases
+  - Future: RecordNameStrategy, TopicRecordNameStrategy
+- **Versioning** - Sequential integers per subject
+  - Global unique ID across all subjects
+  - Version numbers sequential within each subject
+  - Duplicate schema detection (returns existing)
+- **Storage** - File-based JSON persistence
+  - Directory: data/schemas/{subject}/
+  - Files: v1.json, v2.json, config.json
+  - Global: _ids.json (ID → subject:version mapping)
+  - Survives restarts with full recovery
+- **Caching** - In-memory validator cache
+  - Compiled schemas cached for fast validation
+  - Lazy loading on first use
+  - Configurable cache size (default 1000)
+- **Broker Integration**:
+  - Schema validation in publish path
+  - Per-subject validation enable/disable
+  - Validation failure returns 400 error
+  - Schema ID passed via `schema-id` header
+- **HTTP API endpoints** (Confluent-compatible):
+  - `POST /schemas/subjects/{subject}/versions` - Register schema
+  - `GET /schemas/subjects/{subject}/versions` - List versions
+  - `GET /schemas/subjects/{subject}/versions/latest` - Get latest
+  - `GET /schemas/subjects/{subject}/versions/{version}` - Get specific
+  - `DELETE /schemas/subjects/{subject}/versions/{version}` - Delete version
+  - `GET /schemas/subjects` - List subjects
+  - `POST /schemas/subjects/{subject}` - Check schema exists
+  - `DELETE /schemas/subjects/{subject}` - Delete subject
+  - `GET /schemas/ids/{id}` - Get by global ID
+  - `POST /schemas/compatibility/subjects/{subject}/versions/{version}` - Test compatibility
+  - `GET /schemas/config` - Get global config
+  - `PUT /schemas/config` - Set global config
+  - `GET /schemas/config/{subject}` - Get subject config
+  - `PUT /schemas/config/{subject}` - Set subject config
+  - `GET /schemas/stats` - Registry statistics
+- **Files created**:
+  - `internal/broker/schema_registry.go` - Core registry (~1200 lines)
+  - `internal/broker/json_schema_validator.go` - JSON Schema validator (~500 lines)
+  - `internal/broker/schema_registry_test.go` - 30+ comprehensive tests
+  - `internal/api/server.go` - Schema API endpoints (15 handlers)
+- **Key Design Decisions**:
+  - JSON Schema only (Protobuf deferred, noted for future)
+  - File-based storage matches existing patterns
+  - Broker-side validation (not client-side)
+  - Confluent-compatible API for familiarity
+  - Per-subject config overrides global config
+  - Soft delete for version safety
+
 ### Technical Decisions Made
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
@@ -290,6 +354,14 @@
 | Delay API | Both relative and absolute | Maximum flexibility for producers |
 | Max delay | ~7.76 days | Practical limit, fits 4-level wheel |
 | Zero/past delay | Immediate fire | Intuitive behavior |
+| Schema format | JSON Schema | Human readable, no codegen, simple |
+| Schema storage | File-based JSON | Matches existing patterns, debuggable |
+| Subject naming | TopicNameStrategy | Simple 1:1 mapping, intuitive |
+| Compatibility default | BACKWARD | Confluent default, safest for teams |
+| Schema ID location | Message header | Uses existing headers system |
+| Validation point | Broker-side | Central enforcement, configurable |
+| Versioning | Sequential integers | Simple, compact, industry standard |
+| Validation failure | Reject with 400 | Fail fast, clear contract |
 
 ## What's Left to Build
 
@@ -308,9 +380,10 @@
 
 ### Differentiators (Key Features) ⭐
 - [x] Native delay messages (timer wheel) ✅ (M5)
-- [ ] Priority lanes
-- [ ] Message tracing
-- [ ] Cooperative rebalancing
+- [x] Priority lanes ✅ (M6)
+- [x] Message tracing ✅ (M7)
+- [x] Schema registry ✅ (M8)
+- [ ] Cooperative rebalancing (M12)
 
 ### Distribution (Multi-Node)
 - [ ] Cluster membership
