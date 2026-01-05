@@ -3,8 +3,8 @@
 ## Status: Phase 2 - In Progress
 
 **Target Milestones**: 18
-**Completed**: 7
-**Current**: Milestone 8 (Schema Registry)
+**Completed**: 8
+**Current**: Milestone 9 (Transactional Publish)
 
 ---
 
@@ -327,23 +327,60 @@ Per-Priority-Per-Partition Metrics (PPPP):
 
 ---
 
-### Milestone 8: Schema Registry
+### Milestone 8: Schema Registry ✅ COMPLETE
 
 **Goal:** Message schema validation and evolution.
 
 **Learning Focus:**
 - Schema evolution compatibility (backward, forward, full)
-- JSON Schema and Protocol Buffers
-- Schema-on-read vs schema-on-write
+- JSON Schema validation
+- Central schema management
+- Confluent Schema Registry API patterns
 
 **Deliverables:**
-- [ ] Schema storage
-- [ ] Schema registration API
-- [ ] Compatibility checking
-- [ ] Schema ID in message header
-- [ ] Validation middleware
-- [ ] JSON Schema support
-- [ ] Protobuf support (optional)
+- [x] Schema storage (file-based JSON)
+- [x] Schema registration API
+- [x] Compatibility checking (BACKWARD, FORWARD, FULL, NONE)
+- [x] Schema ID in message header (`schema-id`)
+- [x] Validation middleware in broker
+- [x] JSON Schema support (Draft 7)
+- [ ] Protobuf support (noted for future)
+
+**Implementation Details:**
+- **Schema Registry Core** (`internal/broker/schema_registry.go` ~1200 lines)
+  - Subject management (TopicNameStrategy: subject = topic name)
+  - Version management (sequential per subject)
+  - Global unique IDs across all subjects
+  - Compatibility checking before registration
+  - Per-subject validation enable/disable
+  - File persistence with crash recovery
+  
+- **JSON Schema Validator** (`internal/broker/json_schema_validator.go` ~500 lines)
+  - Pure Go implementation (no external deps)
+  - Type validation: string, integer, number, boolean, array, object, null
+  - Constraints: minimum/maximum, minLength/maxLength, pattern, enum
+  - Object validation: properties, required, additionalProperties
+  - Array validation: items, minItems, maxItems, uniqueItems
+  - Local $ref support for schema composition
+
+- **Storage Structure:**
+  ```
+  data/schemas/
+  ├── orders/
+  │   ├── v1.json
+  │   ├── v2.json
+  │   └── config.json
+  ├── _ids.json       (global ID mapping)
+  └── _config.json    (global config)
+  ```
+
+- **HTTP API** (Confluent-compatible, 15 endpoints):
+  - Schema registration and retrieval
+  - Subject management
+  - Compatibility testing
+  - Global and per-subject config
+
+**Tests:** 30+ tests covering registration, versioning, compatibility, validation, persistence
 
 ---
 

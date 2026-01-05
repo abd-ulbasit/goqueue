@@ -343,6 +343,9 @@ const (
 	// SpanEventPublishReceived - message received by broker
 	SpanEventPublishReceived SpanEventType = "publish.received"
 
+	// SpanEventValidationFailed - message failed schema validation
+	SpanEventValidationFailed SpanEventType = "publish.validation_failed"
+
 	// SpanEventPublishPartitioned - partition assigned to message
 	SpanEventPublishPartitioned SpanEventType = "publish.partitioned"
 
