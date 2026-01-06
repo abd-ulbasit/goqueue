@@ -147,10 +147,81 @@ const (
 )
 
 // Message flags - bit positions in the flags byte
+// =============================================================================
+// FLAGS - MESSAGE ATTRIBUTES
+// =============================================================================
+//
+// WHY USE A FLAGS BYTE:
+// Single byte can store 8 boolean flags compactly.
+// Much more efficient than having 8 separate bool fields.
+//
+// COMPARISON:
+//   - Kafka: Uses magic byte + attributes (2 bytes of flags)
+//   - RabbitMQ: Properties struct with delivery mode, priority, etc.
+//   - SQS: Message attributes (key-value pairs)
+//   - goqueue: Single flags byte for common attributes
+//
+// BIT LAYOUT:
+//
+//	Bit 0: Compressed (value has been compressed)
+//	Bit 1: HasHeaders (message includes header metadata)
+//	Bit 2: Tombstone (deletion marker for compacted topics)
+//	Bit 3: ControlRecord (transaction marker - commit/abort)
+//	Bit 4: TransactionCommit (1 = commit marker, 0 = abort marker)
+//	Bits 5-7: Reserved for future use
+//
+// FLAG OPERATIONS:
+//
+//	Set flag:    flags |= FlagCompressed
+//	Clear flag:  flags &^= FlagCompressed
+//	Check flag:  flags & FlagCompressed != 0
+//
+// CONTROL RECORDS (TRANSACTION MARKERS):
+// ============================================================================
+//
+// WHY: Control records mark transaction boundaries in partition logs.
+// When a transaction commits or aborts, control records are written to ALL
+// partitions that participated in the transaction.
+//
+// HOW IT WORKS:
+//  1. Producer begins transaction (no control record)
+//  2. Producer writes messages to partitions (normal messages)
+//  3. On COMMIT: Write control record with FlagControlRecord | FlagTransactionCommit
+//  4. On ABORT: Write control record with only FlagControlRecord
+//  5. Consumer reads partition, sees control record:
+//     - read_uncommitted: Skip control records, return all messages
+//     - read_committed: Use control records to filter aborted transactions
+//
+// FLOW (Commit):
+//
+//	┌──────────────────────────────────────────────────────────────────┐
+//	│ Partition Log                                                    │
+//	│                                                                  │
+//	│ [Msg1:TxA] [Msg2:TxB] [Msg3:TxA] [COMMIT:TxA] [Msg4:TxB] [...]   │
+//	│      │          │          │          │            │             │
+//	│      └──────────┼──────────┴──────────┤            │             │
+//	│         TxA messages                  │            │             │
+//	│                │                      │            │             │
+//	│                └──────────────────────┼────────────┘             │
+//	│                      TxB messages     │                          │
+//	│                                       │                          │
+//	│                               Control record                     │
+//	└──────────────────────────────────────────────────────────────────┘
+//
+// COMPARISON:
+//   - Kafka: Uses control batches with special record type
+//   - goqueue: Uses flags byte to mark control records (simpler)
+//
+// CONTROL RECORD PAYLOAD FORMAT:
+//   - ProducerId (8 bytes) - identifies the producer
+//   - Epoch (2 bytes) - producer epoch for zombie fencing
+//   - TransactionalId length (2 bytes) + TransactionalId (variable)
 const (
-	FlagCompressed = 1 << 0 // Message payload is compressed
-	FlagHasHeaders = 1 << 1 // Message has additional headers
-	FlagTombstone  = 1 << 2 // Marks deletion in compacted topics
+	FlagCompressed        = 1 << 0 // Bit 0: Message payload is compressed
+	FlagHasHeaders        = 1 << 1 // Bit 1: Message has additional headers
+	FlagTombstone         = 1 << 2 // Bit 2: Marks deletion in compacted topics
+	FlagControlRecord     = 1 << 3 // Bit 3: Transaction control record (commit/abort marker)
+	FlagTransactionCommit = 1 << 4 // Bit 4: 1 = commit, 0 = abort (only if FlagControlRecord set)
 )
 
 // =============================================================================
@@ -346,6 +417,214 @@ type Message struct {
 	//   - "content-type": Payload format hint (e.g., "application/json")
 	//   - "correlation-id": For request-response patterns
 	Headers map[string]string
+}
+
+// =============================================================================
+// CONTROL RECORD PAYLOAD - TRANSACTION MARKERS
+// =============================================================================
+//
+// WHY CONTROL RECORDS?
+// When a transaction commits or aborts, we need to mark the boundary in the
+// partition log. Control records serve this purpose - they're special messages
+// that the broker writes (not the producer) to signal transaction outcomes.
+//
+// PAYLOAD STRUCTURE:
+// Control records use the standard Message format but with:
+//   - FlagControlRecord set in Flags
+//   - FlagTransactionCommit set if commit (unset for abort)
+//   - Value field contains serialized ControlRecordPayload
+//   - Key field is typically nil or contains transaction ID
+//
+// WHY INCLUDE PID AND EPOCH?
+// Consumers need to identify which producer's transaction is being marked.
+// The epoch enables zombie fencing - old producers with stale epochs can be
+// identified and their messages ignored.
+//
+// WIRE FORMAT:
+//   ┌────────────────────────────────────────────────────────────────┐
+//   │ ProducerId (8 bytes, uint64, big-endian)                       │
+//   │ Epoch (2 bytes, uint16, big-endian)                            │
+//   │ TransactionalId Length (2 bytes, uint16, big-endian)           │
+//   │ TransactionalId (variable length string)                       │
+//   └────────────────────────────────────────────────────────────────┘
+//
+// COMPARISON:
+//   - Kafka: Uses ControlRecordType enum (ABORT=0, COMMIT=1) in record
+//   - goqueue: Uses FlagTransactionCommit bit (simpler, same effect)
+//
+
+// ControlRecordPayload contains the data stored in a control record's Value field.
+// Control records are transaction markers (commit/abort) written to partition logs.
+type ControlRecordPayload struct {
+	// ProducerId is the unique identifier of the producer that created the transaction.
+	// Used by consumers to track which messages belong to which transaction.
+	ProducerId uint64
+
+	// Epoch is the producer's epoch for zombie fencing.
+	// If a consumer sees messages from a producer with an older epoch than the
+	// latest control record, those messages are from a zombie and should be ignored.
+	Epoch uint16
+
+	// TransactionalId is the string identifier the producer used to register
+	// with the transaction coordinator. Used for debugging and monitoring.
+	TransactionalId string
+}
+
+// ControlRecordPayloadSize returns the minimum size of a control record payload
+// (without the variable-length TransactionalId).
+const ControlRecordPayloadMinSize = 8 + 2 + 2 // ProducerId + Epoch + TxnIdLen
+
+// EncodeControlRecordPayload serializes a control record payload to bytes.
+//
+// WIRE FORMAT:
+//
+//	[0:8]   ProducerId (uint64, big-endian)
+//	[8:10]  Epoch (uint16, big-endian)
+//	[10:12] TransactionalId length (uint16, big-endian)
+//	[12:N]  TransactionalId (UTF-8 string)
+func (p *ControlRecordPayload) Encode() []byte {
+	txnIdBytes := []byte(p.TransactionalId)
+	buf := make([]byte, ControlRecordPayloadMinSize+len(txnIdBytes))
+
+	// ProducerId (8 bytes)
+	binary.BigEndian.PutUint64(buf[0:8], p.ProducerId)
+
+	// Epoch (2 bytes)
+	binary.BigEndian.PutUint16(buf[8:10], p.Epoch)
+
+	// TransactionalId length and value
+	binary.BigEndian.PutUint16(buf[10:12], uint16(len(txnIdBytes)))
+	copy(buf[12:], txnIdBytes)
+
+	return buf
+}
+
+// DecodeControlRecordPayload deserializes a control record payload from bytes.
+//
+// Returns an error if the data is too short or malformed.
+func DecodeControlRecordPayload(data []byte) (*ControlRecordPayload, error) {
+	if len(data) < ControlRecordPayloadMinSize {
+		return nil, fmt.Errorf("control record payload too short: %d bytes, need at least %d",
+			len(data), ControlRecordPayloadMinSize)
+	}
+
+	producerId := binary.BigEndian.Uint64(data[0:8])
+	epoch := binary.BigEndian.Uint16(data[8:10])
+	txnIdLen := binary.BigEndian.Uint16(data[10:12])
+
+	if len(data) < ControlRecordPayloadMinSize+int(txnIdLen) {
+		return nil, fmt.Errorf("control record payload truncated: %d bytes, need %d",
+			len(data), ControlRecordPayloadMinSize+int(txnIdLen))
+	}
+
+	transactionalId := string(data[12 : 12+int(txnIdLen)])
+
+	return &ControlRecordPayload{
+		ProducerId:      producerId,
+		Epoch:           epoch,
+		TransactionalId: transactionalId,
+	}, nil
+}
+
+// =============================================================================
+// MESSAGE HELPER METHODS FOR TRANSACTIONS
+// =============================================================================
+
+// IsControlRecord returns true if this message is a transaction control record
+// (commit or abort marker), not a regular data message.
+//
+// Control records are written by the broker, not producers, and mark transaction
+// boundaries for consumers to use when implementing read_committed isolation.
+func (m *Message) IsControlRecord() bool {
+	return m.Flags&FlagControlRecord != 0
+}
+
+// IsTransactionCommit returns true if this control record marks a transaction commit.
+// Only valid when IsControlRecord() returns true.
+//
+// USAGE:
+//
+//	if msg.IsControlRecord() {
+//	    if msg.IsTransactionCommit() {
+//	        // Transaction committed - all messages are valid
+//	    } else {
+//	        // Transaction aborted - discard messages from this producer
+//	    }
+//	}
+func (m *Message) IsTransactionCommit() bool {
+	return m.Flags&FlagTransactionCommit != 0
+}
+
+// IsTransactionAbort returns true if this control record marks a transaction abort.
+// Only valid when IsControlRecord() returns true.
+func (m *Message) IsTransactionAbort() bool {
+	return m.IsControlRecord() && !m.IsTransactionCommit()
+}
+
+// GetControlRecordPayload extracts and decodes the control record payload from
+// this message. Returns an error if the message is not a control record or if
+// the payload is malformed.
+func (m *Message) GetControlRecordPayload() (*ControlRecordPayload, error) {
+	if !m.IsControlRecord() {
+		return nil, fmt.Errorf("message is not a control record")
+	}
+	return DecodeControlRecordPayload(m.Value)
+}
+
+// NewCommitControlRecord creates a new control record message marking a transaction commit.
+//
+// PARAMETERS:
+//   - offset: The offset to assign to this control record
+//   - producerId: The producer's unique identifier
+//   - epoch: The producer's current epoch
+//   - transactionalId: The transaction's string identifier
+//
+// USAGE:
+// This is called by the TransactionCoordinator when committing a transaction.
+// The control record is written to each partition that participated in the transaction.
+func NewCommitControlRecord(offset int64, producerId uint64, epoch uint16, transactionalId string) *Message {
+	payload := &ControlRecordPayload{
+		ProducerId:      producerId,
+		Epoch:           epoch,
+		TransactionalId: transactionalId,
+	}
+
+	return &Message{
+		Offset:    offset,
+		Timestamp: time.Now().UnixNano(),
+		Key:       []byte(transactionalId), // Use txn ID as key for easy lookup
+		Value:     payload.Encode(),
+		Flags:     FlagControlRecord | FlagTransactionCommit,
+		Priority:  PriorityCritical, // Control records are high priority
+	}
+}
+
+// NewAbortControlRecord creates a new control record message marking a transaction abort.
+//
+// PARAMETERS:
+//   - offset: The offset to assign to this control record
+//   - producerId: The producer's unique identifier
+//   - epoch: The producer's current epoch
+//   - transactionalId: The transaction's string identifier
+//
+// USAGE:
+// This is called by the TransactionCoordinator when aborting a transaction.
+// The control record is written to each partition that participated in the transaction.
+func NewAbortControlRecord(offset int64, producerId uint64, epoch uint16, transactionalId string) *Message {
+	payload := &ControlRecordPayload{
+		ProducerId:      producerId,
+		Epoch:           epoch,
+		TransactionalId: transactionalId,
+	}
+
+	return &Message{
+		Offset:    offset,
+		Timestamp: time.Now().UnixNano(),
+		Key:       []byte(transactionalId), // Use txn ID as key for easy lookup
+		Value:     payload.Encode(),
+		Flags:     FlagControlRecord, // No FlagTransactionCommit = abort
+		Priority:  PriorityCritical,  // Control records are high priority
+	}
 }
 
 // =============================================================================

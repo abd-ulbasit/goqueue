@@ -477,6 +477,163 @@ type NodeCircuit struct {
 }
 ```
 
+## Transaction Patterns (M9)
+
+### Idempotent Producer Pattern
+Ensures exactly-once semantics by deduplicating messages based on producer identity and sequence numbers.
+
+```
+Producer Identity:
+┌─────────────────────────────────────────────────────────────────┐
+│  TransactionalId: "order-service-1"                             │
+│  ProducerId:      12345 (int64, assigned by broker)             │
+│  Epoch:           3 (int16, bumped on re-initialization)        │
+└─────────────────────────────────────────────────────────────────┘
+
+Per-Partition Sequence Tracking:
+┌─────────────────────────────────────────────────────────────────┐
+│  Topic: orders, Partition: 0                                    │
+│  LastSequence: 42                                               │
+│  DeduplicationWindow: [38, 39, 40, 41, 42] → offset mapping     │
+└─────────────────────────────────────────────────────────────────┘
+
+Sequence Validation:
+  seq == lastSeq + 1  → Accept (normal case)
+  seq <= lastSeq      → Check dedup window (maybe duplicate)
+  seq > lastSeq + 1   → Reject (gap, out-of-order)
+```
+
+**Why per-partition sequences?**
+- Better parallelism than per-topic
+- Matches Kafka wire format for compatibility
+- Independent tracking per partition
+
+### Two-Phase Commit Pattern
+Transaction lifecycle follows Kafka's two-phase commit protocol.
+
+```
+Transaction State Machine:
+                    ┌───────────────────┐
+                    │       Empty       │ ← Initial state
+                    └───────────────────┘
+                             │ BeginTransaction
+                             ▼
+                    ┌───────────────────┐
+                    │      Ongoing      │ ← Messages published here
+                    └───────────────────┘
+                        │           │
+         CommitTransaction         AbortTransaction
+                        │           │
+                        ▼           ▼
+           ┌───────────────┐ ┌───────────────┐
+           │ PrepareCommit │ │ PrepareAbort  │ ← Phase 1: Prepare
+           └───────────────┘ └───────────────┘
+                  │                 │
+                  ▼                 ▼
+        ┌──────────────────┐ ┌──────────────────┐
+        │ CompleteCommit   │ │ CompleteAbort    │ ← Phase 2: Complete
+        └──────────────────┘ └──────────────────┘
+                  │                 │
+                  └────────┬────────┘
+                           ▼
+                    ┌───────────────────┐
+                    │       Empty       │ ← Ready for next transaction
+                    └───────────────────┘
+```
+
+### Control Record Pattern
+Transaction completion markers written to partition logs.
+
+```
+Control Record (in message format):
+┌──────────────────────────────────────────────────────────────────┐
+│ Flags: 0x18 (COMMIT) or 0x08 (ABORT)                             │
+│   bit 3 (0x08): IsControlRecord = true                           │
+│   bit 4 (0x10): TransactionCommit = true (only for commit)       │
+├──────────────────────────────────────────────────────────────────┤
+│ Payload (JSON in value field):                                   │
+│   { "producerId": 12345, "epoch": 3, "transactionalId": "..." }  │
+└──────────────────────────────────────────────────────────────────┘
+
+Why control records in each partition?
+- Consumers can identify transaction boundaries
+- Enables read_committed isolation level
+- No external coordination needed
+```
+
+### Zombie Fencing Pattern
+Prevents stale producers from corrupting data after failover.
+
+```
+Zombie Fencing Scenario:
+┌─────────────────────────────────────────────────────────────────┐
+│ Time T1: Producer A starts with PID=100, Epoch=0                │
+│ Time T2: Producer A crashes, messages in-flight                 │
+│ Time T3: Producer A restarts, calls InitProducerId              │
+│          → Broker bumps epoch to 1 (PID=100, Epoch=1)           │
+│ Time T4: Old Producer A (zombie) tries to publish with Epoch=0  │
+│          → Broker REJECTS: "fenced zombie producer"             │
+└─────────────────────────────────────────────────────────────────┘
+
+Epoch Validation:
+  request.epoch == current.epoch  → Accept
+  request.epoch < current.epoch   → Reject (zombie fenced)
+  request.epoch > current.epoch   → Never happens (broker controls epoch)
+```
+
+### WAL + Snapshot Pattern
+Transaction log uses write-ahead logging with periodic snapshots.
+
+```
+Transaction Log Structure:
+┌─────────────────────────────────────────────────────────────────┐
+│ data/transactions/                                               │
+│   ├── producer_state.json   (snapshot - loaded on startup)      │
+│   └── transactions.log      (WAL - replayed after snapshot)     │
+└─────────────────────────────────────────────────────────────────┘
+
+WAL Record Types:
+  init_producer    - New producer registered
+  begin_txn        - Transaction started
+  add_partition    - Partition added to transaction
+  prepare_commit   - Commit initiated
+  complete_commit  - Commit completed
+  prepare_abort    - Abort initiated
+  complete_abort   - Abort completed
+  heartbeat        - Producer heartbeat
+  expire_producer  - Producer session expired
+  update_sequence  - Sequence number updated
+
+Recovery Flow:
+  1. Load snapshot (if exists)
+  2. Replay WAL records after snapshot timestamp
+  3. Resume pending transactions or abort them
+```
+
+### Transaction Timeout Pattern
+Two levels of timeout protection.
+
+```
+Timeout Hierarchy:
+┌─────────────────────────────────────────────────────────────────┐
+│ Transaction Timeout (60s default)                                │
+│   - Time from BeginTransaction to Commit/Abort                   │
+│   - If exceeded, transaction auto-aborts                         │
+│   - Protects against abandoned transactions                      │
+├─────────────────────────────────────────────────────────────────┤
+│ Session Timeout (30s default)                                    │
+│   - Time since last heartbeat                                    │
+│   - If exceeded, producer considered dead                        │
+│   - Active transactions auto-aborted                             │
+│   - Protects against crashed producers                           │
+├─────────────────────────────────────────────────────────────────┤
+│ Heartbeat Interval (3s recommended)                              │
+│   - Client should send heartbeats at this interval               │
+│   - ~10 heartbeats before session timeout                        │
+│   - Same pattern as consumer group heartbeats                    │
+└─────────────────────────────────────────────────────────────────┘
+```
+
 ## Concurrency Patterns
 
 ### Per-Partition Locking

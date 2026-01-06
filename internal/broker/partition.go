@@ -266,6 +266,30 @@ func (p *Partition) Consume(fromOffset int64, maxMessages int) ([]*storage.Messa
 			continue
 		}
 
+		// ============================================================================
+		// CONTROL RECORD FILTERING
+		// ============================================================================
+		//
+		// WHAT: Control records are internal transaction markers (commit/abort).
+		//       They are NOT real messages - consumers should never see them.
+		//
+		// WHY SKIP: Control records are:
+		//   1. Internal bookkeeping (consumers don't care about transaction status)
+		//   2. Meta-information for transaction coordinator only
+		//   3. Similar to Kafka: consumers skip control records when read_committed
+		//
+		// COMPARISON:
+		//   - Kafka with read_committed: Filters out control records automatically
+		//   - RabbitMQ: No control records (different transaction model)
+		//   - SQS: No concept of control records (fire-and-forget)
+		//   - goqueue: We filter here to keep consumer API clean
+		//
+		if msg.IsControlRecord() {
+			// Skip control record, move to next message
+			currentOffset = offset + 1
+			continue
+		}
+
 		messages = append(messages, msg)
 		currentOffset = offset + 1 // Move past this offset for next iteration
 	}
@@ -293,7 +317,31 @@ func (p *Partition) ConsumeByOffset(fromOffset int64, maxMessages int) ([]*stora
 		return nil, fmt.Errorf("failed to read messages: %w", err)
 	}
 
-	return messages, nil
+	// ============================================================================
+	// CONTROL RECORD FILTERING
+	// ============================================================================
+	//
+	// WHAT: Control records are internal transaction markers.
+	//       Consumers reading with ConsumeByOffset should not see them.
+	//
+	// WHY: Control records are implementation details:
+	//   1. Kafka's read_committed isolates control records from consumers
+	//   2. They represent transaction boundaries, not actual data
+	//   3. Consuming them would confuse application logic
+	//
+	// HOW WE FILTER:
+	//   - ReadFrom returns all messages (including control records)
+	//   - We scan through and skip IsControlRecord() == true
+	//   - This preserves offset ordering while hiding internals
+	//
+	filtered := make([]*storage.Message, 0, len(messages))
+	for _, msg := range messages {
+		if !msg.IsControlRecord() {
+			filtered = append(filtered, msg)
+		}
+	}
+
+	return filtered, nil
 }
 
 // ReadMessage reads a single message at the given offset.
@@ -566,6 +614,12 @@ func (p *Partition) ConsumeByPriority(fromOffset int64, maxMessages int) ([]*sto
 			continue
 		}
 
+		// Skip control records (internal transaction markers)
+		if msg.IsControlRecord() {
+			currentOffset = offset + 1
+			continue
+		}
+
 		messages = append(messages, msg)
 		currentOffset = offset + 1 // Move past this offset for next iteration
 	}
@@ -608,6 +662,12 @@ func (p *Partition) ConsumeByPriorityWFQ(fromOffset int64, maxMessages int, _ *P
 			// Skip unreadable messages
 			continue
 		}
+
+		// Skip control records (internal transaction markers)
+		if freshMsg.IsControlRecord() {
+			continue
+		}
+
 		messages = append(messages, freshMsg)
 	}
 

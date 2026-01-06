@@ -620,3 +620,19 @@ Per-Priority-Per-Partition Metrics (PPPP):
 ## Key Learnings
 
 <!-- Document important concepts discovered -->
+
+ // TODO: read this in kafka's Paper .. can we do similar optimizations?
+In addition we optimize the network access for consumers. Kafka
+is a multi-subscriber system and a single message may be
+consumed multiple times by different consumer applications. A
+typical approach to sending bytes from a local file to a remote
+socket involves the following steps: (1) read data from the storage
+media to the page cache in an OS, (2) copy data in the page cache
+to an application buffer, (3) copy application buffer to another
+kernel buffer, (4) send the kernel buffer to the socket. This
+includes 4 data copying and 2 system calls. On Linux and other
+Unix operating systems, there exists a sendfile API [5] that can
+directly transfer bytes from a file channel to a socket channel.
+This typically avoids 2 of the copies and 1 system call introduced
+in steps (2) and (3). Kafka exploits the sendfile API to efficiently
+deliver bytes in a log segment file from a broker to a consumer
