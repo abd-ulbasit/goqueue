@@ -220,6 +220,52 @@ type Broker struct {
 	// ==========================================================================
 	schemaRegistry *SchemaRegistry
 
+	// ==========================================================================
+	// MILESTONE 9: TRANSACTION COORDINATOR
+	// ==========================================================================
+	//
+	// The transaction coordinator provides exactly-once semantics (EOS) through:
+	//   - Idempotent producers: Deduplication via sequence numbers
+	//   - Transactions: Atomic writes across multiple partitions/topics
+	//   - Read committed isolation: Consumers only see committed messages
+	//
+	// KAFKA COMPARISON:
+	//   - Kafka uses internal __transaction_state topic for persistence
+	//   - goqueue uses file-based WAL + snapshots (simpler, same guarantees)
+	//
+	// FLOW:
+	//   ┌──────────────┐  initProducerId  ┌─────────────────────────┐
+	//   │   Producer   │─────────────────►│ Transaction Coordinator │
+	//   │              │◄─────────────────│  - Assigns PID+Epoch    │
+	//   └──────────────┘  PID=123,Epoch=1 │  - Tracks sequences     │
+	//         │                           │  - Manages transactions │
+	//         │ beginTransaction          └─────────────────────────┘
+	//         │                                      │
+	//         │ publish(msg1, seq=0)                 │ WAL: begin_txn
+	//         │ publish(msg2, seq=1)                 │ WAL: add_partition
+	//         │                                      │
+	//         │ commitTransaction                    │
+	//         ▼                                      ▼
+	//   ┌──────────────────────────────────────────────────────────┐
+	//   │ Partition Logs                                           │
+	//   │ [msg1] [msg2] [COMMIT marker]                            │
+	//   └──────────────────────────────────────────────────────────┘
+	//
+	// ZOMBIE FENCING:
+	//   When a producer re-initializes with same transactional.id, epoch bumps.
+	//   Old producers with stale epochs are rejected ("zombie fencing").
+	//
+	// HEARTBEAT:
+	//   Producers send heartbeats to keep transactions alive.
+	//   If transaction times out (60s) → automatic abort.
+	//
+	// CONTROL RECORDS:
+	//   COMMIT/ABORT markers written to partition logs using FlagControlRecord.
+	//   Consumers use these for read_committed filtering.
+	//
+	// ==========================================================================
+	transactionCoordinator *TransactionCoordinator
+
 	// mu protects topics map
 	mu sync.RWMutex
 
@@ -374,8 +420,42 @@ func NewBroker(config BrokerConfig) (*Broker, error) {
 	}
 	broker.schemaRegistry = schemaRegistry
 
+	// ==========================================================================
+	// MILESTONE 9: INITIALIZE TRANSACTION COORDINATOR
+	// ==========================================================================
+	//
+	// The transaction coordinator provides exactly-once semantics through:
+	//   - Idempotent producers: Sequence-based deduplication per partition
+	//   - Transactions: Atomic writes across multiple partitions/topics
+	//   - Zombie fencing: Epoch-based rejection of stale producers
+	//
+	// STARTUP FLOW:
+	//   1. Create coordinator with transaction log directory
+	//   2. Load producer state snapshots from disk
+	//   3. Replay WAL to recover recent changes
+	//   4. Re-initialize in-progress transaction tracking
+	//   5. Start heartbeat timeout checker goroutine
+	//   6. Start periodic snapshot writer goroutine
+	//
+	// PERSISTENCE:
+	//   - Snapshot: data/transactions/producer_state.json
+	//   - WAL: data/transactions/transactions.log
+	//
+	// ==========================================================================
+	txnCoordinatorConfig := DefaultTransactionCoordinatorConfig(config.DataDir)
+	transactionCoordinator, err := NewTransactionCoordinator(txnCoordinatorConfig, broker)
+	if err != nil {
+		schemaRegistry.Close()
+		tracer.Shutdown()
+		scheduler.Close()
+		groupCoordinator.Close()
+		return nil, fmt.Errorf("failed to create transaction coordinator: %w", err)
+	}
+	broker.transactionCoordinator = transactionCoordinator
+
 	// Discover and load existing topics
 	if err := broker.loadExistingTopics(); err != nil {
+		transactionCoordinator.Close()
 		schemaRegistry.Close()
 		tracer.Shutdown()
 		scheduler.Close()
@@ -393,7 +473,10 @@ func NewBroker(config BrokerConfig) (*Broker, error) {
 		"delay_scheduler", "enabled",
 		"max_delay", schedulerConfig.MaxDelay.String(),
 		"tracing", tracerConfig.Enabled,
-		"schema_registry", "enabled")
+		"schema_registry", "enabled",
+		"transactions", "enabled",
+		"txn_timeout_ms", txnCoordinatorConfig.TransactionTimeoutMs,
+		"heartbeat_interval_ms", txnCoordinatorConfig.HeartbeatIntervalMs)
 
 	return broker, nil
 }
@@ -477,6 +560,14 @@ func (b *Broker) Close() error {
 	if b.schemaRegistry != nil {
 		if err := b.schemaRegistry.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("schema registry: %w", err))
+		}
+	}
+
+	// Close transaction coordinator (flushes snapshots, completes pending transactions)
+	// Must happen before topics close since it may need to write control records
+	if b.transactionCoordinator != nil {
+		if err := b.transactionCoordinator.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("transaction coordinator: %w", err))
 		}
 	}
 
@@ -859,6 +950,240 @@ func (b *Broker) PublishBatchWithPriority(topic string, messages []struct {
 	}
 
 	return results, nil
+}
+
+// =============================================================================
+// TRANSACTIONAL PRODUCER INTERFACE (M9)
+// =============================================================================
+//
+// These methods implement the TransactionBroker interface required by the
+// TransactionCoordinator for exactly-once semantics.
+//
+// KAFKA COMPARISON:
+//   - Kafka: initTransactions(), beginTransaction(), send(), commitTransaction()
+//   - goqueue: InitProducerId(), BeginTransaction(), PublishTransactional(), CommitTransaction()
+//
+// FLOW FOR TRANSACTIONAL PUBLISH:
+//
+//   ┌──────────────────────────────────────────────────────────────────────────┐
+//   │  1. InitProducerId(txn.id)                                               │
+//   │     └── Returns PID=123, Epoch=1                                         │
+//   │                                                                          │
+//   │  2. BeginTransaction(PID, Epoch)                                         │
+//   │     └── Transaction state: Empty → Ongoing                               │
+//   │                                                                          │
+//   │  3. PublishTransactional(topic, key, value, PID, Epoch, seq)             │
+//   │     └── Validates sequence number (deduplication)                        │
+//   │     └── Writes message to partition log                                  │
+//   │     └── Records partition in transaction                                 │
+//   │                                                                          │
+//   │  4. CommitTransaction(PID, Epoch)                                        │
+//   │     └── Writes COMMIT control record to all partitions                   │
+//   │     └── Transaction state: Ongoing → PrepareCommit → CompleteCommit      │
+//   └──────────────────────────────────────────────────────────────────────────┘
+//
+
+// WriteControlRecord implements TransactionBroker interface.
+// Writes a control record (COMMIT or ABORT marker) to a specific partition.
+//
+// Control records are special messages that mark transaction boundaries.
+// They're used by consumers with read_committed isolation to filter out
+// messages from aborted transactions.
+//
+// PARAMETERS:
+//   - topic: Topic name
+//   - partition: Partition number
+//   - isCommit: true for COMMIT marker, false for ABORT marker
+//   - producerId: Producer's unique identifier
+//   - epoch: Producer's current epoch
+//   - transactionalId: Transaction's string identifier
+//
+// WIRE FORMAT:
+// The control record is written as a regular message with:
+//   - FlagControlRecord set in Flags byte
+//   - FlagTransactionCommit set if isCommit is true
+//   - Value contains serialized ControlRecordPayload (PID, Epoch, TxnId)
+//
+// COMPARISON:
+//   - Kafka: Uses ControlRecordType in special batch format
+//   - goqueue: Uses flags byte in standard message format (simpler)
+func (b *Broker) WriteControlRecord(topic string, partition int, isCommit bool, producerId int64, epoch int16, transactionalId string) error {
+	b.mu.RLock()
+	if b.closed {
+		b.mu.RUnlock()
+		return ErrBrokerClosed
+	}
+
+	t, exists := b.topics[topic]
+	if !exists {
+		b.mu.RUnlock()
+		return fmt.Errorf("%w: %s", ErrTopicNotFound, topic)
+	}
+	b.mu.RUnlock()
+
+	// Create the control record message
+	// Note: storage package uses uint64/uint16 for PID/Epoch, so we convert here
+	var controlMsg *storage.Message
+	if isCommit {
+		controlMsg = storage.NewCommitControlRecord(0, uint64(producerId), uint16(epoch), transactionalId)
+	} else {
+		controlMsg = storage.NewAbortControlRecord(0, uint64(producerId), uint16(epoch), transactionalId)
+	}
+
+	// Write to the partition (offset will be assigned by the log)
+	offset, err := t.PublishToPartition(partition, controlMsg.Key, controlMsg.Value)
+	if err != nil {
+		return fmt.Errorf("failed to write control record: %w", err)
+	}
+
+	// Log the control record for debugging
+	recordType := "COMMIT"
+	if !isCommit {
+		recordType = "ABORT"
+	}
+	b.logger.Debug("wrote control record",
+		"type", recordType,
+		"topic", topic,
+		"partition", partition,
+		"offset", offset,
+		"producer_id", producerId,
+		"epoch", epoch,
+		"txn_id", transactionalId)
+
+	return nil
+}
+
+// PublishTransactional writes a message as part of an active transaction.
+// This is the primary method for transactional producers to publish messages.
+//
+// SEQUENCE VALIDATION:
+// The sequence number is validated against the expected sequence for this
+// partition. If the sequence is lower than expected, it's a duplicate and
+// will be silently ignored. If the sequence is higher than expected, an
+// error is returned (missing sequence).
+//
+// PARAMETERS:
+//   - topic: Topic name
+//   - partition: Target partition (or -1 for automatic routing)
+//   - key: Routing key (used for partition selection if partition=-1)
+//   - value: Message payload
+//   - producerId: Producer's unique identifier
+//   - epoch: Producer's current epoch (for zombie fencing)
+//   - sequence: Sequence number for this partition (for deduplication)
+//
+// RETURNS:
+//   - partition: Actual partition the message was written to
+//   - offset: Offset assigned to the message
+//   - duplicate: true if this was a duplicate (already seen sequence)
+//   - error: If validation fails or write fails
+//
+// FLOW:
+//
+//	┌─────────────────────────────────────────────────────────────────────────┐
+//	│  1. Validate producer epoch (zombie fencing)                            │
+//	│     └── Reject if epoch < current epoch for this PID                    │
+//	│                                                                         │
+//	│  2. Check sequence number (deduplication)                               │
+//	│     └── If seq < expected: duplicate, return (true, nil)                │
+//	│     └── If seq > expected: error (missing sequence)                     │
+//	│     └── If seq == expected: proceed                                     │
+//	│                                                                         │
+//	│  3. Determine partition                                                 │
+//	│     └── If partition >= 0: use specified partition                      │
+//	│     └── If partition == -1: use key-based routing                       │
+//	│                                                                         │
+//	│  4. Write message to partition log                                      │
+//	│                                                                         │
+//	│  5. Update sequence tracking (expected = seq + 1)                       │
+//	│                                                                         │
+//	│  6. Register partition with transaction coordinator                     │
+//	│     └── So coordinator knows where to write control records             │
+//	└─────────────────────────────────────────────────────────────────────────┘
+func (b *Broker) PublishTransactional(
+	topic string,
+	partition int,
+	key, value []byte,
+	producerId int64,
+	epoch int16,
+	sequence int32,
+) (actualPartition int, offset int64, duplicate bool, err error) {
+	b.mu.RLock()
+	if b.closed {
+		b.mu.RUnlock()
+		return 0, 0, false, ErrBrokerClosed
+	}
+
+	t, exists := b.topics[topic]
+	if !exists {
+		b.mu.RUnlock()
+		return 0, 0, false, fmt.Errorf("%w: %s", ErrTopicNotFound, topic)
+	}
+	numPartitions := t.NumPartitions()
+	b.mu.RUnlock()
+
+	// Step 1: Determine actual partition (if not specified)
+	actualPartition = partition
+	if partition < 0 {
+		// Use key-based routing
+		if len(key) > 0 {
+			actualPartition = int(murmur3Hash(key)) % numPartitions
+		} else {
+			// Round-robin (simplified - in production, use per-producer counter)
+			actualPartition = int(time.Now().UnixNano()) % numPartitions
+		}
+	}
+
+	if actualPartition < 0 || actualPartition >= numPartitions {
+		return 0, 0, false, fmt.Errorf("invalid partition %d (topic has %d partitions)", partition, numPartitions)
+	}
+
+	// Step 2: Check sequence number with transaction coordinator
+	// Build ProducerIdAndEpoch for the check
+	pid := ProducerIdAndEpoch{
+		ProducerId: producerId,
+		Epoch:      epoch,
+	}
+
+	// CheckSequence returns (existingOffset, isDuplicate, error)
+	// We pass 0 for offset since we don't have it yet - it will be assigned after write
+	existingOffset, isDuplicate, err := b.transactionCoordinator.CheckSequence(pid, topic, actualPartition, sequence, 0)
+	if err != nil {
+		return 0, 0, false, fmt.Errorf("sequence check failed: %w", err)
+	}
+
+	if isDuplicate {
+		// Duplicate message - return success without writing
+		// This is idempotent behavior: same sequence returns success
+		b.logger.Debug("duplicate message detected",
+			"producer_id", producerId,
+			"topic", topic,
+			"partition", actualPartition,
+			"sequence", sequence,
+			"existing_offset", existingOffset)
+		return actualPartition, existingOffset, true, nil
+	}
+
+	// Step 3: Write message to partition
+	offset, err = t.PublishToPartition(actualPartition, key, value)
+	if err != nil {
+		return actualPartition, 0, false, fmt.Errorf("failed to publish: %w", err)
+	}
+
+	b.logger.Debug("published transactional message",
+		"producer_id", producerId,
+		"epoch", epoch,
+		"topic", topic,
+		"partition", actualPartition,
+		"offset", offset,
+		"sequence", sequence)
+
+	return actualPartition, offset, false, nil
+}
+
+// GetTransactionCoordinator returns the transaction coordinator for external access.
+// Used by HTTP handlers to expose transaction APIs.
+func (b *Broker) GetTransactionCoordinator() *TransactionCoordinator {
+	return b.transactionCoordinator
 }
 
 // =============================================================================

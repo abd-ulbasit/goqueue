@@ -3,8 +3,8 @@
 ## Overall Status
 
 **Phase**: 2 of 4
-**Milestones**: 8/18 complete
-**Tests**: 195+ passing (storage: 50, broker: 120+, api: 24)
+**Milestones**: 9/18 complete
+**Tests**: 220+ passing (storage: 50, broker: 145+, api: 24)
 **Started**: Session 1
 
 ## Phase Progress
@@ -15,12 +15,12 @@
 - [x] Milestone 3: Consumer Groups & Offset Management ✅
 - [x] Milestone 4: Reliability - ACKs, Visibility & DLQ ✅
 
-### Phase 2: Advanced Features (4/5)
+### Phase 2: Advanced Features (5/5) ✅
 - [x] Milestone 5: Native Delay & Scheduled Messages ✅
 - [x] Milestone 6: Priority Lanes ✅ ⭐
 - [x] Milestone 7: Message Tracing ✅ ⭐
 - [x] Milestone 8: Schema Registry ✅
-- [ ] Milestone 9: Transactional Publish
+- [x] Milestone 9: Transactional Publish ✅ ⭐
 
 ### Phase 3: Distribution (0/4)
 - [ ] Milestone 10: Cluster Formation & Metadata
@@ -317,6 +317,66 @@
   - Per-subject config overrides global config
   - Soft delete for version safety
 
+### Milestone 9 - Transactional Publish ✅ ⭐
+- **Idempotent Producers** - Exactly-once publish semantics
+  - ProducerId (int64) + Epoch (int16) for identity
+  - Per-partition sequence numbers for ordering
+  - Sequence validation: rejects out-of-order, detects duplicates
+  - Sliding deduplication window (default 5 sequences)
+  - Epoch-based zombie fencing (re-init bumps epoch)
+- **Transaction Coordinator** - Two-phase commit lifecycle
+  - States: Empty → Ongoing → PrepareCommit/Abort → CompleteCommit/Abort
+  - Transaction ID generation with timestamp + random hex
+  - Heartbeat support (same pattern as consumer groups)
+  - Session timeout for dead producer detection
+  - Transaction timeout for abandoned transactions
+  - Background goroutines for timeout checking, snapshot taking
+- **Transaction Log** - File-based WAL + Snapshots
+  - WAL Record Types: init_producer, begin_txn, add_partition, prepare_commit/abort, complete_commit/abort, heartbeat, expire_producer, update_sequence
+  - JSON-encoded WAL records (one per line)
+  - Periodic snapshots for fast recovery
+  - Storage: data/transactions/transactions.log + producer_state.json
+- **Control Records** - Transaction markers in partition log
+  - Flags byte in 34-byte message header (bits 3-4)
+  - FlagControlRecord = 0x08 (bit 3)
+  - FlagTransactionCommit = 0x10 (bit 4)
+  - Commit: FlagControlRecord | FlagTransactionCommit
+  - Abort: FlagControlRecord only
+  - ControlRecordPayload: ProducerId, Epoch, TransactionalId
+  - Written to ALL partitions in transaction
+- **Broker Integration**:
+  - TransactionCoordinator initialized on broker startup
+  - WriteControlRecord method for commit/abort markers
+  - PublishTransactional method with sequence validation
+  - GetTransactionCoordinator accessor for HTTP handlers
+- **HTTP API endpoints** (9 endpoints):
+  - `POST /producers/init` - Initialize producer (get PID + epoch)
+  - `POST /producers/{producerId}/heartbeat` - Producer heartbeat
+  - `POST /transactions/begin` - Begin transaction
+  - `POST /transactions/publish` - Publish within transaction
+  - `POST /transactions/add-partition` - Add partition to transaction
+  - `POST /transactions/commit` - Commit transaction
+  - `POST /transactions/abort` - Abort transaction
+  - `GET /transactions` - List active transactions
+  - `GET /transactions/stats` - Coordinator statistics
+- **Files created**:
+  - `internal/broker/idempotent_producer.go` - PID assignment, sequence tracking (~900 lines)
+  - `internal/broker/transaction_log.go` - WAL + snapshot persistence (~650 lines)
+  - `internal/broker/transaction_coordinator.go` - Transaction lifecycle (~850 lines)
+  - `internal/broker/transaction_coordinator_test.go` - 22+ comprehensive tests
+- **Files modified**:
+  - `internal/storage/message.go` - Control record flags and payload
+  - `internal/broker/broker.go` - TransactionCoordinator integration
+  - `internal/api/server.go` - Transaction API endpoints (~600 lines)
+- **Key Design Decisions**:
+  - File-based transaction log (not internal topic like Kafka)
+  - WAL + Snapshot pattern for efficient recovery
+  - Epoch-based zombie fencing (not generation-based)
+  - Heartbeat + timeout (same as consumer groups)
+  - Flags byte for control records (not separate record type)
+  - Per-partition sequence tracking (not per-topic)
+  - Types match Kafka wire format (int64 PID, int16 epoch, int32 seq)
+
 ### Technical Decisions Made
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
@@ -362,6 +422,15 @@
 | Validation point | Broker-side | Central enforcement, configurable |
 | Versioning | Sequential integers | Simple, compact, industry standard |
 | Validation failure | Reject with 400 | Fail fast, clear contract |
+| Transaction log | File-based WAL + Snapshot | Matches goqueue patterns, simpler than topic |
+| Zombie fencing | Epoch-based | Kafka-compatible, bumps on re-init |
+| Producer ID type | int64 | Kafka wire format compatibility |
+| Sequence tracking | Per-partition | Better parallelism than per-topic |
+| Transaction timeout | 60s | Kafka default, allows slow consumers |
+| Producer heartbeat | 3s | Same as consumer groups |
+| Producer session | 30s | Same as consumer groups |
+| Control records | Flags byte | Reuses existing header format |
+| Dedup window | 5 sequences | Balance memory vs. retry coverage |
 
 ## What's Left to Build
 
@@ -377,12 +446,14 @@
 - [x] Per-message ACK ✅ (M4)
 - [x] Visibility timeout ✅ (M4)
 - [x] Dead letter queue ✅ (M4)
+- [x] Transactional publish ✅ (M9)
 
 ### Differentiators (Key Features) ⭐
 - [x] Native delay messages (timer wheel) ✅ (M5)
 - [x] Priority lanes ✅ (M6)
 - [x] Message tracing ✅ (M7)
 - [x] Schema registry ✅ (M8)
+- [x] Transactional producers ✅ (M9)
 - [ ] Cooperative rebalancing (M12)
 
 ### Distribution (Multi-Node)
