@@ -815,6 +815,41 @@ func (m *IdempotentProducerManager) GetTransactionalState(transactionalId string
 	}
 }
 
+// GetTransactionalStateByProducerId looks up transactional state by producer ID.
+// This is a reverse lookup (iterates over all transactional IDs).
+//
+// RETURNS:
+//   - The state if found and producer ID + epoch match
+//   - nil if not found
+//
+// USE CASE:
+//
+//	PublishTransactional has producerId/epoch but not transactionalId.
+//	This method allows looking up the current transaction ID for tracking.
+func (m *IdempotentProducerManager) GetTransactionalStateByProducerId(producerId int64, epoch int16) *TransactionalIdState {
+	m.txnMu.RLock()
+	defer m.txnMu.RUnlock()
+
+	// Linear scan - not optimal but transactional IDs are typically few
+	for _, state := range m.transactionalIds {
+		if state.ProducerIdAndEpoch.ProducerId == producerId &&
+			state.ProducerIdAndEpoch.Epoch == epoch {
+			// Return a copy
+			return &TransactionalIdState{
+				TransactionalId:      state.TransactionalId,
+				ProducerIdAndEpoch:   state.ProducerIdAndEpoch,
+				LastHeartbeat:        state.LastHeartbeat,
+				TransactionTimeoutMs: state.TransactionTimeoutMs,
+				State:                state.State,
+				CurrentTransactionId: state.CurrentTransactionId,
+				PendingPartitions:    copyPendingPartitions(state.PendingPartitions),
+				TransactionStartTime: state.TransactionStartTime,
+			}
+		}
+	}
+	return nil
+}
+
 // UpdateHeartbeat updates the last heartbeat time for a transactional ID.
 func (m *IdempotentProducerManager) UpdateHeartbeat(transactionalId string, pid ProducerIdAndEpoch) error {
 	if transactionalId == "" {

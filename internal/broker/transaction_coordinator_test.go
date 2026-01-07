@@ -74,9 +74,10 @@ func testTransactionCoordinator(t *testing.T) (*TransactionCoordinator, *mockTra
 
 // mockTransactionBroker implements TransactionBroker for testing.
 type mockTransactionBroker struct {
-	topics         map[string]*Topic
-	controlRecords []controlRecordCall
-	writeErr       error
+	topics              map[string]*Topic
+	controlRecords      []controlRecordCall
+	writeErr            error
+	clearedTransactions []string
 }
 
 type controlRecordCall struct {
@@ -109,6 +110,15 @@ func (m *mockTransactionBroker) GetTopic(name string) (*Topic, error) {
 		return nil, ErrTopicNotFound
 	}
 	return topic, nil
+}
+
+func (m *mockTransactionBroker) ClearUncommittedTransaction(txnId string) []partitionOffset {
+	m.clearedTransactions = append(m.clearedTransactions, txnId)
+	return nil // Mock doesn't track actual offsets
+}
+
+func (m *mockTransactionBroker) MarkTransactionAborted(offsets []partitionOffset) {
+	// Mock - no-op
 }
 
 func (m *mockTransactionBroker) addMockTopic(name string, partitionCount int) {

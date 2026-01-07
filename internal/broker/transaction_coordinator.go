@@ -334,6 +334,16 @@ type TransactionBroker interface {
 
 	// GetTopic returns a topic by name (for validation)
 	GetTopic(name string) (*Topic, error)
+
+	// ClearUncommittedTransaction clears tracked uncommitted offsets for a transaction.
+	// Returns the list of offsets that were cleared (for abort filtering).
+	// Called when a transaction commits or aborts.
+	ClearUncommittedTransaction(txnId string) []partitionOffset
+
+	// MarkTransactionAborted marks offsets from an aborted transaction.
+	// These offsets will remain invisible to consumers forever.
+	// Called only when a transaction aborts (not on commit).
+	MarkTransactionAborted(offsets []partitionOffset)
 }
 
 // =============================================================================
@@ -912,6 +922,23 @@ func (tc *TransactionCoordinator) completeTransaction(transactionalId, txnId str
 	tc.txnMu.Lock()
 	delete(tc.transactions, txnId)
 	tc.txnMu.Unlock()
+
+	// =========================================================================
+	// CLEAR UNCOMMITTED OFFSETS (LSO / read_committed support)
+	// =========================================================================
+	//
+	// Clear the tracked uncommitted offsets for this transaction.
+	//
+	// COMMIT: Offsets become visible to consumers (return value ignored)
+	// ABORT:  Offsets moved to abortedTracker (remain invisible forever)
+	//
+	// =========================================================================
+	clearedOffsets := tc.broker.ClearUncommittedTransaction(txnId)
+
+	// For aborts, mark offsets as permanently invisible
+	if !committed && len(clearedOffsets) > 0 {
+		tc.broker.MarkTransactionAborted(clearedOffsets)
+	}
 }
 
 // =============================================================================
@@ -1329,4 +1356,10 @@ func generateTransactionId() string {
 // GetProducerState returns the state for a transactional ID (for debugging).
 func (tc *TransactionCoordinator) GetProducerState(transactionalId string) *TransactionalIdState {
 	return tc.producerManager.GetTransactionalState(transactionalId)
+}
+
+// GetProducerStateByProducerId looks up transactional state by producer ID and epoch.
+// Used by PublishTransactional to find the current transaction ID for LSO tracking.
+func (tc *TransactionCoordinator) GetProducerStateByProducerId(producerId int64, epoch int16) *TransactionalIdState {
+	return tc.producerManager.GetTransactionalStateByProducerId(producerId, epoch)
 }
