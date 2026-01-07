@@ -3,65 +3,90 @@
 ## Current Focus
 
 **Phase**: 2 - Advanced Features
-**Milestone**: 8 - Schema Registry ✅ COMPLETE
-**Status**: Ready for Milestone 9 (Transactional Publish)
+**Milestone**: 9 - Transactional Publish ✅ COMPLETE (including LSO)
+**Status**: Phase 2 Complete! Ready for Phase 3 (Distribution)
 
 ## What I'm Working On
 
-### Just Completed (M8 - Schema Registry)
-- ✅ Schema Registry Core - Centralized schema management (~1200 lines)
-- ✅ JSON Schema Validator - Pure Go Draft 7 implementation (~500 lines)
-- ✅ Compatibility Modes - BACKWARD (default), FORWARD, FULL, NONE
-- ✅ Subject Naming - TopicNameStrategy (subject = topic name)
-- ✅ Version Management - Sequential per subject, global unique IDs
-- ✅ File Persistence - data/schemas/{subject}/v{N}.json
-- ✅ Broker Integration - Validation in publish path, per-subject toggle
-- ✅ HTTP API - Confluent-compatible endpoints (15 handlers)
-- ✅ 30+ comprehensive schema registry tests
+### Just Completed (M9 - Transactional Publish + LSO)
+- ✅ Idempotent Producers - ProducerId + Epoch for exactly-once
+- ✅ Sequence Tracking - Per-partition deduplication window
+- ✅ Transaction Coordinator - Two-phase commit lifecycle
+- ✅ Transaction Log - File-based WAL + Snapshot persistence
+- ✅ Control Records - Commit/abort markers in partition log
+- ✅ **LSO (Last Stable Offset)** - Read committed isolation ⭐
+  - UncommittedTracker - Tracks uncommitted transaction offsets
+  - AbortedTracker - Permanently hides aborted message offsets
+  - Control Record Filtering - All 4 consume methods filter markers
+  - Consume Pipeline: control → delayed → uncommitted → aborted
+- ✅ HTTP API - 9 transaction endpoints
+- ✅ 22+ transaction coordinator tests
+- ✅ 3 transaction filtering tests (LSO verification)
 
-### Key Technical Decisions (M8)
-- **Schema Format**: JSON Schema only (Protobuf deferred, noted for future)
-- **Storage**: File-based JSON (matches existing patterns, debuggable)
-- **Subject Naming**: TopicNameStrategy (subject = topic name, 1:1 mapping)
-- **Compatibility Default**: BACKWARD (Confluent default, safest)
-- **Schema ID Location**: Message header field `schema-id`
-- **Validation Point**: Broker-side with per-subject toggle
-- **Versioning**: Sequential integers, auto-incremented global IDs
-- **Validation Failure**: Reject with 400 error (fail fast)
+### Key Technical Decisions (M9)
+- **Transaction Log**: File-based WAL + Snapshot (not internal topic like Kafka)
+- **Zombie Fencing**: Epoch-based (bumps on re-init)
+- **Producer ID Type**: int64 (Kafka wire format compatibility)
+- **Sequence Tracking**: Per-partition (better parallelism than per-topic)
+- **Transaction Timeout**: 60s (Kafka default)
+- **Control Records**: Flags byte in 34-byte message header
+- **Dedup Window**: 5 sequences (balance memory vs. retry coverage)
+- **LSO Tracking**: Offset set per partition (O(1) lookup)
+- **Abort Persistence**: In-memory only (acceptable for M9 scope)
 
-### Files Created/Modified (M8)
+### Files Created/Modified (M9)
 - **Created**:
-  - `internal/broker/schema_registry.go` - Core registry implementation
-  - `internal/broker/json_schema_validator.go` - JSON Schema validator
-  - `internal/broker/schema_registry_test.go` - Comprehensive tests
+  - `internal/broker/idempotent_producer.go` - PID assignment, sequence tracking
+  - `internal/broker/transaction_log.go` - WAL + snapshot persistence
+  - `internal/broker/transaction_coordinator.go` - Transaction lifecycle
+  - `internal/broker/transaction_coordinator_test.go` - Comprehensive tests
+  - `internal/broker/uncommitted_tracker.go` - LSO tracking (UncommittedTracker + AbortedTracker)
 - **Modified**:
-  - `internal/broker/broker.go` - Schema registry integration
-  - `internal/api/server.go` - Schema API endpoints (15 handlers)
+  - `internal/storage/message.go` - Control record flags and payload
+  - `internal/broker/broker.go` - TransactionCoordinator + LSO integration
+  - `internal/broker/partition.go` - Control records excluded from priority index
+  - `internal/broker/topic.go` - PublishMessageToPartition method
+  - `internal/broker/broker_test.go` - 3 LSO filtering tests
+  - `internal/api/server.go` - Transaction API endpoints
 
-### Schema Registry API Endpoints
+### Transaction API Endpoints
 ```
-POST   /schemas/subjects/{subject}/versions     Register new schema
-GET    /schemas/subjects/{subject}/versions     List versions
-GET    /schemas/subjects/{subject}/versions/latest  Get latest
-GET    /schemas/subjects/{subject}/versions/{version}  Get specific
-DELETE /schemas/subjects/{subject}/versions/{version}  Delete version
-GET    /schemas/subjects                        List subjects
-POST   /schemas/subjects/{subject}              Check schema exists
-DELETE /schemas/subjects/{subject}              Delete subject
-GET    /schemas/ids/{id}                        Get by global ID
-POST   /schemas/compatibility/.../versions/{v}  Test compatibility
-GET/PUT /schemas/config                         Global config
-GET/PUT /schemas/config/{subject}               Subject config
-GET    /schemas/stats                           Statistics
+POST /producers/init                    Initialize producer (get PID + epoch)
+POST /producers/{producerId}/heartbeat  Producer heartbeat
+POST /transactions/begin                Begin transaction
+POST /transactions/publish              Publish within transaction
+POST /transactions/add-partition        Add partition to transaction
+POST /transactions/commit               Commit transaction
+POST /transactions/abort                Abort transaction
+GET  /transactions                      List active transactions
+GET  /transactions/stats                Coordinator statistics
 ```
 
-### Next Steps (Milestone 9 - Transactional Publish)
-1. Producer ID assignment for idempotency
-2. Sequence number tracking per partition
-3. Transaction coordinator implementation
-4. Begin/commit/abort transaction API
-5. Idempotent message deduplication
-6. Transaction timeout handling
+### LSO Implementation Details
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    CONSUME FILTERING PIPELINE                    │
+├─────────────────────────────────────────────────────────────────┤
+│  Message → IsControlRecord? → IsDelayed? → IsUncommitted?       │
+│                                              ↓                   │
+│                                         IsAborted? → Consumer   │
+└─────────────────────────────────────────────────────────────────┘
+
+UncommittedTracker:
+  - TrackOffset(txnID, topic, partition, offset)
+  - ClearTransaction(txnID) → []partitionOffset (for abort handling)
+  - IsUncommitted(topic, partition, offset) → bool
+
+AbortedTracker:
+  - MarkAborted(offsets []partitionOffset)
+  - IsAborted(topic, partition, offset) → bool
+```
+
+### Next Steps (Phase 3 - Distribution)
+1. Milestone 10: Cluster Formation & Metadata
+2. Milestone 11: Leader Election & Replication
+3. Milestone 12: Cooperative Rebalancing ⭐
+4. Milestone 13: Online Partition Scaling
 
 ## Recent Changes
 

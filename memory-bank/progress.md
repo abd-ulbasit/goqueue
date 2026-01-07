@@ -348,6 +348,34 @@
   - TransactionCoordinator initialized on broker startup
   - WriteControlRecord method for commit/abort markers
   - PublishTransactional method with sequence validation
+- **LSO (Last Stable Offset) - Read Committed Isolation** ⭐
+  - **UncommittedTracker** - Tracks offsets in uncommitted transactions
+    - Per-topic map: `topic:partition → Set[offsets]`
+    - `TrackOffset(txnID, topic, partition, offset)` - Mark offset as uncommitted
+    - `ClearTransaction(txnID)` - Returns `[]partitionOffset` for abort handling
+    - Thread-safe with RWMutex
+  - **AbortedTracker** - Permanently hides aborted message offsets
+    - Per-partition map: `topic:partition → Set[offsets]`
+    - `MarkAborted(offsets)` - Mark offsets from aborted transaction
+    - `IsAborted(topic, partition, offset)` - O(1) lookup
+    - Messages from aborted transactions never become visible
+  - **Control Record Filtering** - Commit/abort markers invisible to consumers
+    - `IsControlRecord()` method checks FlagControlRecord bit
+    - Control records excluded from priority index
+    - All 4 consume methods filter control records first
+  - **Consume Filtering Pipeline** - Order matters for correctness:
+    1. Filter control records (IsControlRecord)
+    2. Filter delayed messages (deliverAt > now)
+    3. Filter uncommitted transactions (UncommittedTracker.IsUncommitted)
+    4. Filter aborted transactions (AbortedTracker.IsAborted)
+  - **Transaction Completion Flow**:
+    - Commit: `ClearTransaction()` removes from uncommitted → messages visible
+    - Abort: `ClearTransaction()` returns offsets → `MarkTransactionAborted()` → messages permanently hidden
+  - **Test Coverage**: 3 comprehensive tests
+    - `TestBroker_UncommittedTransactionFiltering` - Uncommitted invisible, committed visible
+    - `TestBroker_AbortedTransactionFiltering` - Aborted messages stay invisible forever
+    - `TestBroker_MixedTransactionalAndNormalMessages` - Normal messages unaffected
+  - **Known Limitation**: AbortedTracker is in-memory only; won't survive broker restart (acceptable for M9 scope)
   - GetTransactionCoordinator accessor for HTTP handlers
 - **HTTP API endpoints** (9 endpoints):
   - `POST /producers/init` - Initialize producer (get PID + epoch)
@@ -431,6 +459,9 @@
 | Producer session | 30s | Same as consumer groups |
 | Control records | Flags byte | Reuses existing header format |
 | Dedup window | 5 sequences | Balance memory vs. retry coverage |
+| LSO tracking | Offset set per partition | O(1) lookup, no position scanning like Kafka |
+| Abort persistence | In-memory only | Acceptable for M9 scope; persistence in future |
+| Control record hiding | All 4 consume methods | Consistent filtering regardless of consume style |
 
 ## What's Left to Build
 
@@ -469,7 +500,37 @@
 
 ## Known Issues
 
-*None currently*
+### Visibility Tracking in Simple Consume (Deferred)
+
+**Problem:** The simple consume endpoints (`GET /topics/{name}/partitions/{id}/messages/*`) don't track visibility timeout. They are read-only operations that simply fetch and filter messages from storage.
+
+**Why This Matters:**
+- Without visibility tracking, multiple consumers calling the simple consume API could get duplicate messages
+- No receipt handles are generated (receipt handles are only for consumer groups)
+- No ACK/NACK/Reject support (those operations require consumer group membership)
+
+**Current Behavior:**
+- Simple consume methods: Just read → filter → return (no state tracking)
+- Consumer groups: Full lifecycle with ACK manager, visibility tracker, receipt handles
+
+**Why Deferred:**
+- Design decision: Keep simple consume truly simple for read-only use cases
+- If you need reliability features (ACK, visibility, DLQ), use consumer groups
+- Consumer groups already have full visibility tracking via ACK manager
+- Simple consume is best suited for:
+  - Debugging/inspection (manually looking at messages)
+  - Replay/reprocessing (reading historical data)
+  - Read-only analytics consumers
+  - Testing and development
+
+**When to Implement:**
+- If users request visibility tracking for simple consume
+- If we want to unify simple consume and consumer group consume patterns
+- Consider: Would add complexity and state management to what's meant to be a simple API
+
+**Related Code:**
+- Consumer groups use: `internal/broker/ack_manager.go` + `visibility_tracker.go`
+- Simple consume: `broker.Consume()`, `ConsumeByOffset()`, `ConsumeByPriority()`, `ConsumeByPriorityWFQ()`
 
 ## Lessons Learned
 

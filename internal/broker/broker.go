@@ -266,6 +266,37 @@ type Broker struct {
 	// ==========================================================================
 	transactionCoordinator *TransactionCoordinator
 
+	// ==========================================================================
+	// UNCOMMITTED OFFSET TRACKER (read_committed isolation)
+	// ==========================================================================
+	//
+	// Tracks offsets that belong to uncommitted transactions. During consume,
+	// these offsets are filtered out to provide read_committed isolation.
+	//
+	// FLOW:
+	//   PublishTransactional → Track(offset) → [offset hidden from consumers]
+	//   CommitTransaction    → ClearTransaction() → [offset visible]
+	//   AbortTransaction     → ClearTransaction() → [offsets moved to abortedTracker]
+	//
+	// ==========================================================================
+	uncommittedTracker *UncommittedTracker
+
+	// ABORTED OFFSET TRACKER (read_committed isolation)
+	// ==========================================================================
+	//
+	// Tracks offsets that belong to ABORTED transactions. These messages were
+	// written to the log but should remain invisible to consumers forever.
+	//
+	// WHY SEPARATE FROM UNCOMMITTED?
+	//   - Uncommitted: temporary state, cleared on commit (offsets become visible)
+	//   - Aborted: permanent state, messages never become visible
+	//
+	// FLOW:
+	//   AbortTransaction → ClearTransaction() + MarkAborted() → [offsets hidden forever]
+	//
+	// ==========================================================================
+	abortedTracker *AbortedTracker
+
 	// mu protects topics map
 	mu sync.RWMutex
 
@@ -313,13 +344,15 @@ func NewBroker(config BrokerConfig) (*Broker, error) {
 	reliabilityConfig := DefaultReliabilityConfig()
 
 	broker := &Broker{
-		config:            config,
-		topics:            make(map[string]*Topic),
-		logsDir:           logsDir,
-		groupCoordinator:  groupCoordinator,
-		reliabilityConfig: reliabilityConfig,
-		logger:            logger,
-		startedAt:         time.Now(),
+		config:             config,
+		topics:             make(map[string]*Topic),
+		logsDir:            logsDir,
+		groupCoordinator:   groupCoordinator,
+		reliabilityConfig:  reliabilityConfig,
+		uncommittedTracker: NewUncommittedTracker(), // LSO support for read_committed
+		abortedTracker:     NewAbortedTracker(),     // Abort filtering for read_committed
+		logger:             logger,
+		startedAt:          time.Now(),
 	}
 
 	// Create ACK manager for per-message acknowledgment (M4)
@@ -1030,8 +1063,9 @@ func (b *Broker) WriteControlRecord(topic string, partition int, isCommit bool, 
 		controlMsg = storage.NewAbortControlRecord(0, uint64(producerId), uint16(epoch), transactionalId)
 	}
 
-	// Write to the partition (offset will be assigned by the log)
-	offset, err := t.PublishToPartition(partition, controlMsg.Key, controlMsg.Value)
+	// Write to the partition using PublishMessageToPartition to preserve Flags
+	// The old approach (PublishToPartition(key, value)) lost the FlagControlRecord flag!
+	offset, err := t.PublishMessageToPartition(partition, controlMsg)
 	if err != nil {
 		return fmt.Errorf("failed to write control record: %w", err)
 	}
@@ -1051,6 +1085,70 @@ func (b *Broker) WriteControlRecord(topic string, partition int, isCommit bool, 
 		"txn_id", transactionalId)
 
 	return nil
+}
+
+// ClearUncommittedTransaction implements TransactionBroker interface.
+// Clears tracked uncommitted offsets when a transaction commits or aborts.
+//
+// PARAMETERS:
+//   - txnId: The transaction ID to clear
+//
+// RETURNS:
+//   - List of offsets that were cleared (for abort filtering)
+//
+// WHY BOTH COMMIT AND ABORT CALL THIS:
+//
+//	COMMIT CASE:
+//	┌─────────────────────────────────────────────────────────────────────────┐
+//	│  Transaction commits → offsets should become visible to consumers       │
+//	│  1. Clear from uncommittedTracker (returns offsets, but we don't need   │
+//	│     them since messages should be visible)                              │
+//	│  2. COMMIT control record already written to log                        │
+//	│  3. Consumers can now read these offsets                                │
+//	└─────────────────────────────────────────────────────────────────────────┘
+//
+//	ABORT CASE:
+//	┌─────────────────────────────────────────────────────────────────────────┐
+//	│  Transaction aborts → offsets remain invisible forever                  │
+//	│  1. Clear from uncommittedTracker (returns offsets)                     │
+//	│  2. MarkTransactionAborted() moves offsets to abortedTracker            │
+//	│  3. Consumers filter aborted offsets via abortedTracker                 │
+//	└─────────────────────────────────────────────────────────────────────────┘
+func (b *Broker) ClearUncommittedTransaction(txnId string) []partitionOffset {
+	if b.uncommittedTracker == nil {
+		return nil
+	}
+
+	cleared := b.uncommittedTracker.ClearTransaction(txnId)
+	b.logger.Debug("cleared uncommitted offsets for transaction",
+		"txn_id", txnId,
+		"offsets_cleared", len(cleared))
+	return cleared
+}
+
+// MarkTransactionAborted implements TransactionBroker interface.
+// Marks offsets from an aborted transaction as permanently invisible.
+//
+// PARAMETERS:
+//   - offsets: List of offsets returned from ClearUncommittedTransaction
+//
+// WHEN CALLED:
+//
+//	Only when a transaction aborts, after ClearUncommittedTransaction.
+//
+// FLOW:
+//
+//	AbortTransaction → ClearUncommittedTransaction → MarkTransactionAborted
+//
+// The offsets will be filtered during consume operations forever.
+func (b *Broker) MarkTransactionAborted(offsets []partitionOffset) {
+	if b.abortedTracker == nil || len(offsets) == 0 {
+		return
+	}
+
+	b.abortedTracker.MarkAborted(offsets)
+	b.logger.Debug("marked offsets as aborted",
+		"count", len(offsets))
 }
 
 // PublishTransactional writes a message as part of an active transaction.
@@ -1169,6 +1267,48 @@ func (b *Broker) PublishTransactional(
 		return actualPartition, 0, false, fmt.Errorf("failed to publish: %w", err)
 	}
 
+	// =========================================================================
+	// STEP 4: TRACK UNCOMMITTED OFFSET FOR read_committed ISOLATION
+	// =========================================================================
+	//
+	// The message is now written to the log but the transaction is not committed.
+	// Consumers with read_committed isolation should NOT see this message until
+	// the transaction commits.
+	//
+	// We track the offset in uncommittedTracker so consume operations can filter
+	// it out. When the transaction commits/aborts, we clear the tracking.
+	//
+	// NOTE: We lookup the transaction ID by producerId+epoch. If the producer
+	// is in an active transaction, we track the offset. If not (non-transactional
+	// publish), we don't track it.
+	//
+	// =========================================================================
+	state := b.transactionCoordinator.GetProducerStateByProducerId(producerId, epoch)
+	b.logger.Debug("looked up producer state by ID",
+		"producer_id", producerId,
+		"epoch", epoch,
+		"state_found", state != nil)
+	if state != nil {
+		b.logger.Debug("producer state details",
+			"state", state.State,
+			"current_txn_id", state.CurrentTransactionId)
+		if state.State == TransactionStateOngoing && state.CurrentTransactionId != "" {
+			b.uncommittedTracker.Track(
+				topic,
+				actualPartition,
+				offset,
+				state.CurrentTransactionId,
+				producerId,
+				epoch,
+			)
+			b.logger.Debug("tracked uncommitted offset",
+				"topic", topic,
+				"partition", actualPartition,
+				"offset", offset,
+				"txn_id", state.CurrentTransactionId)
+		}
+	}
+
 	b.logger.Debug("published transactional message",
 		"producer_id", producerId,
 		"epoch", epoch,
@@ -1212,6 +1352,16 @@ func (b *Broker) GetTransactionCoordinator() *TransactionCoordinator {
 //   - Error if read fails
 //
 // For offset-sequential consumption (Kafka-like FIFO), use ConsumeByOffset().
+//
+// FILTERING (read_committed isolation):
+// This method filters out messages that should not be visible to consumers:
+//  1. Control records (transaction markers) - handled in Partition.Consume
+//  2. Delayed messages - messages scheduled for future delivery
+//  3. Uncommitted transactions - messages from in-progress transactions
+//
+// This provides read_committed semantics: consumers only see messages from
+// committed transactions. The uncommittedTracker maintains offsets belonging
+// to active transactions and filters them during consume.
 func (b *Broker) Consume(topic string, partition int, fromOffset int64, maxMessages int) ([]Message, error) {
 	b.mu.RLock()
 	if b.closed {
@@ -1226,14 +1376,96 @@ func (b *Broker) Consume(topic string, partition int, fromOffset int64, maxMessa
 	}
 	b.mu.RUnlock()
 
-	storageMessages, err := t.Consume(partition, fromOffset, maxMessages)
-	if err != nil {
-		return nil, err
+	// =========================================================================
+	// LOOP-BASED FETCH WITH FILTERING
+	// =========================================================================
+	//
+	// PROBLEM: After filtering (control records, delayed, uncommitted, aborted),
+	//          we might return fewer messages than requested.
+	//
+	// SOLUTION: Fetch in a loop with multiplier until we have enough messages.
+	//           - fetchMultiplier = 3 (fetch 3x more than needed)
+	//           - maxAttempts = 5 (avoid infinite loops on sparse partitions)
+	//
+	// EXAMPLE:
+	//   Consumer requests 10 messages
+	//   → Fetch 30 from storage
+	//   → After filtering: 7 messages remain
+	//   → Fetch another 9 messages (3x the shortfall)
+	//   → After filtering: 10 total messages
+	//   → Return 10 to consumer
+	//
+	// FILTERS APPLIED:
+	//   1. Control records (COMMIT/ABORT markers)
+	//   2. Delayed messages (deliverAt > now)
+	//   3. Uncommitted transactions (read_committed isolation)
+	//   4. Aborted transactions (permanently hidden)
+	//
+	// =========================================================================
+
+	const maxAttempts = 5
+	const fetchMultiplier = 2
+
+	var allFiltered []*storage.Message
+	currentOffset := fromOffset
+
+	for attempt := 0; attempt < maxAttempts && len(allFiltered) < maxMessages; attempt++ {
+		// Calculate how many more messages we need
+		needed := maxMessages - len(allFiltered)
+		fetchSize := needed * fetchMultiplier
+
+		// Fetch from storage
+		storageMessages, err := t.Consume(partition, currentOffset, fetchSize)
+		if err != nil {
+			return nil, err
+		}
+
+		// No more messages available
+		if len(storageMessages) == 0 {
+			break
+		}
+
+		// Apply filters to this batch
+		for _, sm := range storageMessages {
+			// Filter out control records (commit/abort markers)
+			if sm.IsControlRecord() {
+				continue
+			}
+			// Check if delayed
+			if b.IsDelayed(topic, partition, sm.Offset) {
+				continue
+			}
+			// Check uncommitted transaction
+			if b.uncommittedTracker != nil && b.uncommittedTracker.IsUncommitted(topic, partition, sm.Offset) {
+				continue
+			}
+			// Check aborted transaction
+			if b.abortedTracker != nil && b.abortedTracker.IsAborted(topic, partition, sm.Offset) {
+				continue
+			}
+			allFiltered = append(allFiltered, sm)
+
+			// Stop if we have enough
+			if len(allFiltered) >= maxMessages {
+				break
+			}
+		}
+
+		// Update offset for next iteration
+		if len(storageMessages) > 0 {
+			currentOffset = storageMessages[len(storageMessages)-1].Offset + 1
+		}
+	}
+
+	// Limit to requested amount (in case we got more)
+	filteredMessages := allFiltered
+	if len(filteredMessages) > maxMessages {
+		filteredMessages = filteredMessages[:maxMessages]
 	}
 
 	// Convert storage.Message to broker.Message for API
-	messages := make([]Message, len(storageMessages))
-	for i, sm := range storageMessages {
+	messages := make([]Message, len(filteredMessages))
+	for i, sm := range filteredMessages {
 		messages[i] = Message{
 			Topic:     topic,
 			Partition: partition,
@@ -1265,6 +1497,8 @@ func (b *Broker) Consume(topic string, partition int, fromOffset int64, maxMessa
 //   - You need strict offset ordering (e.g., replication, replay)
 //   - You want to consume ALL messages regardless of priority
 //   - You're treating the partition as an append-only log
+//
+// FILTERING: Same as Consume() - delayed messages are filtered out.
 func (b *Broker) ConsumeByOffset(topic string, partition int, fromOffset int64, maxMessages int) ([]Message, error) {
 	b.mu.RLock()
 	if b.closed {
@@ -1279,14 +1513,61 @@ func (b *Broker) ConsumeByOffset(topic string, partition int, fromOffset int64, 
 	}
 	b.mu.RUnlock()
 
-	storageMessages, err := t.ConsumeByOffset(partition, fromOffset, maxMessages)
-	if err != nil {
-		return nil, err
+	// Loop-based fetch with multiplier to handle filtering
+	const maxAttempts = 5
+	const fetchMultiplier = 2
+
+	var allFiltered []*storage.Message
+	currentOffset := fromOffset
+
+	for attempt := 0; attempt < maxAttempts && len(allFiltered) < maxMessages; attempt++ {
+		needed := maxMessages - len(allFiltered)
+		fetchSize := needed * fetchMultiplier
+
+		storageMessages, err := t.ConsumeByOffset(partition, currentOffset, fetchSize)
+		if err != nil {
+			return nil, err
+		}
+
+		if len(storageMessages) == 0 {
+			break
+		}
+
+		// Apply filters to this batch
+		for _, sm := range storageMessages {
+			if sm.IsControlRecord() {
+				continue
+			}
+			if b.IsDelayed(topic, partition, sm.Offset) {
+				continue
+			}
+			if b.uncommittedTracker != nil && b.uncommittedTracker.IsUncommitted(topic, partition, sm.Offset) {
+				continue
+			}
+			if b.abortedTracker != nil && b.abortedTracker.IsAborted(topic, partition, sm.Offset) {
+				continue
+			}
+			allFiltered = append(allFiltered, sm)
+
+			if len(allFiltered) >= maxMessages {
+				break
+			}
+		}
+
+		if len(storageMessages) > 0 {
+			currentOffset = storageMessages[len(storageMessages)-1].Offset + 1
+		}
+	}
+
+	// Limit to requested amount
+	filteredMessages := allFiltered
+	if len(filteredMessages) > maxMessages {
+		filteredMessages = filteredMessages[:maxMessages]
 	}
 
 	// Convert storage.Message to broker.Message for API
-	messages := make([]Message, len(storageMessages))
-	for i, sm := range storageMessages {
+	messages := make([]Message, len(filteredMessages))
+	for i, sm := range filteredMessages {
 		messages[i] = Message{
 			Topic:     topic,
 			Partition: partition,
@@ -1318,6 +1599,8 @@ func (b *Broker) ConsumeByOffset(topic string, partition int, fromOffset int64, 
 //
 // This uses strict priority (Critical first, then High, etc.)
 // For Weighted Fair Queuing, use ConsumeByPriorityWFQ.
+//
+// FILTERING: Same as Consume() - delayed messages are filtered out.
 func (b *Broker) ConsumeByPriority(topic string, partition int, fromOffset int64, maxMessages int) ([]Message, error) {
 	b.mu.RLock()
 	if b.closed {
@@ -1337,14 +1620,61 @@ func (b *Broker) ConsumeByPriority(topic string, partition int, fromOffset int64
 		return nil, err
 	}
 
-	storageMessages, err := p.ConsumeByPriority(fromOffset, maxMessages)
-	if err != nil {
-		return nil, err
+	// Loop-based fetch with multiplier to handle filtering
+	const maxAttempts = 5
+	const fetchMultiplier = 2
+
+	var allFiltered []*storage.Message
+	currentOffset := fromOffset
+
+	for attempt := 0; attempt < maxAttempts && len(allFiltered) < maxMessages; attempt++ {
+		needed := maxMessages - len(allFiltered)
+		fetchSize := needed * fetchMultiplier
+
+		storageMessages, err := p.ConsumeByPriority(currentOffset, fetchSize)
+		if err != nil {
+			return nil, err
+		}
+
+		if len(storageMessages) == 0 {
+			break
+		}
+
+		// Apply filters to this batch
+		for _, sm := range storageMessages {
+			if sm.IsControlRecord() {
+				continue
+			}
+			if b.IsDelayed(topic, partition, sm.Offset) {
+				continue
+			}
+			if b.uncommittedTracker != nil && b.uncommittedTracker.IsUncommitted(topic, partition, sm.Offset) {
+				continue
+			}
+			if b.abortedTracker != nil && b.abortedTracker.IsAborted(topic, partition, sm.Offset) {
+				continue
+			}
+			allFiltered = append(allFiltered, sm)
+
+			if len(allFiltered) >= maxMessages {
+				break
+			}
+		}
+
+		if len(storageMessages) > 0 {
+			currentOffset = storageMessages[len(storageMessages)-1].Offset + 1
+		}
+	}
+
+	// Limit to requested amount
+	filteredMessages := allFiltered
+	if len(filteredMessages) > maxMessages {
+		filteredMessages = filteredMessages[:maxMessages]
 	}
 
 	// Convert to API messages
-	messages := make([]Message, len(storageMessages))
-	for i, sm := range storageMessages {
+	messages := make([]Message, len(filteredMessages))
+	for i, sm := range filteredMessages {
 		messages[i] = Message{
 			Topic:     topic,
 			Partition: partition,
@@ -1371,6 +1701,8 @@ func (b *Broker) ConsumeByPriority(topic string, partition int, fromOffset int64
 //
 // NOTE: The scheduler should be maintained across calls for proper WFQ behavior.
 // Create one scheduler per consumer for best results.
+//
+// FILTERING: Same as Consume() - delayed messages are filtered out.
 func (b *Broker) ConsumeByPriorityWFQ(topic string, partition int, fromOffset int64, maxMessages int, scheduler *PriorityScheduler) ([]Message, error) {
 	b.mu.RLock()
 	if b.closed {
@@ -1390,14 +1722,61 @@ func (b *Broker) ConsumeByPriorityWFQ(topic string, partition int, fromOffset in
 		return nil, err
 	}
 
-	storageMessages, err := p.ConsumeByPriorityWFQ(fromOffset, maxMessages, scheduler)
-	if err != nil {
-		return nil, err
+	// Loop-based fetch with multiplier to handle filtering
+	const maxAttempts = 5
+	const fetchMultiplier = 2
+
+	var allFiltered []*storage.Message
+	currentOffset := fromOffset
+
+	for attempt := 0; attempt < maxAttempts && len(allFiltered) < maxMessages; attempt++ {
+		needed := maxMessages - len(allFiltered)
+		fetchSize := needed * fetchMultiplier
+
+		storageMessages, err := p.ConsumeByPriorityWFQ(currentOffset, fetchSize, scheduler)
+		if err != nil {
+			return nil, err
+		}
+
+		if len(storageMessages) == 0 {
+			break
+		}
+
+		// Apply filters to this batch
+		for _, sm := range storageMessages {
+			if sm.IsControlRecord() {
+				continue
+			}
+			if b.IsDelayed(topic, partition, sm.Offset) {
+				continue
+			}
+			if b.uncommittedTracker != nil && b.uncommittedTracker.IsUncommitted(topic, partition, sm.Offset) {
+				continue
+			}
+			if b.abortedTracker != nil && b.abortedTracker.IsAborted(topic, partition, sm.Offset) {
+				continue
+			}
+			allFiltered = append(allFiltered, sm)
+
+			if len(allFiltered) >= maxMessages {
+				break
+			}
+		}
+
+		if len(storageMessages) > 0 {
+			currentOffset = storageMessages[len(storageMessages)-1].Offset + 1
+		}
+	}
+
+	// Limit to requested amount
+	filteredMessages := allFiltered
+	if len(filteredMessages) > maxMessages {
+		filteredMessages = filteredMessages[:maxMessages]
 	}
 
 	// Convert to API messages
-	messages := make([]Message, len(storageMessages))
-	for i, sm := range storageMessages {
+	messages := make([]Message, len(filteredMessages))
+	for i, sm := range filteredMessages {
 		messages[i] = Message{
 			Topic:     topic,
 			Partition: partition,

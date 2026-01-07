@@ -173,8 +173,26 @@ func (p *Partition) ProduceMessage(msg *storage.Message) (int64, error) {
 	// Update priority index and scheduler
 	// The log.Append sets msg.Offset, so we can use the full message
 	msg.Offset = offset
-	p.priorityIndex.AddMessage(msg)
-	p.priorityScheduler.Enqueue(msg)
+
+	// =========================================================================
+	// CONTROL RECORD HANDLING
+	// =========================================================================
+	//
+	// Control records (commit/abort markers) should NOT be added to the priority
+	// index or scheduler because:
+	//   1. Consumers should never see control records
+	//   2. They would pollute the priority queues
+	//   3. Their "Critical" priority would cause issues (returned before data messages)
+	//
+	// Control records are only read via:
+	//   - Log.ReadFrom() during transaction recovery
+	//   - Explicit offset reads for abort filtering
+	//
+	// =========================================================================
+	if !msg.IsControlRecord() {
+		p.priorityIndex.AddMessage(msg)
+		p.priorityScheduler.Enqueue(msg)
+	}
 
 	return offset, nil
 }

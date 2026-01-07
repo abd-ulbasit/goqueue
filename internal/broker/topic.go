@@ -400,6 +400,28 @@ func (t *Topic) PublishToPartitionWithPriority(partition int, key, value []byte,
 	return p.ProduceWithPriority(key, value, priority)
 }
 
+// PublishMessageToPartition writes a pre-built message directly to a specific partition.
+// This preserves all message fields including Flags, Priority, etc.
+//
+// USAGE:
+//   - Control records (commit/abort markers) with FlagControlRecord set
+//   - Any message where you need full control over all fields
+//
+// NOTE: The message's Offset will be assigned by the log (ignore the input offset).
+func (t *Topic) PublishMessageToPartition(partition int, msg *storage.Message) (int64, error) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	if t.closed {
+		return 0, ErrTopicClosed
+	}
+	if partition < 0 || partition >= len(t.partitions) {
+		return 0, fmt.Errorf("invalid partition %d (topic has %d partitions)", partition, len(t.partitions))
+	}
+	p := t.partitions[partition]
+
+	return p.ProduceMessage(msg)
+}
+
 // =============================================================================
 // CONSUMER OPERATIONS
 // =============================================================================
