@@ -58,6 +58,7 @@
 package broker
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -93,6 +94,35 @@ type BrokerConfig struct {
 
 	// LogLevel controls logging verbosity
 	LogLevel slog.Level
+
+	// ClusterEnabled enables cluster mode (M10)
+	// If false, broker runs in single-node mode
+	ClusterEnabled bool
+
+	// ClusterConfig contains cluster configuration (only used if ClusterEnabled)
+	ClusterConfig *ClusterModeConfig
+}
+
+// ClusterModeConfig contains cluster-specific configuration.
+// These settings are only used when ClusterEnabled is true.
+type ClusterModeConfig struct {
+	// ClientAddress is where clients connect (e.g., "0.0.0.0:8080")
+	ClientAddress string
+
+	// ClusterAddress is where other nodes connect (e.g., "0.0.0.0:9000")
+	ClusterAddress string
+
+	// AdvertiseAddress is the address to advertise to other nodes
+	// Use this when running behind NAT or in containers
+	AdvertiseAddress string
+
+	// Peers is the list of other nodes to connect to on startup
+	// Format: ["host1:port1", "host2:port2"]
+	Peers []string
+
+	// QuorumSize is the minimum number of nodes required for cluster operations
+	// Default: 1 (single-node mode)
+	QuorumSize int
 }
 
 // DefaultBrokerConfig returns sensible defaults.
@@ -297,6 +327,30 @@ type Broker struct {
 	// ==========================================================================
 	abortedTracker *AbortedTracker
 
+	// ==========================================================================
+	// MILESTONE 10: CLUSTER COORDINATOR
+	// ==========================================================================
+	//
+	// The cluster coordinator manages distributed mode:
+	//   - Node discovery and membership
+	//   - Controller election (single controller per cluster)
+	//   - Cluster metadata (topics, partition assignments)
+	//   - Heartbeats and failure detection
+	//
+	// In cluster mode:
+	//   - Multiple brokers form a cluster
+	//   - Partitions are distributed across nodes
+	//   - Controller manages metadata changes
+	//   - Nodes communicate via HTTP for cluster ops
+	//
+	// In single-node mode:
+	//   - clusterCoordinator is nil
+	//   - All partitions are local
+	//   - No inter-node communication
+	//
+	// ==========================================================================
+	clusterCoordinator *clusterCoordinator
+
 	// mu protects topics map
 	mu sync.RWMutex
 
@@ -486,8 +540,55 @@ func NewBroker(config BrokerConfig) (*Broker, error) {
 	}
 	broker.transactionCoordinator = transactionCoordinator
 
+	// ==========================================================================
+	// MILESTONE 10: INITIALIZE CLUSTER COORDINATOR (OPTIONAL)
+	// ==========================================================================
+	//
+	// When ClusterEnabled is true, the broker joins a cluster of nodes.
+	// The cluster coordinator handles:
+	//   - Node discovery via configured peer list
+	//   - Heartbeating and failure detection
+	//   - Controller election (single leader per cluster)
+	//   - Cluster metadata (topic/partition assignments)
+	//
+	// In cluster mode, partitions can be distributed across nodes.
+	// The controller assigns partitions and manages metadata.
+	//
+	// If ClusterEnabled is false, broker runs in single-node mode
+	// with all partitions local.
+	//
+	// ==========================================================================
+	if config.ClusterEnabled && config.ClusterConfig != nil {
+		cc, err := newClusterCoordinator(broker, config.ClusterConfig, logger)
+		if err != nil {
+			transactionCoordinator.Close()
+			schemaRegistry.Close()
+			tracer.Shutdown()
+			scheduler.Close()
+			groupCoordinator.Close()
+			return nil, fmt.Errorf("failed to create cluster coordinator: %w", err)
+		}
+		broker.clusterCoordinator = cc
+
+		// Start cluster operations (bootstrap, join cluster)
+		startCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		if err := cc.Start(startCtx); err != nil {
+			cancel()
+			transactionCoordinator.Close()
+			schemaRegistry.Close()
+			tracer.Shutdown()
+			scheduler.Close()
+			groupCoordinator.Close()
+			return nil, fmt.Errorf("failed to start cluster coordinator: %w", err)
+		}
+		cancel()
+	}
+
 	// Discover and load existing topics
 	if err := broker.loadExistingTopics(); err != nil {
+		if broker.clusterCoordinator != nil {
+			broker.clusterCoordinator.Stop(context.Background())
+		}
 		transactionCoordinator.Close()
 		schemaRegistry.Close()
 		tracer.Shutdown()
@@ -496,7 +597,14 @@ func NewBroker(config BrokerConfig) (*Broker, error) {
 		return nil, fmt.Errorf("failed to load existing topics: %w", err)
 	}
 
+	// Log startup info
+	clusterMode := "single-node"
+	if config.ClusterEnabled {
+		clusterMode = "cluster"
+	}
+
 	logger.Info("broker started",
+		"mode", clusterMode,
 		"nodeID", config.NodeID,
 		"dataDir", config.DataDir,
 		"topics", len(broker.topics),
@@ -574,6 +682,24 @@ func (b *Broker) Close() error {
 	b.logger.Info("shutting down broker")
 
 	var errs []error
+
+	// ==========================================================================
+	// CLUSTER SHUTDOWN (M10)
+	// ==========================================================================
+	// Leave cluster gracefully FIRST so other nodes know we're departing.
+	// This allows the cluster to:
+	//   1. Transfer partition leadership
+	//   2. Update membership state
+	//   3. Potentially trigger controller election
+	// ==========================================================================
+	if b.clusterCoordinator != nil {
+		b.logger.Info("leaving cluster")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		if err := b.clusterCoordinator.Stop(shutdownCtx); err != nil {
+			errs = append(errs, fmt.Errorf("cluster coordinator: %w", err))
+		}
+		cancel()
+	}
 
 	// Close scheduler first (stops timer processing, flushes delay indices)
 	if b.scheduler != nil {

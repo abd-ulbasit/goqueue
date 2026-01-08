@@ -2,9 +2,9 @@
 
 ## Overall Status
 
-**Phase**: 2 of 4
-**Milestones**: 9/18 complete
-**Tests**: 220+ passing (storage: 50, broker: 145+, api: 24)
+**Phase**: 3 of 4
+**Milestones**: 10/18 complete
+**Tests**: 240+ passing (storage: 50, broker: 145+, api: 24, cluster: 20+)
 **Started**: Session 1
 
 ## Phase Progress
@@ -22,8 +22,8 @@
 - [x] Milestone 8: Schema Registry ✅
 - [x] Milestone 9: Transactional Publish ✅ ⭐
 
-### Phase 3: Distribution (0/4)
-- [ ] Milestone 10: Cluster Formation & Metadata
+### Phase 3: Distribution (1/4) 🔄
+- [x] Milestone 10: Cluster Formation & Metadata ✅ ⭐
 - [ ] Milestone 11: Leader Election & Replication
 - [ ] Milestone 12: Cooperative Rebalancing ⭐
 - [ ] Milestone 13: Online Partition Scaling
@@ -405,6 +405,135 @@
   - Per-partition sequence tracking (not per-topic)
   - Types match Kafka wire format (int64 PID, int16 epoch, int32 seq)
 
+### Milestone 10 - Cluster Formation & Metadata ✅ ⭐
+- **Static Peer Discovery** - Configured list of peer addresses
+  - Peers defined in YAML config under `cluster.peers`
+  - Each peer: `host:port` for cluster communication
+  - Separate client address for external API access
+  - No service discovery (simpler for initial cluster work)
+- **Node Identity** - Each broker has unique identity
+  - `NodeID` - Configurable, falls back to hostname
+  - `NodeAddress` - Host + Port combination with parsing utility
+  - `NodeInfo` - Complete snapshot: ID, addresses, status, role, version, tags
+  - `NodeStatus` enum: Unknown → Alive → Suspect → Dead → Leaving
+  - `NodeRole` enum: Follower | Controller
+- **Membership Manager** - Tracks all cluster members
+  - Thread-safe node registry with RWMutex
+  - Event system: NodeJoined, NodeLeft, NodeDied, NodeSuspect, NodeRecovered, ControllerChanged
+  - Listener pattern for components to react to membership changes
+  - Persistence to `{dataDir}/cluster/state.json`
+  - Quorum calculation based on configured cluster size
+  - `AliveNodes()`, `AliveCount()`, `HasQuorum()` methods
+- **Heartbeat-Based Failure Detection** - Health monitoring
+  - Heartbeat interval: 3s (conservative default)
+  - Suspect timeout: 6s (2x interval) - marks node as suspect
+  - Dead timeout: 9s (3x interval) - marks node as dead
+  - Background goroutine at heartbeat interval
+  - `RecordHeartbeat(nodeID)` updates membership, recovers suspects
+  - Status transitions: Unknown→Alive→Suspect→Dead
+  - Integration with membership event system
+- **Lease-Based Controller Election** - Single leader per cluster
+  - `ControllerState` enum: Follower | Candidate | Leader
+  - Epoch-based terms (monotonically increasing)
+  - Vote request/response protocol:
+    - Higher epoch gets vote
+    - One vote per epoch per node
+    - VotedFor + VotedEpoch tracking
+  - Lease timeout: 15s (controller must renew)
+  - Renewal interval: 5s (3 chances to renew per lease)
+  - `TriggerElection()` when controller dies
+  - `AcknowledgeController()` for followers to track controller
+- **Cluster Metadata Store** - Topic and partition assignments
+  - `TopicMeta` - Name, partition count, replication factor, config map
+  - `PartitionAssignment` - Topic, partition ID, leader node, replicas list, ISR
+  - `ClusterMeta` - Version counter, topics map, assignments map
+  - CRUD operations: CreateTopic, DeleteTopic, GetTopic, ListTopics
+  - Assignment management: SetAssignment, GetAssignment, RemoveAssignment
+  - Listener pattern for metadata change notifications
+  - Persistence to `{dataDir}/cluster/metadata.json`
+  - `DefaultTopicConfig()` helper for sensible defaults
+- **Inter-Node HTTP API** - Communication layer
+  - **ClusterServer** (inbound handlers):
+    - `POST /cluster/heartbeat` - Record heartbeat from peer
+    - `POST /cluster/join` - Handle join request
+    - `POST /cluster/leave` - Handle graceful leave
+    - `GET /cluster/state` - Return cluster state snapshot
+    - `POST /cluster/vote` - Handle vote request
+    - `GET /cluster/metadata` - Return cluster metadata
+    - `GET /cluster/health` - Health check endpoint
+  - **ClusterClient** (outbound requests):
+    - `SendHeartbeat(ctx, addr, req)` - Send heartbeat to peer
+    - `RequestJoin(ctx, addr, req)` - Request to join cluster
+    - `RequestLeave(ctx, addr, req)` - Request graceful leave
+    - `RequestVote(ctx, addr, req)` - Request vote from peer
+    - `FetchState(ctx, addr)` - Fetch state from peer
+    - `PushMetadata(ctx, addr, meta)` - Push metadata to peer
+    - `BroadcastHeartbeats(ctx, peers, req)` - Parallel heartbeat to all
+  - HTTP client with 5s timeout, JSON encoding
+- **Bootstrap & Lifecycle Coordination** - Orchestration
+  - **Coordinator** - Composes all cluster components
+  - `CoordinatorEvent` types:
+    - Bootstrap: Started, Complete, Failed
+    - Membership: JoinedCluster, LeftCluster
+    - Leadership: BecameController, LostController
+    - Quorum: QuorumLost, QuorumRestored
+  - **Start(ctx)** bootstrap sequence:
+    1. Load persisted state (state.json + metadata.json)
+    2. Register self in membership
+    3. Discover peers (request join from each)
+    4. Start failure detector background loop
+    5. Wait for quorum (with timeout)
+    6. Start controller election
+    7. Start heartbeat broadcasting
+    8. Emit BootstrapComplete event
+  - **Stop(ctx)** graceful shutdown:
+    1. Stop heartbeat broadcasting
+    2. Stop failure detector
+    3. Request graceful leave from peers
+    4. Remove self from membership
+    5. Persist final state
+- **Broker Integration** - Bridge cluster and broker
+  - `clusterCoordinator` wrapper in broker package
+  - Initialized when `BrokerConfig.ClusterEnabled = true`
+  - 60s timeout for cluster bootstrap
+  - 30s timeout for graceful cluster shutdown
+  - `ClusterModeConfig` struct: ClusterAddress, ClientAddress, Peers, QuorumSize
+  - Leadership queries: `IsLeaderFor()`, `GetLeader()`, `GetReplicas()`
+  - Metadata operations: `CreateTopicMeta()`, `DeleteTopicMeta()` (controller-only)
+  - HTTP route registration via `RegisterRoutes(mux)`
+- **Wire Protocol Messages**:
+  - `HeartbeatRequest/Response` - Node ID, timestamp, status
+  - `JoinRequest/Response` - Node info, success flag, error message, cluster state
+  - `LeaveRequest/Response` - Node ID, graceful flag
+  - `StateSyncRequest/Response` - Version, full cluster state
+  - `ControllerVoteRequest/Response` - Candidate, epoch, vote granted, voter ID
+- **Files created** (8 new files):
+  - `internal/cluster/types.go` - Core data structures (~400 lines)
+  - `internal/cluster/node.go` - Local node identity (~80 lines)
+  - `internal/cluster/membership.go` - Membership management (~350 lines)
+  - `internal/cluster/failure_detector.go` - Health monitoring (~200 lines)
+  - `internal/cluster/controller_elector.go` - Leader election (~250 lines)
+  - `internal/cluster/metadata_store.go` - Metadata storage (~350 lines)
+  - `internal/cluster/cluster_server.go` - HTTP API (~400 lines)
+  - `internal/cluster/coordinator.go` - Bootstrap orchestration (~450 lines)
+  - `internal/broker/cluster_integration.go` - Broker bridge (~200 lines)
+- **Test files created** (3 files, 20+ tests):
+  - `internal/cluster/types_test.go` - Types and parsing tests
+  - `internal/cluster/membership_test.go` - Membership manager tests
+  - `internal/cluster/failure_detector_test.go` - Failure detection + election tests
+- **Files modified**:
+  - `internal/broker/broker.go` - Cluster integration (~50 lines added)
+- **Key Design Decisions**:
+  - Static peer discovery (dynamic via gossip in future milestone)
+  - Lease-based election (simpler than Raft consensus)
+  - File-based persistence (matches existing patterns)
+  - HTTP/JSON inter-node comms (reuse existing HTTP infra)
+  - Conservative heartbeat timing (prioritize stability over speed)
+  - Epoch-based leadership terms (prevents split-brain)
+  - Quorum required for operations (majority of configured size)
+  - Graceful leave broadcasts to all peers
+  - Controller-only metadata writes (followers forward to controller)
+
 ### Technical Decisions Made
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
@@ -462,6 +591,16 @@
 | LSO tracking | Offset set per partition | O(1) lookup, no position scanning like Kafka |
 | Abort persistence | In-memory only | Acceptable for M9 scope; persistence in future |
 | Control record hiding | All 4 consume methods | Consistent filtering regardless of consume style |
+| Peer discovery | Static config | Simple, explicit; gossip planned for later |
+| Controller election | Lease-based | Simpler than Raft; single leader with 15s lease |
+| Cluster heartbeat | 3s interval | Conservative; 6s suspect, 9s dead thresholds |
+| Cluster metadata | File-based JSON | Matches existing patterns (state.json + metadata.json) |
+| Inter-node comms | HTTP/JSON | Reuse existing HTTP infrastructure |
+| Node ID | Configurable + hostname fallback | Explicit control with sensible default |
+| Quorum size | Configurable (default: majority) | Flexible for different deployment sizes |
+| Cluster state persistence | JSON at dataDir/cluster/ | Debuggable, easy recovery inspection |
+| Controller lease timeout | 15s | 3x renewal interval (5s), tolerates network blips |
+| Epoch tracking | Per-elector monotonic | Prevents split-brain, enables vote validation |
 
 ## What's Left to Build
 
@@ -488,9 +627,9 @@
 - [ ] Cooperative rebalancing (M12)
 
 ### Distribution (Multi-Node)
-- [ ] Cluster membership
-- [ ] Leader election
-- [ ] Log replication
+- [x] Cluster membership ✅ (M10)
+- [x] Leader election ✅ (M10)
+- [ ] Log replication (M11)
 
 ### Operations
 - [ ] gRPC API

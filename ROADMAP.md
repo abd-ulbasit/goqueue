@@ -68,16 +68,19 @@ A durable, distributed message queue with consumer groups, replication, and part
 - [x] Backpressure handling
 
 ### Distribution (Multi-Node)
-- [x] Partition distribution across nodes
-- [x] Replication for fault tolerance
-- [x] Leader election per partition
-- [x] Automatic failover
+- [x] Cluster formation with static peer discovery ✅ (M10)
+- [x] Heartbeat-based failure detection ✅ (M10)
+- [x] Controller election (lease-based) ✅ (M10)
+- [x] Cluster metadata store ✅ (M10)
+- [ ] Partition leader election (M11)
+- [ ] Log replication to followers (M11)
+- [ ] Automatic failover (M11)
 
 ### Operations
-- [x] HTTP + gRPC APIs
-- [x] Admin CLI tool
-- [x] Prometheus metrics
-- [x] Kubernetes StatefulSet deployment
+- [ ] HTTP + gRPC APIs (M14)
+- [ ] Admin CLI tool (M15)
+- [ ] Prometheus metrics (M16)
+- [ ] Kubernetes StatefulSet deployment (M18)
 
 ---
 
@@ -447,30 +450,41 @@ topics:
 - Consistency vs availability trade-offs
 - Cluster membership
 
-**Deliverables:**
-- [ ] Multi-node cluster formation
-- [ ] Partition leader election (using etcd or simple protocol)
-- [ ] Log replication to followers
-- [ ] Configurable replication factor
-- [ ] Leader failover
-- [ ] Split-brain protection
-- [ ] Cluster metadata store
+**Status:** Partially Complete (Cluster Formation done in M10)
 
-**Code Structure:**
+**Deliverables:**
+- [x] Multi-node cluster formation ✅ (M10)
+- [x] Cluster membership with static peer discovery ✅ (M10)
+- [x] Heartbeat-based failure detection ✅ (M10)
+- [x] Lease-based controller election ✅ (M10)
+- [x] Cluster metadata store ✅ (M10)
+- [x] Split-brain protection (epoch-based) ✅ (M10)
+- [ ] Partition leader election (M11)
+- [ ] Log replication to followers (M11)
+- [ ] Configurable replication factor (M11)
+- [ ] Leader failover for partitions (M11)
+
+**Note:** The original "Milestone 5" has been split into:
+- **M10**: Cluster Formation & Metadata (COMPLETE)
+- **M11**: Leader Election & Replication (PENDING)
+
+**Code Structure (Actual M10):**
 ```
 internal/
 ├── cluster/
-│   ├── cluster.go            # Cluster management
-│   ├── membership.go         # Node join/leave
-│   ├── metadata.go           # Cluster metadata
-│   └── election.go           # Leader election
-├── replication/
-│   ├── replicator.go         # Log replication
-│   ├── follower.go           # Follower sync
-│   └── acks.go               # Replication acknowledgment
+│   ├── types.go              # Core data structures (~400 lines)
+│   ├── node.go               # Local node identity (~80 lines)
+│   ├── membership.go         # Membership management (~350 lines)
+│   ├── failure_detector.go   # Health monitoring (~200 lines)
+│   ├── controller_elector.go # Leader election (~250 lines)
+│   ├── metadata_store.go     # Metadata storage (~350 lines)
+│   ├── cluster_server.go     # HTTP API (~400 lines)
+│   └── coordinator.go        # Bootstrap orchestration (~450 lines)
+├── broker/
+│   └── cluster_integration.go # Broker bridge (~200 lines)
 └── api/
     └── internal/
-        └── replication.go    # Inter-node API
+        └── replication.go    # Inter-node API (M11)
 ```
 
 **Replication Flow:**

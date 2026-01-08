@@ -11,14 +11,14 @@
 │                                    GOQUEUE CLUSTER                                       │
 │                                                                                          │
 │  ┌──────────────────────────────────────────────────────────────────────────────────────┐│
-│  │                              CONTROL PLANE (Milestone 10-11)                         ││
+│  │                              CONTROL PLANE (Milestone 10 ✅, 11)                     ││
 │  │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐                       ││
 │  │  │ Cluster         │  │ Metadata        │  │ Leader          │                       ││
-│  │  │ Coordinator     │  │ Store           │  │ Election        │                       ││
-│  │  │                 │  │                 │  │ (Raft-like)     │                       ││
-│  │  │ • Membership    │  │ • Topic configs │  │                 │                       ││
-│  │  │ • Health checks │  │ • Partition map │  │ • Lease-based   │                       ││
-│  │  │ • Failure detect│  │ • Consumer grps │  │ • ISR tracking  │                       ││
+│  │  │ Coordinator ✅  │  │ Store ✅        │  │ Election        │                       ││
+│  │  │                 │  │                 │  │                 │                       ││
+│  │  │ • Membership ✅ │  │ • Topic configs │  │ • Lease-based ✅│                       ││
+│  │  │ • Health chks ✅│  │ • Partition map │  │ • ISR tracking  │                       ││
+│  │  │ • Failure det ✅│  │ • Consumer grps │  │   (M11)         │                       ││
 │  │  └─────────────────┘  └─────────────────┘  └─────────────────┘                       ││
 │  └──────────────────────────────────────────────────────────────────────────────────────┘│
 │                                                                                          │
@@ -128,6 +128,7 @@
 │  │  │  │                         Metadata Storage                                 │  │  ││
 │  │  │  │  • offsets/<group>.json      • inflight/<consumer>.json                  │  │  ││
 │  │  │  │  • topics/<topic>/meta.json  • dlq/<topic>/meta.json                     │  │  ││
+│  │  │  │  • cluster/state.json        • cluster/metadata.json (M10 ✅)            │  │  ││
 │  │  │  └──────────────────────────────────────────────────────────────────────────┘  │  ││
 │  │  └────────────────────────────────────────────────────────────────────────────────┘  ││
 │  └──────────────────────────────────────────────────────────────────────────────────────┘│
@@ -1060,7 +1061,7 @@ WEIGHTED FAIR QUEUING (GoQueue):
 Phase 1: Foundations           Phase 2: Advanced            Phase 3: Distribution
 ────────────────────           ─────────────────            ─────────────────────
                                                             
- [M1] Storage ✅                [M5] Delay Queue ✅          [M10] Cluster
+ [M1] Storage ✅                [M5] Delay Queue ✅          [M10] Cluster ✅ ⭐
       │                              │                            │
       ▼                              ▼                            ▼
  [M2] Topics ✅                 [M6] Priority ✅ ⭐           [M11] Replication
@@ -1372,4 +1373,446 @@ The Schema Registry provides centralized schema management for message validatio
 
 ---
 
-*Last Updated: Milestone 8 Complete - Schema Registry with JSON Schema Validation*
+## Milestone 10: Cluster Formation & Metadata ✅
+
+The Cluster Formation system provides the foundation for multi-node deployment, enabling goqueue to operate as a distributed system with coordinated membership, failure detection, and centralized metadata management.
+
+### Cluster Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│                           CLUSTER FORMATION ARCHITECTURE                                │
+│                                                                                         │
+│  ┌───────────────────────────────────────────────────────────────────────────────────┐  │
+│  │                           COORDINATOR (Orchestration)                             │  │
+│  │                                                                                   │  │
+│  │   ┌─────────────────────────────────────────────────────────────────────────┐     │  │
+│  │   │                        Bootstrap Sequence                               │     │  │
+│  │   │                                                                         │     │  │
+│  │   │   1. Load persisted state (state.json + metadata.json)                  │     │  │
+│  │   │   2. Register self in membership                                        │     │  │
+│  │   │   3. Discover peers (request join from each)                            │     │  │
+│  │   │   4. Start failure detector background loop                             │     │  │
+│  │   │   5. Wait for quorum (with timeout)                                     │     │  │
+│  │   │   6. Start controller election                                          │     │  │
+│  │   │   7. Start heartbeat broadcasting                                       │     │  │
+│  │   │   8. Emit BootstrapComplete event                                       │     │  │
+│  │   └─────────────────────────────────────────────────────────────────────────┘     │  │
+│  └───────────────────────────────────────────────────────────────────────────────────┘  │
+│                                          │                                              │
+│          ┌───────────────────────────────┼───────────────────────────────┐              │
+│          ▼                               ▼                               ▼              │
+│  ┌─────────────────┐          ┌─────────────────┐          ┌─────────────────┐          │
+│  │      Node       │          │   Membership    │          │    Failure      │          │
+│  │    Identity     │          │    Manager      │          │   Detector      │          │
+│  │                 │          │                 │          │                 │          │
+│  │ • NodeID        │          │ • Node registry │          │ • Heartbeat     │          │
+│  │ • ClusterAddr   │          │ • Event system  │          │   tracking      │          │
+│  │ • ClientAddr    │          │ • Quorum check  │          │ • Status        │          │
+│  │ • Version       │          │ • State persist │          │   transitions   │          │
+│  │ • Tags          │          │                 │          │ • 3s/6s/9s      │          │
+│  └─────────────────┘          └─────────────────┘          └─────────────────┘          │
+│                                          │                                              │
+│          ┌───────────────────────────────┼───────────────────────────────┐              │
+│          ▼                               ▼                               ▼              │
+│  ┌─────────────────┐          ┌─────────────────┐          ┌─────────────────┐          │
+│  │   Controller    │          │    Metadata     │          │    Cluster      │          │
+│  │    Elector      │          │     Store       │          │    Server       │          │
+│  │                 │          │                 │          │                 │          │
+│  │ • Lease-based   │          │ • TopicMeta     │          │ • HTTP API      │          │
+│  │ • Epoch track   │          │ • Partition     │          │ • 7 endpoints   │          │
+│  │ • Vote protocol │          │   Assignments   │          │ • Client for    │          │
+│  │ • 15s lease     │          │ • CRUD ops      │          │   outbound      │          │
+│  │ • 5s renewal    │          │ • Listeners     │          │   requests      │          │
+│  └─────────────────┘          └─────────────────┘          └─────────────────┘          │
+│                                                                                         │
+└─────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Node Identity & Status
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│                              NODE IDENTITY & STATUS                                     │
+│                                                                                         │
+│  NodeInfo Structure:                                                                    │
+│  ┌─────────────────────────────────────────────────────────────────────────────────┐    │
+│  │ {                                                                               │    │
+│  │   "id": "node-1",                    ← Unique identifier (config or hostname)   │    │
+│  │   "cluster_address": "10.0.1.1:7000",← Address for inter-node communication     │    │
+│  │   "client_address": "10.0.1.1:8080", ← Address for client API                   │    │
+│  │   "status": "alive",                 ← Current node status                      │    │
+│  │   "role": "controller",              ← Follower or Controller                   │    │
+│  │   "version": "1.0.0",                ← GoQueue version                          │    │
+│  │   "tags": {"rack": "us-east-1a"}     ← Optional metadata                        │    │
+│  │ }                                                                               │    │
+│  └─────────────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                         │
+│  Status State Machine:                                                                  │
+│  ┌─────────────────────────────────────────────────────────────────────────────────┐    │
+│  │                                                                                 │    │
+│  │                    ┌─────────┐                                                  │    │
+│  │                    │ Unknown │ ← Initial state                                  │    │
+│  │                    └────┬────┘                                                  │    │
+│  │                         │ first heartbeat                                       │    │
+│  │                         ▼                                                       │    │
+│  │     recovered     ┌─────────┐  no heartbeat     ┌─────────┐                     │    │
+│  │    ◄──────────────│  Alive  │──────────────────►│ Suspect │                     │    │
+│  │    │              └─────────┘  (6s timeout)     └────┬────┘                     │    │
+│  │    │                   │                             │                          │    │
+│  │    │                   │ graceful leave              │ no heartbeat             │    │
+│  │    │                   ▼                             │ (9s timeout)             │    │
+│  │    │              ┌─────────┐                        │                          │    │
+│  │    └──────────────│ Leaving │                        ▼                          │    │
+│  │                   └─────────┘                   ┌─────────┐                     │    │
+│  │                                                 │  Dead   │                     │    │
+│  │                                                 └─────────┘                     │    │
+│  └─────────────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                         │
+│  Timing Configuration:                                                                  │
+│  ┌─────────────────────────────────────────────────────────────────────────────────┐    │
+│  │ Heartbeat Interval:  3s   ← How often nodes send heartbeats                     │    │
+│  │ Suspect Timeout:     6s   ← 2x interval before marking suspect                  │    │
+│  │ Dead Timeout:        9s   ← 3x interval before marking dead                     │    │
+│  │ Controller Lease:    15s  ← How long controller holds leadership                │    │
+│  │ Lease Renewal:       5s   ← How often controller renews (3 chances per lease)   │    │
+│  └─────────────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                         │
+└─────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Membership Event System
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│                           MEMBERSHIP EVENT SYSTEM                                       │
+│                                                                                         │
+│  Event Types:                                                                           │
+│  ┌─────────────────────────────────────────────────────────────────────────────────┐    │
+│  │                                                                                 │    │
+│  │  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐               │    │
+│  │  │  EventNodeJoined │  │  EventNodeLeft   │  │  EventNodeDied   │               │    │
+│  │  │                  │  │                  │  │                  │               │    │
+│  │  │ New node added   │  │ Graceful leave   │  │ Heartbeat timeout│               │    │
+│  │  │ to cluster       │  │ requested        │  │ exceeded         │               │    │
+│  │  └──────────────────┘  └──────────────────┘  └──────────────────┘               │    │
+│  │                                                                                 │    │
+│  │  ┌──────────────────┐  ┌──────────────────┐  ┌────────────────────────┐         │    │
+│  │  │ EventNodeSuspect │  │EventNodeRecovered│  │EventControllerChanged  │         │    │
+│  │  │                  │  │                  │  │                        │         │    │
+│  │  │ Missing          │  │ Suspect node     │  │ Controller changed     │         │    │
+│  │  │ heartbeats       │  │ resumed          │  │ (election complete)    │         │    │
+│  │  │ (6s elapsed)     │  │ heartbeating     │  │                        │         │    │
+│  │  └──────────────────┘  └──────────────────┘  └────────────────────────┘         │    │
+│  └─────────────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                         │
+│  Listener Pattern:                                                                      │
+│  // TODO: Implement listener registration and event propagation                         │
+│  ┌─────────────────────────────────────────────────────────────────────────────────┐    │
+│  │                                                                                 │    │
+│  │  // Components register for membership events                                   │    │
+│  │  membership.AddListener(func(event MembershipEvent) {                           │    │
+│  │      switch event.Type {                                                        │    │
+│  │      case EventNodeDied:                                                        │    │
+│  │          // Trigger partition reassignment                                      │    │
+│  │      case EventControllerChanged:                                               │    │
+│  │          // Update local controller reference                                   │    │
+│  │      }                                                                          │    │
+│  │  })                                                                             │    │
+│  │                                                                                 │    │
+│  │  // Events propagate to all registered listeners synchronously                  │    │
+│  │                                                                                 │    │
+│  └─────────────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                         │
+└─────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Controller Election Protocol
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│                         CONTROLLER ELECTION PROTOCOL                                    │
+│                                                                                         │
+│  Lease-Based Election (Simpler than Raft, sufficient for single controller):            │
+│                                                                                         │
+│  ┌─────────────────────────────────────────────────────────────────────────────────┐    │
+│  │                          Election State Machine                                 │    │
+│  │                                                                                 │    │
+│  │                       ┌────────────────┐                                        │    │
+│  │                       │    Follower    │ ← Default state                        │    │
+│  │                       └───────┬────────┘                                        │    │
+│  │                               │ controller died / no controller                 │    │
+│  │                               ▼                                                 │    │
+│  │                       ┌────────────────┐                                        │    │
+│  │                       │   Candidate    │                                        │    │
+│  │                       │               ◄┼─── Request votes from peers            │    │
+│  │                       └───────┬────────┘                                        │    │
+│  │                               │ received majority votes                         │    │
+│  │                               ▼                                                 │    │
+│  │                       ┌────────────────┐                                        │    │
+│  │                       │    Leader      │ ← Holds lease, broadcasts heartbeats   │    │
+│  │                       │  (Controller)  │                                        │    │
+│  │                       └───────┬────────┘                                        │    │
+│  │                               │ lease expires / stepped down                    │    │
+│  │                               ▼                                                 │    │
+│  │                       ┌────────────────┐                                        │    │
+│  │                       │    Follower    │                                        │    │
+│  │                       └────────────────┘                                        │    │
+│  │                                                                                 │    │
+│  └─────────────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                         │
+│  Vote Request/Response Protocol:                                                        │
+│  ┌─────────────────────────────────────────────────────────────────────────────────┐    │
+│  │                                                                                 │    │
+│  │  Candidate Node-1          Voter Node-2          Voter Node-3                   │    │
+│  │       │                         │                      │                        │    │
+│  │       │  VoteRequest            │                      │                        │    │
+│  │       │  {candidate: "node-1",  │                      │                        │    │
+│  │       │   epoch: 5}             │                      │                        │    │
+│  │       │────────────────────────►│                      │                        │    │
+│  │       │                         │                      │                        │    │
+│  │       │                   ┌─────┴─────┐                │                        │    │
+│  │       │                   │ Check:    │                │                        │    │
+│  │       │                   │ • epoch > │                │                        │    │
+│  │       │                   │   voted   │                │                        │    │
+│  │       │                   │   epoch?  │                │                        │    │
+│  │       │                   │ • not     │                │                        │    │
+│  │       │                   │   already │                │                        │    │
+│  │       │                   │   voted?  │                │                        │    │
+│  │       │                   └─────┬─────┘                │                        │    │
+│  │       │                         │                      │                        │    │
+│  │       │  VoteResponse           │                      │                        │    │
+│  │       │  {granted: true,        │                      │                        │    │
+│  │       │   voter: "node-2"}      │                      │                        │    │
+│  │       │◄────────────────────────│                      │                        │    │
+│  │       │                                                │                        │    │
+│  │       │  VoteRequest {candidate: "node-1", epoch: 5}   │                        │    │
+│  │       │───────────────────────────────────────────────►│                        │    │
+│  │       │                                                │                        │    │
+│  │       │  VoteResponse {granted: true}                  │                        │    │
+│  │       │◄───────────────────────────────────────────────│                        │    │
+│  │       │                                                │                        │    │
+│  │  ┌────┴────┐                                           │                        │    │
+│  │  │ Majority│ ← 2 of 3 votes, becomes controller        │                        │    │
+│  │  │ reached │                                           │                        │    │
+│  │  └─────────┘                                           │                        │    │
+│  │                                                                                 │    │
+│  └─────────────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                         │
+│  Key Properties:                                                                        │
+│  • Epoch-based terms (monotonically increasing)                                         │
+│  • One vote per epoch per node (prevents split votes)                                   │
+│  • Higher epoch always wins (late joiners can catch up)                                 │
+│  • Controller must renew lease every 5s (3 chances per 15s lease)                       │
+│  • Followers acknowledge controller via AcknowledgeController()                         │
+│                                                                                         │
+└─────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Cluster Metadata Store
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│                           CLUSTER METADATA STORE                                        │
+│                                                                                         │
+│  Stores cluster-wide topic and partition assignment information:                        │
+│                                                                                         │
+│  ┌─────────────────────────────────────────────────────────────────────────────────┐    │
+│  │                              Data Structures                                    │    │
+│  │                                                                                 │    │
+│  │  TopicMeta:                           PartitionAssignment:                      │    │
+│  │  ┌───────────────────────────┐        ┌───────────────────────────┐             │    │
+│  │  │ {                         │        │ {                         │             │    │
+│  │  │   "name": "orders",       │        │   "topic": "orders",      │             │    │
+│  │  │   "partition_count": 3,   │        │   "partition": 0,         │             │    │
+│  │  │   "replication_factor": 2,│        │   "leader": "node-1",     │             │    │
+│  │  │   "config": {             │        │   "replicas": ["node-1",  │             │    │
+│  │  │     "retention.hours": 168│        │              "node-2"],   │             │    │
+│  │  │     "max.message.bytes":..│        │   "isr": ["node-1",       │             │    │
+│  │  │   }                       │        │           "node-2"]       │             │    │
+│  │  │ }                         │        │ }                         │             │    │
+│  │  └───────────────────────────┘        └───────────────────────────┘             │    │
+│  │                                                                                 │    │
+│  └─────────────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                         │
+│  File Storage Structure:                                                                │
+│  ┌─────────────────────────────────────────────────────────────────────────────────┐    │
+│  │                                                                                 │    │
+│  │  data/                                                                          │    │
+│  │  └── cluster/                                                                   │    │
+│  │      ├── state.json          ← Cluster membership state                         │    │
+│  │      │   {                                                                      │    │
+│  │      │     "version": 5,                                                        │    │
+│  │      │     "controller_id": "node-1",                                           │    │
+│  │      │     "controller_epoch": 3,                                               │    │
+│  │      │     "nodes": {                                                           │    │
+│  │      │       "node-1": {...},                                                   │    │
+│  │      │       "node-2": {...},                                                   │    │
+│  │      │       "node-3": {...}                                                    │    │
+│  │      │     }                                                                    │    │
+│  │      │   }                                                                      │    │
+│  │      │                                                                          │    │
+│  │      └── metadata.json       ← Topic and partition metadata                     │    │
+│  │          {                                                                      │    │
+│  │            "version": 12,                                                       │    │
+│  │            "topics": {                                                          │    │
+│  │              "orders": {...},                                                   │    │
+│  │              "payments": {...}                                                  │    │
+│  │            },                                                                   │    │
+│  │            "assignments": {                                                     │    │
+│  │              "orders:0": {...},                                                 │    │
+│  │              "orders:1": {...}                                                  │    │
+│  │            }                                                                    │    │
+│  │          }                                                                      │    │
+│  │                                                                                 │    │
+│  └─────────────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                         │
+│  Controller-Only Writes:                                                                │
+│  • Only the controller can write to metadata store                                      │
+│  • Followers forward metadata requests to controller                                    │
+│  • Ensures consistency without distributed consensus                                    │
+│                                                                                         │
+└─────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Inter-Node HTTP API
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│                           CLUSTER HTTP API                                              │
+│                                                                                         │
+│  ClusterServer Endpoints (inbound request handlers):                                    │
+│  ┌─────────────────────────────────────────────────────────────────────────────────┐    │
+│  │                                                                                 │    │
+│  │  POST /cluster/heartbeat     Record heartbeat from peer node                    │    │
+│  │       Request:  HeartbeatRequest{node_id, timestamp, status}                    │    │
+│  │       Response: HeartbeatResponse{accepted, controller_id, epoch}               │    │
+│  │                                                                                 │    │
+│  │  POST /cluster/join          Handle join request from new node                  │    │
+│  │       Request:  JoinRequest{node_info}                                          │    │
+│  │       Response: JoinResponse{success, error, cluster_state}                     │    │
+│  │                                                                                 │    │
+│  │  POST /cluster/leave         Handle graceful leave from departing node          │    │
+│  │       Request:  LeaveRequest{node_id, graceful}                                 │    │
+│  │       Response: LeaveResponse{success}                                          │    │
+│  │                                                                                 │    │
+│  │  GET  /cluster/state         Return cluster state snapshot                      │    │
+│  │       Response: StateSyncResponse{version, state}                               │    │
+│  │                                                                                 │    │
+│  │  POST /cluster/vote          Handle vote request during election                │    │
+│  │       Request:  ControllerVoteRequest{candidate, epoch}                         │    │
+│  │       Response: ControllerVoteResponse{vote_granted, voter_id}                  │    │
+│  │                                                                                 │    │
+│  │  GET  /cluster/metadata      Return cluster metadata (topics, assignments)      │    │
+│  │       Response: ClusterMeta{version, topics, assignments}                       │    │
+│  │                                                                                 │    │
+│  │  GET  /cluster/health        Health check endpoint                              │    │
+│  │       Response: {"status": "healthy", "node_id": "...", "role": "..."}          │    │
+│  │                                                                                 │    │
+│  └─────────────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                         │
+│  ClusterClient Methods (outbound request senders):                                      │
+│  ┌─────────────────────────────────────────────────────────────────────────────────┐    │
+│  │                                                                                 │    │
+│  │  SendHeartbeat(ctx, addr, req)    → Send heartbeat to single peer               │    │
+│  │  BroadcastHeartbeats(ctx, peers)  → Parallel heartbeat to all peers             │    │
+│  │  RequestJoin(ctx, addr, req)      → Request to join cluster                     │    │
+│  │  RequestLeave(ctx, addr, req)     → Request graceful leave                      │    │
+│  │  RequestVote(ctx, addr, req)      → Request vote for controller election        │    │
+│  │  FetchState(ctx, addr)            → Fetch cluster state from peer               │    │
+│  │  PushMetadata(ctx, addr, meta)    → Push metadata update to follower            │    │
+│  │                                                                                 │    │
+│  │  All methods: 5s HTTP timeout, JSON encoding                                    │    │
+│  │                                                                                 │    │
+│  └─────────────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                         │
+└─────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Broker Integration
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│                           BROKER CLUSTER INTEGRATION                                    │
+│                                                                                         │
+│  Configuration:                                                                         │
+│  ┌─────────────────────────────────────────────────────────────────────────────────┐    │
+│  │                                                                                 │    │
+│  │  broker:                                                                        │    │
+│  │    cluster_enabled: true                                                        │    │
+│  │    cluster:                                                                     │    │
+│  │      node_id: "node-1"                   # Optional, defaults to hostname       │    │
+│  │      cluster_address: "10.0.1.1:7000"    # Inter-node communication             │    │
+│  │      client_address: "10.0.1.1:8080"     # Client API                           │    │
+│  │      peers:                              # Static peer list                     │    │
+│  │        - "10.0.1.2:7000"                                                        │    │
+│  │        - "10.0.1.3:7000"                                                        │    │
+│  │      quorum_size: 2                      # Minimum nodes for operations         │    │
+│  │                                                                                 │    │
+│  └─────────────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                         │
+│  clusterCoordinator Wrapper:                                                            │
+│  ┌─────────────────────────────────────────────────────────────────────────────────┐    │
+│  │                                                                                 │    │
+│  │  // Leadership queries (for partition routing)                                  │    │
+│  │  IsLeaderFor(topic, partition) bool    → Check if this node leads partition     │    │
+│  │  GetLeader(topic, partition) NodeID    → Get leader node for partition          │    │
+│  │  GetReplicas(topic, partition) []NodeID → Get replica set for partition         │    │
+│  │                                                                                 │    │
+│  │  // Metadata operations (controller-only)                                       │    │
+│  │  CreateTopicMeta(meta) error           → Create topic in cluster metadata       │    │
+│  │  DeleteTopicMeta(name) error           → Delete topic from cluster metadata     │    │
+│  │                                                                                 │    │
+│  │  // Lifecycle                                                                   │    │
+│  │  Start(ctx) error                      → Bootstrap cluster (60s timeout)        │    │
+│  │  Stop(ctx) error                       → Graceful leave (30s timeout)           │    │
+│  │  RegisterRoutes(mux)                   → Wire HTTP endpoints                    │    │
+│  │                                                                                 │    │
+│  └─────────────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                         │
+└─────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Deferred Features (Future Milestones)
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│                      DEFERRED FEATURES (M10 → Future)                                   │
+│                                                                                         │
+│  The following features were intentionally deferred from M10:                           │
+│                                                                                         │
+│  ┌─────────────────────────────────────────────────────────────────────────────────┐    │
+│  │ Feature                   │ Deferred To │ Reason                                │    │
+│  │───────────────────────────│─────────────│───────────────────────────────────────│    │
+│  │ Gossip protocol           │ M11+        │ Static config sufficient for v1       │    │
+│  │ (dynamic peer discovery)  │             │ Gossip adds complexity                │    │
+│  │                           │             │                                       │    │
+│  │ Log replication           │ M11         │ Separate milestone for ISR concept    │    │
+│  │                           │             │                                       │    │
+│  │ Partition-level election  │ M11         │ Controller election ≠ partition       │    │
+│  │                           │             │ leadership (separate concerns)        │    │
+│  │                           │             │                                       │    │
+│  │ Raft consensus            │ N/A         │ Lease-based simpler for single leader │    │
+│  │                           │             │ Full Raft overkill for this use case  │    │
+│  │                           │             │                                       │    │
+│  │ etcd dependency           │ N/A         │ File-based storage matches existing   │    │
+│  │                           │             │ patterns, reduces ops complexity      │    │
+│  └─────────────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                         │
+└─────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Comparison with Other Systems
+
+| Feature | GoQueue (M10) | Kafka | etcd | Consul |
+|---------|---------------|-------|------|--------|
+| Discovery | Static config | ZooKeeper/KRaft | Static/DNS | Gossip (Serf) |
+| Leader Election | Lease-based | KRaft (Raft) | Raft | Raft |
+| Failure Detection | Heartbeat 3s/6s/9s | Session timeout | Heartbeat | Gossip + health checks |
+| Metadata Storage | File-based JSON | KRaft log / ZK | Raft log | Raft log |
+| Quorum | Simple majority | ISR + min.insync | Raft majority | Raft majority |
+| Split-brain | Epoch-based | Controller epoch | Term-based | Epoch-based |
+
+---
+
+*Last Updated: Milestone 10 Complete - Cluster Formation & Metadata*
