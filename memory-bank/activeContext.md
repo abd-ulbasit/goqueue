@@ -2,102 +2,119 @@
 
 ## Current Focus
 
-**Phase**: 2 - Advanced Features
-**Milestone**: 9 - Transactional Publish ✅ COMPLETE (including LSO)
-**Status**: Phase 2 Complete! Ready for Phase 3 (Distribution)
+**Phase**: 3 - Distribution
+**Milestone**: 10 - Cluster Formation & Metadata ✅ COMPLETE
+**Status**: M10 Complete! Ready for M11 (Leader Election & Replication)
 
 ## What I'm Working On
 
-### Just Completed (M9 - Transactional Publish + LSO)
-- ✅ Idempotent Producers - ProducerId + Epoch for exactly-once
-- ✅ Sequence Tracking - Per-partition deduplication window
-- ✅ Transaction Coordinator - Two-phase commit lifecycle
-- ✅ Transaction Log - File-based WAL + Snapshot persistence
-- ✅ Control Records - Commit/abort markers in partition log
-- ✅ **LSO (Last Stable Offset)** - Read committed isolation ⭐
-  - UncommittedTracker - Tracks uncommitted transaction offsets
-  - AbortedTracker - Permanently hides aborted message offsets
-  - Control Record Filtering - All 4 consume methods filter markers
-  - Consume Pipeline: control → delayed → uncommitted → aborted
-- ✅ HTTP API - 9 transaction endpoints
-- ✅ 22+ transaction coordinator tests
-- ✅ 3 transaction filtering tests (LSO verification)
+### Just Completed (M10 - Cluster Formation & Metadata)
+- ✅ **Node Identity** - NodeID with hostname fallback, NodeAddress parsing
+- ✅ **Cluster Types** - NodeStatus (Unknown→Alive→Suspect→Dead→Leaving), NodeRole (Follower|Controller)
+- ✅ **Membership Manager** - Thread-safe node registry with event listeners
+- ✅ **Failure Detector** - Heartbeat-based health monitoring (3s/6s/9s timing)
+- ✅ **Controller Election** - Lease-based with epoch tracking (15s lease, 5s renewal)
+- ✅ **Metadata Store** - TopicMeta, PartitionAssignment with CRUD operations
+- ✅ **Inter-Node HTTP API** - ClusterServer (7 endpoints) + ClusterClient
+- ✅ **Bootstrap Coordinator** - Load state → Register self → Discover peers → Quorum → Election
+- ✅ **Broker Integration** - ClusterModeConfig, 60s bootstrap timeout, 30s shutdown
+- ✅ **Tests** - 20+ tests across types, membership, failure detection, election
 
-### Key Technical Decisions (M9)
-- **Transaction Log**: File-based WAL + Snapshot (not internal topic like Kafka)
-- **Zombie Fencing**: Epoch-based (bumps on re-init)
-- **Producer ID Type**: int64 (Kafka wire format compatibility)
-- **Sequence Tracking**: Per-partition (better parallelism than per-topic)
-- **Transaction Timeout**: 60s (Kafka default)
-- **Control Records**: Flags byte in 34-byte message header
-- **Dedup Window**: 5 sequences (balance memory vs. retry coverage)
-- **LSO Tracking**: Offset set per partition (O(1) lookup)
-- **Abort Persistence**: In-memory only (acceptable for M9 scope)
+### Key Technical Decisions (M10)
+- **Peer Discovery**: Static config (gossip planned for later milestone)
+- **Controller Election**: Lease-based (simpler than Raft consensus)
+- **Cluster Heartbeat**: 3s interval, 6s suspect, 9s dead (conservative)
+- **Cluster Metadata**: File-based JSON at dataDir/cluster/
+- **Inter-node Comms**: HTTP/JSON (reuse existing infrastructure)
+- **Node ID**: Configurable with hostname fallback
+- **Quorum Size**: Configurable (default: majority of peers)
+- **Controller Lease**: 15s timeout, 5s renewal interval
+- **Epoch Tracking**: Per-elector monotonic (prevents split-brain)
 
-### Files Created/Modified (M9)
-- **Created**:
-  - `internal/broker/idempotent_producer.go` - PID assignment, sequence tracking
-  - `internal/broker/transaction_log.go` - WAL + snapshot persistence
-  - `internal/broker/transaction_coordinator.go` - Transaction lifecycle
-  - `internal/broker/transaction_coordinator_test.go` - Comprehensive tests
-  - `internal/broker/uncommitted_tracker.go` - LSO tracking (UncommittedTracker + AbortedTracker)
+### Files Created (M10)
+- **Cluster Package** (8 files):
+  - `internal/cluster/types.go` - Core data structures (~400 lines)
+  - `internal/cluster/node.go` - Local node identity (~80 lines)
+  - `internal/cluster/membership.go` - Membership management (~350 lines)
+  - `internal/cluster/failure_detector.go` - Health monitoring (~200 lines)
+  - `internal/cluster/controller_elector.go` - Leader election (~250 lines)
+  - `internal/cluster/metadata_store.go` - Metadata storage (~350 lines)
+  - `internal/cluster/cluster_server.go` - HTTP API (~400 lines)
+  - `internal/cluster/coordinator.go` - Bootstrap orchestration (~450 lines)
+- **Broker Integration**:
+  - `internal/broker/cluster_integration.go` - Broker bridge (~200 lines)
+- **Tests** (3 files):
+  - `internal/cluster/types_test.go` - Types and parsing tests
+  - `internal/cluster/membership_test.go` - Membership manager tests
+  - `internal/cluster/failure_detector_test.go` - Failure detection + election tests
 - **Modified**:
-  - `internal/storage/message.go` - Control record flags and payload
-  - `internal/broker/broker.go` - TransactionCoordinator + LSO integration
-  - `internal/broker/partition.go` - Control records excluded from priority index
-  - `internal/broker/topic.go` - PublishMessageToPartition method
-  - `internal/broker/broker_test.go` - 3 LSO filtering tests
-  - `internal/api/server.go` - Transaction API endpoints
+  - `internal/broker/broker.go` - ClusterEnabled, ClusterModeConfig (~50 lines)
 
-### Transaction API Endpoints
+### Cluster API Endpoints (M10)
 ```
-POST /producers/init                    Initialize producer (get PID + epoch)
-POST /producers/{producerId}/heartbeat  Producer heartbeat
-POST /transactions/begin                Begin transaction
-POST /transactions/publish              Publish within transaction
-POST /transactions/add-partition        Add partition to transaction
-POST /transactions/commit               Commit transaction
-POST /transactions/abort                Abort transaction
-GET  /transactions                      List active transactions
-GET  /transactions/stats                Coordinator statistics
+POST /cluster/heartbeat   Record heartbeat from peer
+POST /cluster/join        Handle join request from peer
+POST /cluster/leave       Handle graceful leave request
+GET  /cluster/state       Return cluster state snapshot
+POST /cluster/vote        Handle vote request for election
+GET  /cluster/metadata    Return cluster metadata
+GET  /cluster/health      Health check endpoint
 ```
 
-### LSO Implementation Details
+### Cluster Architecture (M10)
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    CONSUME FILTERING PIPELINE                    │
+│                      CLUSTER COORDINATOR                         │
 ├─────────────────────────────────────────────────────────────────┤
-│  Message → IsControlRecord? → IsDelayed? → IsUncommitted?       │
-│                                              ↓                   │
-│                                         IsAborted? → Consumer   │
+│                                                                  │
+│  ┌──────────────┐  ┌─────────────────┐  ┌──────────────────┐   │
+│  │     Node     │  │   Membership    │  │ FailureDetector  │   │
+│  │   Identity   │  │    Manager      │  │   (Heartbeats)   │   │
+│  └──────────────┘  └─────────────────┘  └──────────────────┘   │
+│                                                                  │
+│  ┌──────────────┐  ┌─────────────────┐  ┌──────────────────┐   │
+│  │  Controller  │  │   Metadata      │  │  ClusterServer   │   │
+│  │   Elector    │  │    Store        │  │   + Client       │   │
+│  └──────────────┘  └─────────────────┘  └──────────────────┘   │
+│                                                                  │
 └─────────────────────────────────────────────────────────────────┘
-
-UncommittedTracker:
-  - TrackOffset(txnID, topic, partition, offset)
-  - ClearTransaction(txnID) → []partitionOffset (for abort handling)
-  - IsUncommitted(topic, partition, offset) → bool
-
-AbortedTracker:
-  - MarkAborted(offsets []partitionOffset)
-  - IsAborted(topic, partition, offset) → bool
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                         BROKER                                   │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │              clusterCoordinator                          │   │
+│  │  - IsLeaderFor(topic, partition)                         │   │
+│  │  - GetLeader(topic, partition)                           │   │
+│  │  - CreateTopicMeta() / DeleteTopicMeta()                 │   │
+│  └─────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-### Next Steps (Phase 3 - Distribution)
-1. Milestone 10: Cluster Formation & Metadata
-2. Milestone 11: Leader Election & Replication
-3. Milestone 12: Cooperative Rebalancing ⭐
-4. Milestone 13: Online Partition Scaling
+### Next Steps (M11 - Leader Election & Replication)
+1. Log replication protocol (ISR concept)
+2. Leader election for partitions (not just controller)
+3. Follower fetch loop
+4. Replica acknowledgment and high watermark
+5. Partition reassignment on failure
 
 ## Recent Changes
 
-### Session 6 - Milestone 6 Implementation
+### Session 10 - Milestone 10 Implementation
 **Completed**:
-- Created priority scheduling system
-  - `priority.go` - Priority type with 5 levels, validation, string conversion
-  - `priority_scheduler.go` - WFQ scheduler using DRR algorithm
-  - `priority_index.go` - Per-partition priority tracking
-  - `priority_scheduler_test.go` - 12 comprehensive tests
-- Updated message format
+- Implemented complete cluster formation system
+  - Node identity with configurable ID and hostname fallback
+  - Membership manager with event-driven notifications
+  - Heartbeat-based failure detection (3s/6s/9s timing)
+  - Lease-based controller election (15s lease)
+  - Cluster metadata store for topic/partition assignments
+  - HTTP API for inter-node communication (7 endpoints)
+  - Bootstrap coordinator with quorum waiting
+  - Broker integration with ClusterModeConfig
+- Created comprehensive test suite (20+ tests)
+- Updated memory bank with M10 documentation
+
+### Session 9 - Milestone 9 Implementation
   - 32-byte header (V1) with Priority at [24], Reserved at [25]
   - KeyLen shifted to [26:28], ValueLen to [28:32]
   - Simplified: no V1/V2 branching, just one format
