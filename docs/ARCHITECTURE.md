@@ -11,14 +11,14 @@
 │                                    GOQUEUE CLUSTER                                       │
 │                                                                                          │
 │  ┌──────────────────────────────────────────────────────────────────────────────────────┐│
-│  │                              CONTROL PLANE (Milestone 10 ✅, 11)                     ││
+│  │                              CONTROL PLANE (Milestone 10 ✅, 11 ✅)                   ││
 │  │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐                       ││
 │  │  │ Cluster         │  │ Metadata        │  │ Leader          │                       ││
-│  │  │ Coordinator ✅  │  │ Store ✅        │  │ Election        │                       ││
+│  │  │ Coordinator ✅  │  │ Store ✅        │  │ Election ✅     │                       ││
 │  │  │                 │  │                 │  │                 │                       ││
 │  │  │ • Membership ✅ │  │ • Topic configs │  │ • Lease-based ✅│                       ││
-│  │  │ • Health chks ✅│  │ • Partition map │  │ • ISR tracking  │                       ││
-│  │  │ • Failure det ✅│  │ • Consumer grps │  │   (M11)         │                       ││
+│  │  │ • Health chks ✅│  │ • Partition map │  │ • ISR tracking✅│                       ││
+│  │  │ • Failure det ✅│  │ • Consumer grps │  │ • Replication ✅│                       ││
 │  │  └─────────────────┘  └─────────────────┘  └─────────────────┘                       ││
 │  └──────────────────────────────────────────────────────────────────────────────────────┘│
 │                                                                                          │
@@ -1815,4 +1815,420 @@ The Cluster Formation system provides the foundation for multi-node deployment, 
 
 ---
 
-*Last Updated: Milestone 10 Complete - Cluster Formation & Metadata*
+## Milestone 11: Leader Election & Replication ✅
+
+The Replication system enables partition-level leader election and log replication between broker nodes, providing fault tolerance and data durability for goqueue.
+
+### Replication Architecture Overview
+
+```
+┌───────────────────────────────────────────────────────────────────────────────────────────┐
+│                           REPLICATION ARCHITECTURE                                        │
+│                                                                                           │
+│  ┌────────────────────────────────────────────────────────────────────────────────────┐   │
+│  │                              PARTITION LEADERSHIP                                  │   │
+│  │                                                                                    │   │
+│  │   Unlike controller election (M10), each partition has its own leader.             │   │
+│  │   A node can be leader for some partitions and follower for others.                │   │
+│  │                                                                                    │   │
+│  │   Example: 3 nodes, topic "orders" with 3 partitions, replication factor 3         │   │
+│  │                                                                                    │   │
+│  │   ┌─────────────┐     ┌─────────────┐     ┌─────────────┐                          │   │
+│  │   │   Node 1    │     │   Node 2    │     │   Node 3    │                          │   │
+│  │   │             │     │             │     │             │                          │   │
+│  │   │ P0: LEADER  │     │ P0: Follower│     │ P0: Follower│                          │   │
+│  │   │ P1: Follower│     │ P1: LEADER  │     │ P1: Follower│                          │   │
+│  │   │ P2: Follower│     │ P2: Follower│     │ P2: LEADER  │                          │   │
+│  │   └─────────────┘     └─────────────┘     └─────────────┘                          │   │
+│  │                                                                                    │   │
+│  │   Round-robin assignment ensures balanced leadership distribution                  │   │
+│  └────────────────────────────────────────────────────────────────────────────────────┘   │
+│                                                                                           │
+│  ┌────────────────────────────────────────────────────────────────────────────────────┐   │
+│  │                         PULL-BASED REPLICATION MODEL                               │   │
+│  │                                                                                    │   │
+│  │   WHY PULL (not push)?                                                             │   │
+│  │   • Follower controls pace → natural backpressure                                  │   │
+│  │   • Leader doesn't track each follower's position                                  │   │
+│  │   • Simpler failure handling (follower just stops fetching)                        │   │
+│  │   • Same model used by Kafka                                                       │   │
+│  │                                                                                    │   │
+│  │   ┌────────────────────────────────────────────────────────────────────────────┐   │   │
+│  │   │                                                                            │   │   │
+│  │   │         Leader (Node 1)                    Follower (Node 2)               │   │   │
+│  │   │        ┌─────────────┐                    ┌─────────────┐                  │   │   │
+│  │   │        │             │◄───── Fetch ───────│             │                  │   │   │
+│  │   │        │  Partition  │     (every 500ms)  │  Partition  │                  │   │   │
+│  │   │        │    Log      │                    │    Log      │                  │   │   │
+│  │   │        │             │───── Response ────►│             │                  │   │   │
+│  │   │        │  LEO: 1000  │   (msgs + HW/LEO)  │  LEO: 950   │                  │   │   │
+│  │   │        │  HW:  900   │                    │  HW:  900   │                  │   │   │
+│  │   │        └─────────────┘                    └─────────────┘                  │   │   │
+│  │   │                                                                            │   │   │
+│  │   └────────────────────────────────────────────────────────────────────────────┘   │   │
+│  └────────────────────────────────────────────────────────────────────────────────────┘   │
+└───────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Log End Offset (LEO) and High Watermark (HW)
+
+```
+┌──────────────────────────────────────────────────────────────────────────────────────────┐
+│                         LEO AND HIGH WATERMARK EXPLAINED                                 │
+│                                                                                          │
+│  LEO (Log End Offset):                                                                   │
+│  ┌────────────────────────────────────────────────────────────────────────────────────┐  │
+│  │ The offset of the NEXT message that will be written.                               │  │
+│  │ Each node tracks its own LEO independently.                                        │  │
+│  │                                                                                    │  │
+│  │   Leader LEO = 1000  (has messages 0-999)                                          │  │
+│  │   Follower LEO = 950 (has messages 0-949, still fetching 950-999)                  │  │
+│  └────────────────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                          │
+│  HW (High Watermark):                                                                    │
+│  ┌────────────────────────────────────────────────────────────────────────────────────┐  │
+│  │ The highest offset that has been replicated to ALL ISR members.                    │  │
+│  │ Consumers can only read up to HW (committed data).                                 │  │
+│  │                                                                                    │  │
+│  │   HW = min(LEO of all ISR members)                                                 │  │
+│  │                                                                                    │  │
+│  │   If ISR = [Leader(LEO=1000), Follower1(LEO=950), Follower2(LEO=980)]              │  │
+│  │   Then HW = min(1000, 950, 980) = 950                                              │  │
+│  │                                                                                    │  │
+│  │   Messages 950-999 are "uncommitted" - written to leader but not yet replicated    │  │
+│  └────────────────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                          │
+│  Visual:                                                                                 │
+│  ┌────────────────────────────────────────────────────────────────────────────────────┐  │
+│  │                                                                                    │  │
+│  │  Log: [0][1][2]...[948][949][950][951]...[998][999]                                │  │
+│  │                          │                      │                                  │  │
+│  │                          ▼                      ▼                                  │  │
+│  │                    High Watermark           Log End Offset                         │  │
+│  │                      (HW = 950)              (LEO = 1000)                          │  │
+│  │                          │                      │                                  │  │
+│  │       ◄──── Committed ───┼──── Uncommitted ────►│                                  │  │
+│  │       (safe to read)     │   (may be lost if    │                                  │  │
+│  │                          │    leader crashes)   │                                  │  │
+│  └────────────────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                          │
+└──────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### In-Sync Replicas (ISR)
+
+```
+┌──────────────────────────────────────────────────────────────────────────────────────────┐
+│                              IN-SYNC REPLICAS (ISR)                                      │
+│                                                                                          │
+│  Definition:                                                                             │
+│  ┌────────────────────────────────────────────────────────────────────────────────────┐  │
+│  │ ISR = Set of replicas that are "caught up" with the leader.                        │  │
+│  │                                                                                    │  │
+│  │ A replica is in ISR if it meets BOTH criteria (combined approach):                 │  │
+│  │   1. Last fetch within ISRLagTimeMaxMs (10 seconds)                                │  │
+│  │   2. Offset lag within ISRLagMaxMessages (1000 messages)                           │  │
+│  │                                                                                    │  │
+│  │ WHY COMBINED?                                                                      │  │
+│  │   - Time-only: Slow consumers on idle topics stay in ISR unfairly                  │  │
+│  │   - Offset-only: Bursty workloads cause ISR flapping                               │  │
+│  │   - Combined: Best of both worlds                                                  │  │
+│  └────────────────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                          │
+│  ISR Shrink/Expand Flow:                                                                 │
+│  ┌────────────────────────────────────────────────────────────────────────────────────┐  │
+│  │                                                                                    │  │
+│  │   Leader monitors follower fetch progress:                                         │  │
+│  │                                                                                    │  │
+│  │   ┌─────────────────┐   last fetch > 10s    ┌─────────────────┐                    │  │
+│  │   │   In ISR        │   AND lag > 1000      │   Out of ISR    │                    │  │
+│  │   │   (in sync)     │ ────────────────────► │   (lagging)     │                    │  │
+│  │   │                 │                       │                 │                    │  │
+│  │   │                 │ ◄──────────────────── │                 │                    │  │
+│  │   │                 │   caught up           │                 │                    │  │
+│  │   │                 │   (offset >= HW)      │                 │                    │  │
+│  │   └─────────────────┘                       └─────────────────┘                    │  │
+│  │                                                                                    │  │
+│  └────────────────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                          │
+│  min.insync.replicas:                                                                    │
+│  ┌────────────────────────────────────────────────────────────────────────────────────┐  │
+│  │ If ISR size < min.insync.replicas, writes are rejected.                            │  │
+│  │                                                                                    │  │
+│  │ Example: min.insync.replicas = 2, but only leader in ISR                           │  │
+│  │   → Writes rejected with "not enough replicas"                                     │  │
+│  │   → Prevents data loss in degraded state                                           │  │
+│  └────────────────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                          │
+└──────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Leader Election
+
+```
+┌──────────────────────────────────────────────────────────────────────────────────────────┐
+│                              PARTITION LEADER ELECTION                                   │
+│                                                                                          │
+│  Clean vs Unclean Election:                                                              │
+│  ┌────────────────────────────────────────────────────────────────────────────────────┐  │
+│  │                                                                                    │  │
+│  │  CLEAN ELECTION (default, UncleanLeaderElection=false):                            │  │
+│  │  ┌──────────────────────────────────────────────────────────────────────────────┐  │  │
+│  │  │ • Only ISR members can become leader                                         │  │  │
+│  │  │ • If no ISR member available → partition is OFFLINE                          │  │  │
+│  │  │ • GUARANTEES: No data loss                                                   │  │  │
+│  │  │ • TRADEOFF: Availability sacrificed for consistency                          │  │  │
+│  │  └──────────────────────────────────────────────────────────────────────────────┘  │  │
+│  │                                                                                    │  │
+│  │  UNCLEAN ELECTION (opt-in, UncleanLeaderElection=true):                            │  │
+│  │  ┌──────────────────────────────────────────────────────────────────────────────┐  │  │
+│  │  │ • Any replica can become leader if no ISR available                          │  │  │
+│  │  │ • Partition stays online even with lagging replica as leader                 │  │  │
+│  │  │ • RISK: Data loss (messages not replicated to new leader are lost)           │  │  │
+│  │  │ • TRADEOFF: Availability over consistency                                    │  │  │
+│  │  └──────────────────────────────────────────────────────────────────────────────┘  │  │
+│  │                                                                                    │  │
+│  └────────────────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                          │
+│  Election Scenarios:                                                                     │
+│  ┌────────────────────────────────────────────────────────────────────────────────────┐  │
+│  │                                                                                    │  │
+│  │  Scenario 1: Leader fails, ISR has other members                                   │  │
+│  │  ┌────────────────────────────────────────────────────────────────────────────┐    │  │
+│  │  │  BEFORE:  Leader=Node1, ISR=[Node1, Node2, Node3]                          │    │  │
+│  │  │  EVENT:   Node1 crashes                                                    │    │  │
+│  │  │  AFTER:   Leader=Node2, ISR=[Node2, Node3]  ← Clean election               │    │  │
+│  │  │  RESULT:  No data loss, partition stays online                             │    │  │
+│  │  └────────────────────────────────────────────────────────────────────────────┘    │  │
+│  │                                                                                    │  │
+│  │  Scenario 2: Leader fails, no ISR (clean mode)                                     │  │
+│  │  ┌────────────────────────────────────────────────────────────────────────────┐    │  │
+│  │  │  BEFORE:  Leader=Node1, ISR=[Node1]  (all followers lagging)               │    │  │
+│  │  │  EVENT:   Node1 crashes                                                    │    │  │
+│  │  │  AFTER:   Leader=None, partition OFFLINE                                   │    │  │
+│  │  │  RESULT:  No data loss, but unavailable until Node1 recovers               │    │  │
+│  │  └────────────────────────────────────────────────────────────────────────────┘    │  │
+│  │                                                                                    │  │
+│  │  Scenario 3: Leader fails, no ISR (unclean mode)                                   │  │
+│  │  ┌────────────────────────────────────────────────────────────────────────────┐    │  │
+│  │  │  BEFORE:  Leader=Node1(LEO=1000), ISR=[Node1], Node2(LEO=500)              │    │  │
+│  │  │  EVENT:   Node1 crashes                                                    │    │  │
+│  │  │  AFTER:   Leader=Node2(LEO=500), ISR=[Node2]  ← Unclean election           │    │  │
+│  │  │  RESULT:  Messages 500-999 LOST, partition stays online                    │    │  │
+│  │  └────────────────────────────────────────────────────────────────────────────┘    │  │
+│  │                                                                                    │  │
+│  └────────────────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                          │
+│  Leader Epoch:                                                                           │
+│  ┌────────────────────────────────────────────────────────────────────────────────────┐  │
+│  │ Incremented on every leader change. Used for fencing:                              │  │
+│  │                                                                                    │  │
+│  │   • Old leader (epoch=5) recovers after new leader elected (epoch=6)               │  │
+│  │   • Old leader's writes rejected: "stale epoch"                                    │  │
+│  │   • Prevents split-brain scenarios                                                 │  │
+│  └────────────────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                          │
+└──────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Follower Catch-Up with Snapshots
+
+```
+┌───────────────────────────────────────────────────────────────────────────────────────────┐
+│                           FOLLOWER CATCH-UP STRATEGY                                      │
+│                                                                                           │
+│  Problem:                                                                                 │
+│  ┌─────────────────────────────────────────────────────────────────────────────────────┐  │
+│  │ When follower is very far behind (e.g., 10,000+ messages), fetching message-by-     │  │
+│  │ message is slow and wastes bandwidth.                                               │  │
+│  └─────────────────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                           │
+│  Solution: Snapshot + Log                                                                 │
+│  ┌─────────────────────────────────────────────────────────────────────────────────────┐  │
+│  │                                                                                     │  │
+│  │   Normal Fetch (lag < 10,000):                                                      │  │
+│  │   ┌──────────────────────────────────────────────────────────────────────────────┐  │  │
+│  │   │  Follower → Fetch(offset=950, maxBytes=1MB) → Leader                         │  │  │
+│  │   │  Leader → FetchResponse(msgs 950-1049) → Follower                            │  │  │
+│  │   │  Repeat until caught up                                                      │  │  │
+│  │   └──────────────────────────────────────────────────────────────────────────────┘  │  │
+│  │                                                                                     │  │
+│  │   Snapshot Catch-Up (lag >= 10,000):                                                │  │
+│  │   ┌──────────────────────────────────────────────────────────────────────────────┐  │  │
+│  │   │  1. Follower detects large lag                                               │  │  │
+│  │   │  2. Follower → POST /cluster/snapshot/create → Leader                        │  │  │
+│  │   │  3. Leader creates tar.gz of log segments                                    │  │  │
+│  │   │  4. Leader → SnapshotResponse(url, checksum) → Follower                      │  │  │
+│  │   │  5. Follower downloads snapshot                                              │  │  │
+│  │   │  6. Follower verifies SHA256 checksum                                        │  │  │
+│  │   │  7. Follower replaces local log with snapshot                                │  │  │
+│  │   │  8. Follower resumes normal fetching from snapshot offset                    │  │  │
+│  │   └──────────────────────────────────────────────────────────────────────────────┘  │  │
+│  │                                                                                     │  │
+│  │   Flow Diagram:                                                                     │  │
+│  │   ┌──────────────────────────────────────────────────────────────────────────────┐  │  │
+│  │   │                                                                              │  │  │
+│  │   │   Follower                              Leader                               │  │  │
+│  │   │      │                                     │                                 │  │  │
+│  │   │      │   Fetch(offset=0)                   │                                 │  │  │
+│  │   │      │────────────────────────────────────►│                                 │  │  │
+│  │   │      │                                     │                                 │  │  │
+│  │   │      │   Error: offset out of range        │                                 │  │  │
+│  │   │      │   (leader LEO=15000, too far)       │                                 │  │  │
+│  │   │      │◄────────────────────────────────────│                                 │  │  │
+│  │   │      │                                     │                                 │  │  │
+│  │   │      │   RequestSnapshot                   │                                 │  │  │
+│  │   │      │────────────────────────────────────►│                                 │  │  │
+│  │   │      │                                     │  Create tar.gz                  │  │  │
+│  │   │      │   SnapshotReady(offset=14000)       │  Calculate SHA256               │  │  │
+│  │   │      │◄────────────────────────────────────│                                 │  │  │
+│  │   │      │                                     │                                 │  │  │
+│  │   │      │   GET /snapshot/download            │                                 │  │  │
+│  │   │      │────────────────────────────────────►│                                 │  │  │
+│  │   │      │                                     │                                 │  │  │
+│  │   │      │   [tar.gz stream]                   │                                 │  │  │
+│  │   │      │◄════════════════════════════════════│                                 │  │  │
+│  │   │      │                                     │                                 │  │  │
+│  │   │  Extract, verify, resume                   │                                 │  │  │
+│  │   │      │                                     │                                 │  │  │
+│  │   │      │   Fetch(offset=14001)               │                                 │  │  │
+│  │   │      │────────────────────────────────────►│                                 │  │  │
+│  │   │      │                                     │                                 │  │  │
+│  │   └──────────────────────────────────────────────────────────────────────────────┘  │  │
+│  │                                                                                     │  │
+│  └─────────────────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                           │
+└───────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Replication Component Interactions
+
+```
+┌───────────────────────────────────────────────────────────────────────────────────────────┐
+│                        REPLICATION COMPONENT DIAGRAM                                      │
+│                                                                                           │
+│  ┌────────────────────────────────────────────────────────────────────────────────────┐   │
+│  │                              BROKER NODE                                           │   │
+│  │                                                                                    │   │
+│  │  ┌─────────────────────────────────────────────────────────────────────────────┐   │   │
+│  │  │                     Replication Coordinator                                 │   │   │
+│  │  │  (internal/broker/replication_integration.go)                               │   │   │
+│  │  │                                                                             │   │   │
+│  │  │  Responsibilities:                                                          │   │   │
+│  │  │  • Initializes replicas on startup                                          │   │   │
+│  │  │  • Routes to correct component based on role                                │   │   │
+│  │  │  • Provides IsLeaderFor/WaitForReplication to broker                        │   │   │
+│  │  │  • Runs background ISR checker                                              │   │   │
+│  │  └───────────────────────────────┬─────────────────────────────────────────────┘   │   │
+│  │                                  │                                                 │   │
+│  │          ┌───────────────────────┼───────────────────────┐                         │   │
+│  │          ▼                       ▼                       ▼                         │   │
+│  │  ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐                 │   │
+│  │  │ Replica Manager │    │ Snapshot Manager│    │ Partition       │                 │   │
+│  │  │                 │    │                 │    │ Leader Elector  │                 │   │
+│  │  │ • LocalReplica  │    │ • CreateSnapshot│    │                 │                 │   │
+│  │  │   state         │    │ • LoadSnapshot  │    │ • ElectLeader   │                 │   │
+│  │  │ • BecomeLeader/ │    │ • Checksum      │    │ • Clean/Unclean │                 │   │
+│  │  │   BecomeFollower│    │   verification  │    │ • Preferred     │                 │   │
+│  │  │ • Event emitter │    │                 │    │   election      │                 │   │
+│  │  └────────┬────────┘    └─────────────────┘    └─────────────────┘                 │   │
+│  │           │                                                                        │   │
+│  │           │ For leaders                                                            │   │
+│  │           ▼                                                                        │   │
+│  │  ┌─────────────────┐                                                               │   │
+│  │  │   ISR Manager   │                                                               │   │
+│  │  │                 │                                                               │   │
+│  │  │ • Track follower│                                                               │   │
+│  │  │   progress      │                                                               │   │
+│  │  │ • Combined      │                                                               │   │
+│  │  │   criteria      │                                                               │   │
+│  │  │ • HW calculation│                                                               │   │
+│  │  └─────────────────┘                                                               │   │
+│  │           │                                                                        │   │
+│  │           │ For followers                                                          │   │
+│  │           ▼                                                                        │   │
+│  │  ┌─────────────────┐    ┌─────────────────┐                                        │   │
+│  │  │ Follower Fetcher│───►│ Replication     │                                        │   │
+│  │  │                 │    │ Client          │                                        │   │
+│  │  │ • 500ms loop    │    │                 │                                        │   │
+│  │  │ • Backoff       │    │ • HTTP client   │                                        │   │
+│  │  │ • Snapshot      │    │ • Fetch()       │                                        │   │
+│  │  │   trigger       │    │ • RequestSnap() │                                        │   │
+│  │  └─────────────────┘    └─────────────────┘                                        │   │
+│  │                                                                                    │   │
+│  │  ┌─────────────────────────────────────────────────────────────────────────────┐   │   │
+│  │  │                      Replication Server                                     │   │   │
+│  │  │  (internal/cluster/replication_server.go)                                   │   │   │
+│  │  │                                                                             │   │   │
+│  │  │  HTTP Endpoints:                                                            │   │   │
+│  │  │  • POST /cluster/fetch         - Handle fetch requests from followers       │   │   │
+│  │  │  • POST /cluster/snapshot/create - Create snapshot for requesting follower  │   │   │
+│  │  │  • GET  /cluster/snapshot/{...} - Download snapshot file                    │   │   │
+│  │  │  • POST /cluster/isr            - Process ISR update requests               │   │   │
+│  │  │  • POST /cluster/leader-election - Handle election requests                 │   │   │
+│  │  │  • GET  /cluster/partition/{...}/info - Return partition metadata           │   │   │
+│  │  └─────────────────────────────────────────────────────────────────────────────┘   │   │
+│  │                                                                                    │   │
+│  └────────────────────────────────────────────────────────────────────────────────────┘   │
+│                                                                                           │
+└───────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Configuration Reference
+
+```
+┌──────────────────────────────────────────────────────────────────────────────────────────┐
+│                           REPLICATION CONFIGURATION                                      │
+│                                                                                          │
+│  ReplicationConfig:                                                                      │
+│  ┌────────────────────────────────────────────────────────────────────────────────────┐  │
+│  │                                                                                    │  │
+│  │  Parameter                    │ Default  │ Description                             │  │
+│  │  ─────────────────────────────│──────────│──────────────────────────────────────── │  │
+│  │  fetch_interval_ms            │ 500      │ How often followers fetch from leader   │  │
+│  │  fetch_max_bytes              │ 1MB      │ Max bytes per fetch request             │  │
+│  │  fetch_timeout_ms             │ 5000     │ HTTP timeout for fetch requests         │  │
+│  │  isr_lag_time_max_ms          │ 10000    │ Time before ISR removal (part of combo) │  │
+│  │  isr_lag_max_messages         │ 1000     │ Offset lag before ISR removal (combo)   │  │
+│  │  min_in_sync_replicas         │ 1        │ Min ISR for writes to succeed           │  │
+│  │  unclean_leader_election      │ false    │ Allow non-ISR leader election           │  │
+│  │  leader_follower_read_enabled │ false    │ Allow reads from followers              │  │
+│  │  snapshot_enabled             │ true     │ Enable snapshot-based catch-up          │  │
+│  │  snapshot_threshold_messages  │ 10000    │ Lag threshold to trigger snapshot       │  │
+│  │  ack_timeout_ms               │ 5000     │ Timeout for AckAll writes               │  │
+│  │                                                                                    │  │
+│  └────────────────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                          │
+│  Example YAML:                                                                           │
+│  ┌────────────────────────────────────────────────────────────────────────────────────┐  │
+│  │  replication:                                                                      │  │
+│  │    fetch_interval_ms: 500                                                          │  │
+│  │    fetch_max_bytes: 1048576                                                        │  │
+│  │    isr_lag_time_max_ms: 10000                                                      │  │
+│  │    isr_lag_max_messages: 1000                                                      │  │
+│  │    min_in_sync_replicas: 2              # Require 2 ISR for durability             │  │
+│  │    unclean_leader_election: false       # Prefer consistency                       │  │
+│  │    snapshot_enabled: true                                                          │  │
+│  │    snapshot_threshold_messages: 10000                                              │  │
+│  │                                                                                    │  │
+│  └────────────────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                          │
+└──────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Comparison with Kafka
+
+| Feature | GoQueue (M11) | Kafka |
+|---------|---------------|-------|
+| Replication Model | Pull-based | Pull-based |
+| ISR Criteria | Combined (time + offset) | Time-based only |
+| Leader Election | Clean/Unclean configurable | Clean/Unclean configurable |
+| Snapshot Catch-up | tar.gz + SHA256 | Log segment copy |
+| Fetch Protocol | HTTP REST | Custom binary protocol |
+| HW Calculation | min(LEO of ISR) | min(LEO of ISR) |
+| Epoch Fencing | Leader epoch | Leader epoch |
+| Controller vs Partition Leader | Separate concepts | Separate concepts |
+
+---
+
+*Last Updated: Milestone 11 Complete - Leader Election & Replication*

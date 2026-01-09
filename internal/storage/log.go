@@ -304,6 +304,77 @@ func (l *Log) Append(msg *Message) (int64, error) {
 	return offset, nil
 }
 
+// =============================================================================
+// APPEND AT SPECIFIC OFFSET (M11 REPLICATION)
+// =============================================================================
+//
+// WHY: Followers must append messages at exact offsets to maintain consistency
+// with the leader. Regular Append() assigns the next sequential offset, but
+// replicated messages must preserve their original offset from the leader.
+//
+// FLOW:
+//   Leader writes:   Offset 100, 101, 102
+//   Follower fetches: [Msg@100, Msg@101, Msg@102]
+//   Follower appends: AppendAtOffset(msg, 100), AppendAtOffset(msg, 101), ...
+//
+// CONSTRAINTS:
+//   - expectedOffset must match log's next offset (no gaps)
+//   - If offset < nextOffset, message already exists (idempotent)
+//   - If offset > nextOffset, gap would be created (error)
+//
+// =============================================================================
+
+// AppendAtOffset appends a message at a specific offset.
+// Used by followers when replicating from the leader.
+//
+// This ensures followers maintain exact offset consistency with the leader.
+// Returns the offset written to, or error if:
+//   - Log is closed
+//   - Expected offset doesn't match next offset
+//   - Segment operations fail
+func (l *Log) AppendAtOffset(msg *Message, expectedOffset int64) (int64, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.closed {
+		return 0, ErrLogClosed
+	}
+
+	// Idempotency check: if offset already exists, skip.
+	// This can happen if follower restarts and re-fetches overlapping range.
+	if expectedOffset < l.nextOffset {
+		// Already have this offset - idempotent success
+		return expectedOffset, nil
+	}
+
+	// Gap check: offset must be exactly next offset (no gaps allowed).
+	if expectedOffset > l.nextOffset {
+		return 0, fmt.Errorf("offset gap: expected %d but next is %d", expectedOffset, l.nextOffset)
+	}
+
+	// Normal append at expected offset
+	offset, err := l.activeSegment.Append(msg)
+	if err == ErrSegmentFull {
+		if err := l.rollover(); err != nil {
+			return 0, fmt.Errorf("failed to rollover segment: %w", err)
+		}
+		offset, err = l.activeSegment.Append(msg)
+	}
+
+	if err != nil {
+		return 0, fmt.Errorf("failed to append message: %w", err)
+	}
+
+	// Verify we got the expected offset
+	if offset != expectedOffset {
+		// This shouldn't happen, but check anyway
+		return 0, fmt.Errorf("offset mismatch: got %d, expected %d", offset, expectedOffset)
+	}
+
+	l.nextOffset = offset + 1
+	return offset, nil
+}
+
 // rollover creates a new segment and switches to it.
 // Must be called with lock held.
 func (l *Log) rollover() error {
