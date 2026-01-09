@@ -414,6 +414,26 @@ func (p *Partition) NextOffset() int64 {
 	return p.log.NextOffset()
 }
 
+// AppendAtOffset appends a message at a specific offset.
+// Used for follower replication where offsets must match the leader.
+// Returns an error if the offset doesn't match expected position.
+//
+// FOLLOWER REPLICATION SEMANTICS:
+//   - Followers must append at exact offsets to maintain consistency
+//   - If offset < LEO: Skip (already have this message)
+//   - If offset == LEO: Append normally
+//   - If offset > LEO: Error (gap in log)
+func (p *Partition) AppendAtOffset(msg *storage.Message, expectedOffset int64) (int64, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.closed {
+		return 0, fmt.Errorf("partition is closed")
+	}
+
+	return p.log.AppendAtOffset(msg, expectedOffset)
+}
+
 // MessageCount returns the approximate number of messages.
 func (p *Partition) MessageCount() int64 {
 	earliest := p.log.EarliestOffset()

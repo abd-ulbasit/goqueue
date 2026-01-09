@@ -37,6 +37,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -582,6 +584,142 @@ func (cc *ClusterClient) FetchState(ctx context.Context, targetID NodeID) (*Stat
 	}
 
 	return &resp, nil
+}
+
+// =============================================================================
+// REPLICATION CLIENT METHODS
+// =============================================================================
+//
+// These methods support log replication between leader and follower partitions.
+// Followers use Fetch to pull messages from leaders.
+//
+// PULL-BASED REPLICATION MODEL:
+//   Leader                     Follower
+//   ┌──────────┐              ┌──────────┐
+//   │          │◄─────────────│ Fetch()  │  (every 500ms)
+//   │  Log     │              │          │
+//   │          │─────────────►│  Apply   │
+//   └──────────┘ FetchResponse└──────────┘
+//
+// WHY PULL:
+//   - Follower controls pace (backpressure)
+//   - Leader doesn't need to track each follower's position
+//   - Simpler failure handling
+//
+
+// Fetch requests log entries from a partition leader.
+// Used by followers to replicate leader's log.
+func (cc *ClusterClient) Fetch(ctx context.Context, leaderAddr string, req *FetchRequest) (*FetchResponse, error) {
+	var resp FetchResponse
+	err := cc.doRequest(ctx, leaderAddr, "/cluster/fetch", req, &resp)
+	if err != nil {
+		return nil, fmt.Errorf("fetch from leader: %w", err)
+	}
+	return &resp, nil
+}
+
+// =============================================================================
+// SNAPSHOT METHODS
+// =============================================================================
+//
+// WHY SNAPSHOTS FOR FOLLOWERS:
+//   When a follower is very far behind (e.g., after crash recovery or new replica),
+//   fetching messages one-by-one is too slow. Snapshots provide fast catch-up:
+//
+//   FLOW:
+//   ┌────────────────────────────────────────────────────────────────────────┐
+//   │                                                                        │
+//   │   1. Follower's fetch offset is out of range (log truncated)           │
+//   │      - Leader returns FetchErrorOffsetOutOfRange                       │
+//   │                                                                        │
+//   │   2. Follower requests snapshot from leader                            │
+//   │      - RequestSnapshot() → POST /cluster/snapshot/create               │
+//   │                                                                        │
+//   │   3. Leader creates snapshot (tar.gz of log files + metadata)          │
+//   │      - Returns download URL and snapshot info                          │
+//   │                                                                        │
+//   │   4. Follower downloads snapshot                                       │
+//   │      - DownloadSnapshot() → GET /cluster/snapshot/{topic}/{part}/{off} │
+//   │                                                                        │
+//   │   5. Follower applies snapshot to local storage                        │
+//   │      - Replaces local log with snapshot contents                       │
+//   │      - Updates fetch offset to snapshot's last offset + 1              │
+//   │                                                                        │
+//   │   6. Follower resumes normal fetching                                  │
+//   │                                                                        │
+//   └────────────────────────────────────────────────────────────────────────┘
+//
+// COMPARISON:
+//   - Kafka: Log truncation and follower catch-up via fetch
+//   - Raft: Snapshot + InstallSnapshot RPC
+//   - etcd: Snapshot transfer for lagging followers
+//   - goqueue: Similar to etcd, tar.gz snapshot over HTTP
+//
+// =============================================================================
+
+// RequestSnapshot asks the leader to create a snapshot for catch-up.
+// Returns snapshot metadata including download URL.
+func (cc *ClusterClient) RequestSnapshot(ctx context.Context, leaderAddr string, topic string, partition int, requestedBy NodeID) (*SnapshotResponse, error) {
+	req := SnapshotRequest{
+		Topic:       topic,
+		Partition:   partition,
+		RequestedBy: requestedBy,
+	}
+
+	var resp SnapshotResponse
+	err := cc.doRequest(ctx, leaderAddr, "/cluster/snapshot/create", req, &resp)
+	if err != nil {
+		return nil, fmt.Errorf("request snapshot: %w", err)
+	}
+
+	if resp.ErrorCode != SnapshotErrorNone {
+		return nil, fmt.Errorf("snapshot error (%d): %s", resp.ErrorCode, resp.ErrorMessage)
+	}
+
+	return &resp, nil
+}
+
+// DownloadSnapshot downloads a snapshot file from the leader.
+// The snapshot is saved to the specified destination directory.
+// Returns the path to the downloaded snapshot file.
+func (cc *ClusterClient) DownloadSnapshot(ctx context.Context, leaderAddr string, downloadURL string, destDir string) (string, error) {
+	// Build full URL.
+	url := fmt.Sprintf("http://%s%s", leaderAddr, downloadURL)
+
+	// Create request.
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return "", fmt.Errorf("create request: %w", err)
+	}
+
+	// Execute request.
+	resp, err := cc.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("download snapshot: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("download failed: status %d", resp.StatusCode)
+	}
+
+	// Create destination file.
+	// Extract filename from URL or use a default.
+	destPath := filepath.Join(destDir, "snapshot.tar.gz")
+	file, err := os.Create(destPath)
+	if err != nil {
+		return "", fmt.Errorf("create snapshot file: %w", err)
+	}
+	defer file.Close()
+
+	// Copy response body to file.
+	_, err = io.Copy(file, resp.Body)
+	if err != nil {
+		os.Remove(destPath)
+		return "", fmt.Errorf("write snapshot file: %w", err)
+	}
+
+	return destPath, nil
 }
 
 // PushMetadata pushes metadata to a follower node.
