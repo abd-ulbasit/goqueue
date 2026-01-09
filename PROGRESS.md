@@ -1,10 +1,10 @@
 # GoQueue Development Progress
 
-## Status: Phase 2 - In Progress
+## Status: Phase 3 - In Progress
 
 **Target Milestones**: 18
-**Completed**: 8
-**Current**: Milestone 9 (Transactional Publish)
+**Completed**: 11
+**Current**: Milestone 12 (Cooperative Rebalancing)
 
 ---
 
@@ -405,7 +405,7 @@ Per-Priority-Per-Partition Metrics (PPPP):
 
 ## Phase 3: Distribution (Milestones 10-13)
 
-### Milestone 10: Cluster Formation & Metadata
+### Milestone 10: Cluster Formation & Metadata ✅ COMPLETE
 
 **Goal:** Multi-node cluster with shared metadata.
 
@@ -415,34 +415,165 @@ Per-Priority-Per-Partition Metrics (PPPP):
 - Failure detection
 
 **Deliverables:**
-- [ ] Node ID and addressing
-- [ ] Peer discovery (static, DNS, multicast)
-- [ ] Membership list with health
-- [ ] Metadata store (embedded)
-- [ ] Metadata replication
-- [ ] Node failure detection
-- [ ] Cluster bootstrap
+- [x] Node ID and addressing
+- [x] Peer discovery (static, DNS)
+- [x] Membership list with health
+- [x] Metadata store (embedded)
+- [x] Metadata replication
+- [x] Node failure detection
+- [x] Cluster bootstrap
+- [x] Controller election (lease-based)
+- [x] Cluster HTTP API endpoints
+
+**Implementation Details:**
+- **Coordinator** (`internal/cluster/coordinator.go`): Orchestrates bootstrap, membership, and failure detection
+- **Node Identity** (`internal/cluster/node.go`): Node ID, addresses, version, tags
+- **Membership** (`internal/cluster/membership.go`): Node registry, event system, quorum checking
+- **Failure Detector** (`internal/cluster/failure_detector.go`): Heartbeat-based with 3s/6s/9s thresholds
+- **Controller Elector** (`internal/cluster/controller_elector.go`): Lease-based leadership with 15s lease
+- **Metadata Store** (`internal/cluster/metadata_store.go`): Topic metadata, partition assignments
+- **Cluster Server** (`internal/cluster/cluster_server.go`): HTTP API with 7 endpoints
 
 ---
 
-### Milestone 11: Leader Election & Replication
+### Milestone 11: Leader Election & Replication ✅ COMPLETE
 
 **Goal:** Partition leaders with follower replication.
 
 **Learning Focus:**
-- Leader election algorithms
-- Log replication (simplified Raft)
+- Leader election algorithms (partition-level)
+- Log replication (pull-based, like Kafka)
 - In-sync replica (ISR) concept
-- Consistency vs availability
+- High watermark for read consistency
+- Consistency vs availability trade-offs
 
 **Deliverables:**
-- [ ] Partition leader election
-- [ ] Lease-based leadership
-- [ ] Log replication protocol
-- [ ] ISR management
-- [ ] Min in-sync replicas config
-- [ ] Leader failover
-- [ ] Follower catch-up
+- [x] Partition leader election (separate from controller)
+- [x] Lease-based leadership for partitions
+- [x] Log replication protocol (pull-based)
+- [x] ISR management (combined time + offset criteria)
+- [x] Min in-sync replicas config
+- [x] Leader failover (clean and unclean election)
+- [x] Follower catch-up (snapshot + log)
+- [x] High watermark tracking
+- [x] Replication HTTP endpoints
+
+**Implementation Details:**
+- **Replication Types** (`internal/cluster/replication_types.go` ~590 lines):
+  - ReplicaRole (Leader/Follower), ReplicaState, FetchRequest/Response
+  - ISRUpdate with shrink/expand types
+  - ReplicationConfig with tunable parameters
+  - Snapshot metadata and error codes
+  
+- **Replica Manager** (`internal/cluster/replica_manager.go` ~780 lines):
+  - Local replica state management (BecomeLeader/BecomeFollower)
+  - LEO/HW tracking for each replica
+  - ISR manager integration for leaders
+  - Pending ACK management for AckAll writes
+  - Event emission for state changes
+  
+- **ISR Manager** (`internal/cluster/isr_manager.go` ~350 lines):
+  - Combined criteria: time-based (10s) AND offset-based (1000 messages)
+  - Per-follower progress tracking
+  - Automatic shrink/expand detection
+  - High watermark calculation
+
+- **Follower Fetcher** (`internal/cluster/follower_fetcher.go` ~470 lines):
+  - Background fetch loop (500ms interval)
+  - Exponential backoff on errors
+  - Snapshot triggering when too far behind
+  - Statistics collection
+  
+- **Snapshot Manager** (`internal/cluster/snapshot_manager.go` ~540 lines):
+  - Tar+gzip snapshot creation
+  - SHA256 checksum verification
+  - Snapshot loading and extraction
+  - Cleanup of old snapshots
+  
+- **Partition Leader Elector** (`internal/cluster/partition_leader_elector.go` ~300 lines):
+  - Clean election (ISR-only candidates)
+  - Unclean election (configurable, default disabled)
+  - Preferred leader election
+  - Offset-start round-robin for initial assignment
+  
+- **Replication Server** (`internal/cluster/replication_server.go` ~650 lines):
+  - POST /cluster/fetch - Follower fetch requests
+  - POST /cluster/snapshot/create - Snapshot creation
+  - GET /cluster/snapshot/{topic}/{partition}/{offset} - Download
+  - POST /cluster/isr - ISR updates
+  - POST /cluster/leader-election - Election requests
+  - GET /cluster/partition/{topic}/{partition}/info - Partition info
+  
+- **Replication Client** (`internal/cluster/replication_client.go` ~430 lines):
+  - HTTP client for followers
+  - Fetch, snapshot, ISR reporting
+  - Controller address resolution
+  
+- **Broker Integration** (`internal/broker/replication_integration.go` ~500 lines):
+  - ReplicationCoordinator wrapper
+  - Replica initialization
+  - ISR checker background loop
+  - Message application from fetches
+
+**Key Concepts Implemented:**
+
+```
+PULL-BASED REPLICATION (like Kafka):
+┌──────────────┐                    ┌──────────────┐
+│    Leader    │◄───── Fetch ───────│   Follower   │
+│              │                    │              │
+│  LEO: 1000   │─── FetchResponse ─►│  LEO: 950    │
+│  HW:  900    │   (msgs 950-999)   │  HW:  900    │
+└──────────────┘                    └──────────────┘
+          │
+          │ Every 500ms, follower pulls
+          │ Leader tracks follower progress
+          │ ISR = followers within lag threshold
+          ▼
+     High Watermark = min(LEO of all ISR)
+
+ISR SHRINK CRITERIA (Combined):
+┌────────────────────────────────────────────────────────┐
+│ Remove from ISR if BOTH conditions are true:           │
+│                                                        │
+│   1. Last fetch > 10 seconds ago (ISRLagTimeMaxMs)     │
+│   2. Offset lag > 1000 messages (ISRLagMaxMessages)    │
+│                                                        │
+│ This prevents:                                         │
+│   - Flapping ISR during bursty workloads               │
+│   - Slow followers dragging down the group             │
+└────────────────────────────────────────────────────────┘
+
+SNAPSHOT-BASED CATCH-UP:
+┌────────────────────────────────────────────────────────┐
+│ If follower is > 10,000 messages behind:               │
+│                                                        │
+│   1. Request snapshot from leader                      │
+│   2. Download tar.gz of log segments                   │
+│   3. Verify SHA256 checksum                            │
+│   4. Extract and replace local log                     │
+│   5. Resume normal fetching                            │
+│                                                        │
+│ Much faster than fetching 10K+ messages one by one     │
+└────────────────────────────────────────────────────────┘
+```
+
+**Configuration:**
+```go
+ReplicationConfig{
+    FetchIntervalMs:           500,          // Follower fetch frequency
+    FetchMaxBytes:             1024*1024,    // 1MB per fetch
+    FetchTimeoutMs:            5000,         // HTTP timeout
+    ISRLagTimeMaxMs:           10000,        // 10s time threshold
+    ISRLagMaxMessages:         1000,         // Offset threshold
+    MinInSyncReplicas:         1,            // Min ISR for writes
+    UncleanLeaderElection:     false,        // Prefer consistency
+    LeaderFollowerReadEnabled: false,        // Read from leader only
+    SnapshotEnabled:           true,         // Fast catch-up
+    SnapshotThresholdMessages: 10000,        // Trigger snapshot threshold
+    AckTimeoutMs:              5000,         // AckAll wait time
+}
+```
 
 ---
 
