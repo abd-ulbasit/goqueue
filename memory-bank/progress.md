@@ -3,8 +3,8 @@
 ## Overall Status
 
 **Phase**: 3 of 4
-**Milestones**: 10/18 complete
-**Tests**: 240+ passing (storage: 50, broker: 145+, api: 24, cluster: 20+)
+**Milestones**: 12/18 complete
+**Tests**: 260+ passing (storage: 50, broker: 170+, api: 24, cluster: 20+)
 **Started**: Session 1
 
 ## Phase Progress
@@ -22,21 +22,57 @@
 - [x] Milestone 8: Schema Registry ✅
 - [x] Milestone 9: Transactional Publish ✅ ⭐
 
-### Phase 3: Distribution (1/4) 🔄
+### Phase 3: Distribution (3/4) 🔄
 - [x] Milestone 10: Cluster Formation & Metadata ✅ ⭐
-- [ ] Milestone 11: Leader Election & Replication
-- [ ] Milestone 12: Cooperative Rebalancing ⭐
+- [x] Milestone 11: Leader Election & Replication ✅ 
+- [x] Milestone 12: Cooperative Rebalancing ✅ ⭐
 - [ ] Milestone 13: Online Partition Scaling
 
+## Up Next – Milestone 13 (Online Partition Scaling + Coordinators on Internal Offsets Topic)
+
+- **Objective**: Finish distribution phase by (a) enabling online partition scaling/reassignment without downtime and (b) making the consumer group coordinator fault-tolerant via the same replication path other components use.
+- **Coordinator Replication Approach (new for M13)**
+  - Introduce an internal system topic `__consumer_offsets` (partitioned + replicated) using the existing log/replication pipeline—no new storage path.
+  - Group-to-partition mapping: `partition = hash(groupID) % numOffsetsPartitions`; the leader of that partition is the **group coordinator** for those groups.
+  - Coordinator state durability: commit group metadata/offset updates into `__consumer_offsets` so followers can replay and take over on failover.
+  - Failover: standard ISR election already in place for partitions → coordinator moves with the partition leader, no bespoke election path.
+  - API compatibility: keep current HTTP surface; coordinator implementation hidden behind an interface (eager vs cooperative strategies share the same replicated backbone).
+- **Refactors & Interfaces**
+  - Define `GroupCoordinator` interface; provide `EagerCoordinator` and `CooperativeCoordinator` implementations using a shared persistence layer (offsets topic).
+  - Remove dual-coordinator wrapper; pick strategy per-group/protocol via the interface, routed through the partition-backed coordinator.
+- **Online Partition Scaling deliverables**
+  - Partition reassignment workflow (plan/apply) with controlled leader moves.
+  - Data movement via follower promotion + catch-up; minimize client impact.
+  - Safety checks: throttle reassignments, ensure ISR quorum before moves, metrics around movement progress.
+
+
 ### Phase 4: Operations (0/6)
+- [ ] Pre-operations: thourough testing & benchmarking
 - [ ] Milestone 14: gRPC API & Go Client (js/ts as well if time)
 - [ ] Milestone 15: CLI Tool
 - [ ] Milestone 16: Prometheus Metrics & Grafana
 - [ ] Milestone 17: Multi-Tenancy & Quotas
 - [ ] Milestone 18: Kubernetes & Chaos Testing
 - [ ] Milestone 19: Final Review & Documentation with Examples and Comparison to Alternatives
+- [ ] Milestone 20: Buffer Pooling & Performance Tuning
+- [ ] Milestone 21: Security - TLS, Auth, RBAC
+- [ ] Milestone 22: Backup & Restore
+- [ ] Milestone 23: Monitoring & Alerting
+- [ ] Milestone 24: Production Hardening & Best Practices
+- [ ] Milestone 25: Release Process & CI/CD
 
 ## What Works
+
+### Milestone 12 - Cooperative Rebalancing ✅ ⭐ (Just Completed!)
+- **Cooperative protocol** implementing Kafka's KIP-429 for zero-downtime rebalances
+- **Three assignors**: Sticky (default), Range, Round-Robin
+- **Two-phase protocol**: pending_revoke → pending_assign → complete
+- **Sticky assignment**: MaxImbalance=1 to minimize partition movement
+- **Revocation tracking**: 60s timeout with force-complete fallback
+- **Heartbeat integration**: Rebalance state communicated via heartbeat response
+- **Rebalance metrics**: Duration, partition moves, timeouts by reason
+- **HTTP API**: 8 new endpoints for cooperative operations
+- **Assignment diff**: Calculate precise revocations and assignments
 
 ### Milestone 1 - Storage Engine ✅
 - **Binary message encoding** with CRC32 Castagnoli checksums
