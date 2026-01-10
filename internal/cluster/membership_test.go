@@ -3,6 +3,7 @@ package cluster
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -296,10 +297,13 @@ func TestMembership_EventListener(t *testing.T) {
 	membership := NewMembership(node, config, tmpDir)
 	membership.RegisterSelf()
 
-	// Track events
+	// Track events with synchronization (events are delivered asynchronously)
+	var eventsMu sync.Mutex
 	events := make([]MembershipEventType, 0)
 	membership.AddListener(func(event MembershipEvent) {
+		eventsMu.Lock()
 		events = append(events, event.Type)
+		eventsMu.Unlock()
 	})
 
 	// Trigger events
@@ -312,14 +316,22 @@ func TestMembership_EventListener(t *testing.T) {
 	})
 	membership.RemoveNode("node2", true)
 
+	// Give async event delivery time to complete
+	time.Sleep(50 * time.Millisecond)
+
 	// Verify events
-	if len(events) < 2 {
-		t.Errorf("expected at least 2 events, got %d", len(events))
+	eventsMu.Lock()
+	eventsCopy := make([]MembershipEventType, len(events))
+	copy(eventsCopy, events)
+	eventsMu.Unlock()
+
+	if len(eventsCopy) < 2 {
+		t.Errorf("expected at least 2 events, got %d", len(eventsCopy))
 	}
 
 	foundJoin := false
 	foundLeave := false
-	for _, e := range events {
+	for _, e := range eventsCopy {
 		if e == EventNodeJoined {
 			foundJoin = true
 		}

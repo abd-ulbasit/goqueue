@@ -3,9 +3,24 @@
 ## Overall Status
 
 **Phase**: 3 of 4
-**Milestones**: 13/18 complete
-**Tests**: 290+ passing (storage: 50, broker: 200+, api: 24, cluster: 20+)
+**Milestones**: 14/18 complete
+**Tests**: 590+ passing (storage: 50+, broker: 450+, api: 24, cluster: 50+)
 **Started**: Session 1
+
+## Critical Issues Fixed (2026-01-11)
+
+### Category 1 - All Fixed ✅
+1. **M5+M6 Integration** - Added `PublishWithDelayAndPriority` and `PublishAtWithPriority` methods
+2. **Delay Filtering** - Was already implemented (stale TODO removed)
+3. **Transaction Abort Retry** - Added `abortTransactionWithRetry` with exponential backoff
+4. **OTLP/Jaeger** - Replaced stubs with official OpenTelemetry SDK implementation
+
+### Race Condition Fixes (2026-01-11)
+1. **GetNode Data Race** - `ClusterState.GetNode()` now returns a clone to prevent races
+2. **Event Listener Race** - `TestMembership_EventListener` now uses mutex for event tracking
+
+### Category 2+3 - Milestone Created
+- See [M15-performance-cluster-optimizations.md](tasks/M15-performance-cluster-optimizations.md)
 
 ## Phase Progress
 
@@ -22,7 +37,7 @@
 - [x] Milestone 8: Schema Registry ✅
 - [x] Milestone 9: Transactional Publish ✅ ⭐
 
-### Phase 3: Distribution (4/4) ✅
+### Phase 3: Distribution (5/5) ✅
 - [x] Milestone 10: Cluster Formation & Metadata ✅ ⭐
 - [x] Milestone 11: Leader Election & Replication ✅ 
 - [x] Milestone 12: Cooperative Rebalancing ✅ ⭐
@@ -30,7 +45,6 @@
 - [x] Milestone 14: Log Compaction, Snapshots & Time Index ⭐ 
 
 ### Phase 4: Operations (0/12)
-- [ ] Pre-operations: thorough testing & benchmarking
 - [ ] Milestone 15: gRPC API & Go Client (js/ts as well if time)
 - [ ] Milestone 16: CLI Tool
 - [ ] Milestone 17: Prometheus Metrics & Grafana

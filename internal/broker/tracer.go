@@ -101,11 +101,21 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
 	"sync"
 	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
+	"go.opentelemetry.io/otel/sdk/resource"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 // =============================================================================
@@ -924,11 +934,18 @@ func (e *FileExporter) Name() string {
 //
 // OTLP is the standard protocol for OpenTelemetry. It allows goqueue to send
 // traces to any OTLP-compatible backend:
-//   - Jaeger (with OTLP collector)
+//   - Jaeger (with OTLP collector, v1.35+)
 //   - Grafana Tempo
 //   - Honeycomb
 //   - Datadog
 //   - New Relic
+//
+// WHY OTLP?
+//   OTLP has become the universal tracing protocol. The old Jaeger-specific
+//   exporter is deprecated in favor of OTLP because:
+//   1. Jaeger natively supports OTLP since v1.35
+//   2. One exporter works with all backends
+//   3. Better maintained by OpenTelemetry community
 //
 // PRODUCTION SETUP:
 //
@@ -937,8 +954,9 @@ func (e *FileExporter) Name() string {
 //        docker run -d --name jaeger \
 //          -p 16686:16686 \
 //          -p 4317:4317 \
+//          -p 4318:4318 \
 //          jaegertracing/all-in-one:latest
-//     2. Configure goqueue: endpoint = "localhost:4317"
+//     2. Configure goqueue: endpoint = "localhost:4317" (gRPC) or "localhost:4318" (HTTP)
 //     3. View traces at http://localhost:16686
 //
 //   PRODUCTION (Kubernetes):
@@ -950,12 +968,22 @@ func (e *FileExporter) Name() string {
 //     1. Get endpoint from your cloud provider
 //     2. Configure goqueue with endpoint and auth headers
 //
+// PROTOCOL CHOICE:
+//   - gRPC (port 4317): Lower latency, better for high-volume
+//   - HTTP (port 4318): Easier firewall traversal, works through proxies
+//
 // =============================================================================
 
 // OTLPExporterConfig configures the OTLP exporter.
 type OTLPExporterConfig struct {
-	// Endpoint is the OTLP collector address (e.g., "localhost:4317")
+	// Endpoint is the OTLP collector address
+	// For gRPC: "localhost:4317" (default)
+	// For HTTP: "localhost:4318"
 	Endpoint string
+
+	// UseHTTP uses HTTP protocol instead of gRPC
+	// Default false (uses gRPC)
+	UseHTTP bool
 
 	// Insecure disables TLS (for local development)
 	Insecure bool
@@ -977,6 +1005,7 @@ type OTLPExporterConfig struct {
 func DefaultOTLPExporterConfig() OTLPExporterConfig {
 	return OTLPExporterConfig{
 		Endpoint:      "localhost:4317",
+		UseHTTP:       false,
 		Insecure:      true,
 		ServiceName:   "goqueue",
 		BatchSize:     100,
@@ -984,19 +1013,33 @@ func DefaultOTLPExporterConfig() OTLPExporterConfig {
 	}
 }
 
-// OTLPExporter sends traces via OTLP protocol.
-// NOTE: This is a simplified implementation. For production, use the official
-// TODO: use that package after we are done with all the milestones.
-// go.opentelemetry.io/otel/exporters/otlp/otlptrace package.
+// OTLPExporter sends traces via OTLP protocol using the official OpenTelemetry SDK.
+//
+// ARCHITECTURE:
+//
+//	goqueue Span ──► convert ──► OTEL ReadOnlySpan ──► OTLP Exporter ──► Collector
+//	                                                         │
+//	                                                  ┌──────┴──────┐
+//	                                                  │             │
+//	                                                gRPC          HTTP
+//	                                               (4317)        (4318)
+//
+// The exporter maintains an internal batch and flushes either:
+//   - When batch reaches BatchSize
+//   - Every FlushInterval
+//   - On Shutdown (final flush)
 type OTLPExporter struct {
-	config  OTLPExporterConfig
-	batch   []*Span
-	mu      sync.Mutex
-	done    chan struct{}
-	enabled bool
+	config      OTLPExporterConfig
+	sdkExporter sdktrace.SpanExporter // Official OTEL exporter
+	batch       []*Span
+	mu          sync.Mutex
+	done        chan struct{}
+	enabled     bool
+	logger      *slog.Logger
+	initErr     error // Stored if initialization failed
 }
 
-// NewOTLPExporter creates an OTLP exporter.
+// NewOTLPExporter creates an OTLP exporter using the official OpenTelemetry SDK.
 //
 // PRODUCTION USAGE:
 //
@@ -1008,19 +1051,86 @@ type OTLPExporter struct {
 //	    },
 //	}
 //	exporter, err := broker.NewOTLPExporter(config)
+//
+// EXAMPLE WITH HTTP (for environments that block gRPC):
+//
+//	config := broker.OTLPExporterConfig{
+//	    Endpoint: "localhost:4318",
+//	    UseHTTP:  true,
+//	    Insecure: true,
+//	}
 func NewOTLPExporter(config OTLPExporterConfig) *OTLPExporter {
 	e := &OTLPExporter{
 		config:  config,
 		batch:   make([]*Span, 0, config.BatchSize),
 		done:    make(chan struct{}),
 		enabled: config.Endpoint != "",
+		logger:  slog.Default().With("component", "otlp_exporter"),
 	}
 
-	if e.enabled {
-		go e.flushLoop()
+	if !e.enabled {
+		return e
 	}
+
+	// Initialize the official OTEL exporter
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var err error
+	if config.UseHTTP {
+		e.sdkExporter, err = e.createHTTPExporter(ctx)
+	} else {
+		e.sdkExporter, err = e.createGRPCExporter(ctx)
+	}
+
+	if err != nil {
+		e.initErr = fmt.Errorf("failed to create OTLP exporter: %w", err)
+		e.logger.Error("failed to initialize OTLP exporter", "error", err)
+		e.enabled = false
+		return e
+	}
+
+	go e.flushLoop()
+	e.logger.Info("OTLP exporter initialized",
+		"endpoint", config.Endpoint,
+		"protocol", map[bool]string{true: "HTTP", false: "gRPC"}[config.UseHTTP])
 
 	return e
+}
+
+// createGRPCExporter creates the gRPC-based OTLP exporter.
+func (e *OTLPExporter) createGRPCExporter(ctx context.Context) (sdktrace.SpanExporter, error) {
+	opts := []otlptracegrpc.Option{
+		otlptracegrpc.WithEndpoint(e.config.Endpoint),
+	}
+
+	if e.config.Insecure {
+		opts = append(opts, otlptracegrpc.WithDialOption(grpc.WithTransportCredentials(insecure.NewCredentials())))
+		opts = append(opts, otlptracegrpc.WithInsecure())
+	}
+
+	if len(e.config.Headers) > 0 {
+		opts = append(opts, otlptracegrpc.WithHeaders(e.config.Headers))
+	}
+
+	return otlptracegrpc.New(ctx, opts...)
+}
+
+// createHTTPExporter creates the HTTP-based OTLP exporter.
+func (e *OTLPExporter) createHTTPExporter(ctx context.Context) (sdktrace.SpanExporter, error) {
+	opts := []otlptracehttp.Option{
+		otlptracehttp.WithEndpoint(e.config.Endpoint),
+	}
+
+	if e.config.Insecure {
+		opts = append(opts, otlptracehttp.WithInsecure())
+	}
+
+	if len(e.config.Headers) > 0 {
+		opts = append(opts, otlptracehttp.WithHeaders(e.config.Headers))
+	}
+
+	return otlptracehttp.New(ctx, opts...)
 }
 
 func (e *OTLPExporter) flushLoop() {
@@ -1049,25 +1159,109 @@ func (e *OTLPExporter) flush() {
 	e.batch = make([]*Span, 0, e.config.BatchSize)
 	e.mu.Unlock()
 
-	// Convert to OTLP format and send
-	// In production, this would use gRPC to send to the collector
 	e.sendOTLP(spans)
 }
 
-// sendOTLP converts spans to OTLP format and sends to collector.
-// This is a stub - real implementation would use gRPC.
+// sendOTLP converts goqueue spans to OTEL format and sends via the SDK exporter.
+//
+// IMPLEMENTATION STRATEGY:
+// The OTEL SDK's ReadOnlySpan interface has a private() method that prevents
+// external implementation. Instead of fighting the SDK, we use the proper approach:
+//
+// 1. Create a TracerProvider with our exporter
+// 2. Start spans using the SDK's Tracer
+// 3. End spans immediately with our data
+//
+// This approach:
+//   - Works correctly with the SDK
+//   - Produces valid OTLP spans
+//   - Maintains W3C trace context compatibility
+//
+// CONVERSION FLOW:
+//
+//	goqueue.Span ──► SDK Tracer.Start() ──► SDK Span.End() ──► Exporter
 func (e *OTLPExporter) sendOTLP(spans []*Span) {
-	// TODO: Implement actual OTLP protocol
-	// For now, this is a placeholder for the OTLP wire format
-	//
-	// The real implementation would:
-	// 1. Convert spans to protobuf format
-	// 2. Create a TraceService.Export request
-	// 3. Send via gRPC to e.config.Endpoint
-	//
-	// Example using official SDK:
-	//   import "go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
-	//   exporter, _ := otlptracegrpc.New(ctx, otlptracegrpc.WithEndpoint(endpoint))
+	if e.sdkExporter == nil || len(spans) == 0 {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Create a TracerProvider with our exporter for this batch
+	// We use a simple span processor that exports immediately
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithSyncer(e.sdkExporter),
+		sdktrace.WithResource(resource.NewSchemaless(
+			attribute.String("service.name", e.config.ServiceName),
+		)),
+	)
+	defer tp.Shutdown(ctx)
+
+	tracer := tp.Tracer("goqueue")
+
+	for _, span := range spans {
+		// Convert goqueue TraceID/SpanID to OTEL format
+		var otelTraceID trace.TraceID
+		var otelSpanID trace.SpanID
+		copy(otelTraceID[:], span.TraceID[:])
+		copy(otelSpanID[:], span.SpanID[:])
+
+		// Create span context with our IDs
+		spanCtx := trace.NewSpanContext(trace.SpanContextConfig{
+			TraceID:    otelTraceID,
+			SpanID:     otelSpanID,
+			TraceFlags: trace.FlagsSampled,
+		})
+
+		// Start time from nanoseconds
+		startTime := time.Unix(0, span.Timestamp)
+		endTime := startTime
+		if span.Duration > 0 {
+			endTime = startTime.Add(time.Duration(span.Duration))
+		}
+
+		// Build attributes from span fields
+		attrs := []attribute.KeyValue{
+			attribute.String("messaging.system", "goqueue"),
+			attribute.String("messaging.destination.name", span.Topic),
+			attribute.Int("messaging.destination.partition.id", span.Partition),
+			attribute.Int64("messaging.message.id", span.Offset),
+			attribute.String("goqueue.event_type", string(span.EventType)),
+		}
+
+		// Add optional attributes
+		if span.ConsumerGroup != "" {
+			attrs = append(attrs, attribute.String("messaging.consumer.group.id", span.ConsumerGroup))
+		}
+		if span.ConsumerID != "" {
+			attrs = append(attrs, attribute.String("messaging.consumer.id", span.ConsumerID))
+		}
+		if span.Priority > 0 {
+			attrs = append(attrs, attribute.Int("goqueue.priority", int(span.Priority)))
+		}
+		if span.DeliverAt > 0 {
+			attrs = append(attrs, attribute.Int64("goqueue.deliver_at", span.DeliverAt))
+		}
+		if span.Error != "" {
+			attrs = append(attrs, attribute.String("error.message", span.Error))
+		}
+
+		// Add custom attributes
+		for k, v := range span.Attributes {
+			attrs = append(attrs, attribute.String(k, v))
+		}
+
+		// Start the span with parent context containing our trace/span IDs
+		parentCtx := trace.ContextWithSpanContext(ctx, spanCtx)
+		_, otelSpan := tracer.Start(parentCtx, string(span.EventType),
+			trace.WithTimestamp(startTime),
+			trace.WithAttributes(attrs...),
+		)
+
+		// End the span immediately with the end time
+		otelSpan.End(trace.WithTimestamp(endTime))
+	}
 }
 
 func (e *OTLPExporter) Export(ctx context.Context, span *Span) error {
@@ -1081,7 +1275,7 @@ func (e *OTLPExporter) Export(ctx context.Context, span *Span) error {
 	e.batch = append(e.batch, span)
 
 	if len(e.batch) >= e.config.BatchSize {
-		// Trigger immediate flush
+		// Trigger immediate flush in background
 		go e.flush()
 	}
 
@@ -1100,6 +1294,9 @@ func (e *OTLPExporter) ExportBatch(ctx context.Context, spans []*Span) error {
 func (e *OTLPExporter) Shutdown(ctx context.Context) error {
 	if e.enabled {
 		close(e.done)
+		if e.sdkExporter != nil {
+			return e.sdkExporter.Shutdown(ctx)
+		}
 	}
 	return nil
 }
@@ -1109,69 +1306,107 @@ func (e *OTLPExporter) Name() string {
 }
 
 // =============================================================================
-// JAEGER EXPORTER (DIRECT THRIFT)
+// JAEGER EXPORTER (OTLP-BASED)
 // =============================================================================
 //
-// Jaeger Thrift exporter sends traces directly to Jaeger using Thrift protocol.
-// This is useful when you don't want to run an OTLP collector.
+// NOTE ON DEPRECATION:
+// The direct Jaeger Thrift exporter (go.opentelemetry.io/otel/exporters/jaeger)
+// is DEPRECATED. Jaeger has natively supported OTLP since v1.35 (January 2023).
 //
-// PRODUCTION SETUP:
+// RECOMMENDED APPROACH:
+// Use the OTLPExporter to send to Jaeger. This is:
+//   - More maintainable (one protocol to support)
+//   - Future-proof (Jaeger is moving away from Thrift)
+//   - Works with all OTLP-compatible backends
 //
-//   LOCAL TESTING:
-//     1. Run Jaeger:
-//        docker run -d --name jaeger \
-//          -p 16686:16686 \
-//          -p 6831:6831/udp \
-//          -p 14268:14268 \
-//          jaegertracing/all-in-one:latest
-//     2. Configure goqueue: endpoint = "localhost:14268"
-//     3. View traces at http://localhost:16686
+// MIGRATION PATH:
+//   OLD: JaegerExporter → Jaeger Collector (Thrift port 14268)
+//   NEW: OTLPExporter  → Jaeger Collector (OTLP port 4317)
 //
-//   PRODUCTION:
-//     - Use OTLP instead (more flexible)
-//     - Or configure Jaeger collector endpoint with auth
+// For backward compatibility, JaegerExporter now wraps OTLPExporter
+// with Jaeger-specific defaults.
+//
+// DOCKER COMMAND (Jaeger with OTLP):
+//   docker run -d --name jaeger \
+//     -p 16686:16686 \
+//     -p 4317:4317 \
+//     -p 4318:4318 \
+//     jaegertracing/all-in-one:latest
 //
 // =============================================================================
 
 // JaegerExporterConfig configures the Jaeger exporter.
 type JaegerExporterConfig struct {
-	// Endpoint is the Jaeger collector HTTP endpoint (e.g., "http://localhost:14268/api/traces")
+	// Endpoint is the Jaeger OTLP endpoint (e.g., "localhost:4317")
+	// For legacy Thrift, use OTLPEndpoint instead
 	Endpoint string
 
-	// AgentHost for UDP spans (e.g., "localhost")
-	AgentHost string
+	// OTLPEndpoint is the OTLP gRPC endpoint (preferred over Endpoint)
+	// If set, takes precedence over Endpoint
+	OTLPEndpoint string
 
-	// AgentPort for UDP spans (default 6831)
-	AgentPort int
+	// UseHTTP uses HTTP protocol instead of gRPC
+	UseHTTP bool
+
+	// Insecure disables TLS (for local development)
+	Insecure bool
 
 	// ServiceName identifies this service
 	ServiceName string
 
-	// Tags added to all spans
+	// Tags added to all spans (converted to OTEL attributes)
 	Tags map[string]string
 }
 
-// DefaultJaegerExporterConfig returns sensible defaults.
+// DefaultJaegerExporterConfig returns sensible defaults for OTLP-based Jaeger.
 func DefaultJaegerExporterConfig() JaegerExporterConfig {
 	return JaegerExporterConfig{
-		Endpoint:    "http://localhost:14268/api/traces",
-		AgentHost:   "localhost",
-		AgentPort:   6831,
+		Endpoint:    "localhost:4317",
+		Insecure:    true,
 		ServiceName: "goqueue",
 	}
 }
 
-// JaegerExporter sends traces directly to Jaeger.
+// JaegerExporter sends traces to Jaeger via OTLP protocol.
+//
+// IMPLEMENTATION NOTE:
+// This is now a thin wrapper around OTLPExporter. The Jaeger-specific
+// Thrift protocol is deprecated in favor of the standard OTLP protocol
+// which Jaeger supports natively since v1.35.
 type JaegerExporter struct {
-	config  JaegerExporterConfig
-	enabled bool
+	otlpExporter *OTLPExporter
+	config       JaegerExporterConfig
+	enabled      bool
 }
 
-// NewJaegerExporter creates a Jaeger exporter.
+// NewJaegerExporter creates a Jaeger exporter using OTLP protocol.
+//
+// EXAMPLE:
+//
+//	config := broker.DefaultJaegerExporterConfig()
+//	config.Endpoint = "jaeger.monitoring:4317"
+//	exporter := broker.NewJaegerExporter(config)
 func NewJaegerExporter(config JaegerExporterConfig) *JaegerExporter {
+	endpoint := config.Endpoint
+	if config.OTLPEndpoint != "" {
+		endpoint = config.OTLPEndpoint
+	}
+
+	// Convert Jaeger config to OTLP config
+	otlpConfig := OTLPExporterConfig{
+		Endpoint:      endpoint,
+		UseHTTP:       config.UseHTTP,
+		Insecure:      config.Insecure,
+		ServiceName:   config.ServiceName,
+		Headers:       config.Tags, // Jaeger tags become OTLP headers
+		BatchSize:     100,
+		FlushInterval: 5 * time.Second,
+	}
+
 	return &JaegerExporter{
-		config:  config,
-		enabled: config.Endpoint != "" || config.AgentHost != "",
+		otlpExporter: NewOTLPExporter(otlpConfig),
+		config:       config,
+		enabled:      endpoint != "",
 	}
 }
 
@@ -1179,30 +1414,17 @@ func (e *JaegerExporter) Export(ctx context.Context, span *Span) error {
 	if !e.enabled {
 		return nil
 	}
-
-	// TODO: Implement Jaeger Thrift protocol
-	// The real implementation would:
-	// 1. Convert span to Jaeger Thrift format
-	// 2. Send via HTTP POST to collector endpoint
-	//    OR via UDP to agent
-	//
-	// Example using official SDK:
-	//   import "go.opentelemetry.io/otel/exporters/jaeger"
-	//   exporter, _ := jaeger.New(jaeger.WithCollectorEndpoint(jaeger.WithEndpoint(endpoint)))
-
-	return nil
+	return e.otlpExporter.Export(ctx, span)
 }
 
 func (e *JaegerExporter) ExportBatch(ctx context.Context, spans []*Span) error {
-	for _, span := range spans {
-		if err := e.Export(ctx, span); err != nil {
-			return err
-		}
-	}
-	return nil
+	return e.otlpExporter.ExportBatch(ctx, spans)
 }
 
 func (e *JaegerExporter) Shutdown(ctx context.Context) error {
+	if e.otlpExporter != nil {
+		return e.otlpExporter.Shutdown(ctx)
+	}
 	return nil
 }
 
@@ -1331,7 +1553,8 @@ func NewTracer(config TracerConfig) (*Tracer, error) {
 		t.exporters = append(t.exporters, NewOTLPExporter(*config.OTLPConfig))
 	}
 
-	if config.JaegerConfig != nil && (config.JaegerConfig.Endpoint != "" || config.JaegerConfig.AgentHost != "") {
+	// Jaeger now uses OTLP protocol, so only need to check Endpoint
+	if config.JaegerConfig != nil && config.JaegerConfig.Endpoint != "" {
 		t.exporters = append(t.exporters, NewJaegerExporter(*config.JaegerConfig))
 	}
 

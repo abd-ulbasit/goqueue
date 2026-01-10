@@ -889,3 +889,51 @@ func BenchmarkInitProducerId(b *testing.B) {
 		coord.InitProducerId(txnId, 60000)
 	}
 }
+
+// =============================================================================
+// ABORT RETRY TESTS
+// =============================================================================
+//
+// These tests verify that when a transaction commit fails, the coordinator
+// attempts to abort with retry logic to clean up properly.
+//
+// =============================================================================
+
+func TestAbortTransactionWithRetry_SuccessOnFirstAttempt(t *testing.T) {
+	coord, mockBroker, cleanup := testTransactionCoordinator(t)
+	defer cleanup()
+
+	// Add mock topic
+	mockBroker.addMockTopic("orders", 3)
+
+	// Initialize and begin transaction
+	pid, _ := coord.InitProducerId("retry-producer", 60000)
+	txnId, err := coord.BeginTransaction("retry-producer", pid)
+	if err != nil {
+		t.Fatalf("BeginTransaction failed: %v", err)
+	}
+
+	// Add partition
+	err = coord.AddPartitionToTransaction("retry-producer", pid, "orders", 1)
+	if err != nil {
+		t.Fatalf("AddPartitionToTransaction failed: %v", err)
+	}
+
+	// Call abortTransactionWithRetry directly (this is called when commit fails)
+	err = coord.abortTransactionWithRetry("retry-producer", txnId, pid)
+	if err != nil {
+		t.Fatalf("abortTransactionWithRetry failed: %v", err)
+	}
+
+	// Verify abort control record was written
+	if len(mockBroker.controlRecords) != 1 {
+		t.Errorf("expected 1 control record, got %d", len(mockBroker.controlRecords))
+	}
+
+	if len(mockBroker.controlRecords) > 0 {
+		record := mockBroker.controlRecords[0]
+		if record.isCommit {
+			t.Error("expected abort control record, got commit")
+		}
+	}
+}
