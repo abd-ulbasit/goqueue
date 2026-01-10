@@ -112,8 +112,9 @@ var (
 // STRUCTURE ON DISK:
 //
 //	data/logs/{topic}/{partition}/
-//	  00000000000000000000.log      <- Segment file (messages)
-//	  00000000000000000000.index    <- Index file (offset → position)
+//	  00000000000000000000.log        <- Segment file (messages)
+//	  00000000000000000000.index      <- Index file (offset → position)
+//	  00000000000000000000.timeindex  <- Time index file (timestamp → offset)
 //
 // THREAD SAFETY:
 //   - Write operations are serialized (single writer)
@@ -145,6 +146,10 @@ type Segment struct {
 
 	// index provides offset→position lookup
 	index *Index
+
+	// timeIndex provides timestamp→offset lookup (Milestone 14)
+	// Enables queries like "get messages from yesterday 3pm"
+	timeIndex *TimeIndex
 
 	// mu protects concurrent access
 	mu sync.RWMutex
@@ -187,8 +192,9 @@ func IndexFileName(baseOffset int64) string {
 //   - baseOffset: First offset in this segment
 //
 // CREATES:
-//   - {dir}/{baseOffset}.log   - The segment data file
-//   - {dir}/{baseOffset}.index - The index file
+//   - {dir}/{baseOffset}.log        - The segment data file
+//   - {dir}/{baseOffset}.index      - The index file
+//   - {dir}/{baseOffset}.timeindex  - The time index file
 func NewSegment(dir string, baseOffset int64) (*Segment, error) {
 	// Ensure directory exists
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -210,6 +216,15 @@ func NewSegment(dir string, baseOffset int64) (*Segment, error) {
 		return nil, fmt.Errorf("failed to create index: %w", err)
 	}
 
+	// Create time index (Milestone 14)
+	timeIndexPath := filepath.Join(dir, TimeIndexFileName(baseOffset))
+	timeIndex, err := NewTimeIndex(timeIndexPath, baseOffset)
+	if err != nil {
+		file.Close()
+		index.Close()
+		return nil, fmt.Errorf("failed to create time index: %w", err)
+	}
+
 	return &Segment{
 		baseOffset:      baseOffset,
 		currentOffset:   baseOffset,
@@ -217,6 +232,7 @@ func NewSegment(dir string, baseOffset int64) (*Segment, error) {
 		file:            file,
 		writer:          bufio.NewWriter(file),
 		index:           index,
+		timeIndex:       timeIndex,
 		path:            dir,
 		lastSync:        time.Now(),
 		syncInterval:    DefaultSyncInterval,
@@ -254,11 +270,22 @@ func LoadSegment(dir string, baseOffset int64) (*Segment, error) {
 		return rebuildSegment(dir, baseOffset)
 	}
 
+	// Load time index (Milestone 14)
+	timeIndexPath := filepath.Join(dir, TimeIndexFileName(baseOffset))
+	timeIndex, err := LoadTimeIndex(timeIndexPath, baseOffset)
+	if err != nil {
+		// Time index might be missing or corrupted - try to rebuild
+		file.Close()
+		index.Close()
+		return rebuildSegment(dir, baseOffset)
+	}
+
 	// Scan log to find actual position and offset
 	currentOffset, currentPosition, err := scanLogToEnd(file, baseOffset)
 	if err != nil {
 		file.Close()
 		index.Close()
+		timeIndex.Close()
 		// Try rebuild if scan fails
 		return rebuildSegment(dir, baseOffset)
 	}
@@ -269,6 +296,7 @@ func LoadSegment(dir string, baseOffset int64) (*Segment, error) {
 		if err := file.Truncate(currentPosition); err != nil {
 			file.Close()
 			index.Close()
+			timeIndex.Close()
 			return nil, fmt.Errorf("failed to truncate segment: %w", err)
 		}
 	}
@@ -277,6 +305,7 @@ func LoadSegment(dir string, baseOffset int64) (*Segment, error) {
 	if _, err := file.Seek(0, io.SeekEnd); err != nil {
 		file.Close()
 		index.Close()
+		timeIndex.Close()
 		return nil, fmt.Errorf("failed to seek to end: %w", err)
 	}
 
@@ -287,6 +316,7 @@ func LoadSegment(dir string, baseOffset int64) (*Segment, error) {
 		file:            file,
 		writer:          bufio.NewWriter(file),
 		index:           index,
+		timeIndex:       timeIndex,
 		path:            dir,
 		lastSync:        time.Now(),
 		syncInterval:    DefaultSyncInterval,
@@ -330,13 +360,14 @@ func scanLogToEnd(file *os.File, baseOffset int64) (nextOffset int64, position i
 		}
 
 		// Extract lengths to know message size
-		// Header layout: KeyLen at [26:28], ValueLen at [28:32]
+		// Header layout: KeyLen at [26:28], ValueLen at [28:32], HeadersLen at [32:34]
 		keyLen := binary.BigEndian.Uint16(header[26:28])
 		valueLen := binary.BigEndian.Uint32(header[28:32])
-		bodySize := int64(keyLen) + int64(valueLen)
+		headersLen := binary.BigEndian.Uint16(header[32:34])
+		bodySize := int64(keyLen) + int64(valueLen) + int64(headersLen)
 		totalSize := int64(HeaderSize) + bodySize
 
-		// Skip over key and value
+		// Skip over key, value, and headers
 		if _, err := io.CopyN(io.Discard, reader, bodySize); err != nil {
 			// Partial message body - stop here
 			break
@@ -358,9 +389,11 @@ func scanLogToEnd(file *os.File, baseOffset int64) (nextOffset int64, position i
 func rebuildSegment(dir string, baseOffset int64) (*Segment, error) {
 	logPath := filepath.Join(dir, SegmentFileName(baseOffset))
 	indexPath := filepath.Join(dir, IndexFileName(baseOffset))
+	timeIndexPath := filepath.Join(dir, TimeIndexFileName(baseOffset))
 
-	// Remove corrupted index
+	// Remove corrupted indices
 	os.Remove(indexPath)
+	os.Remove(timeIndexPath)
 
 	// Open log file
 	file, err := os.OpenFile(logPath, os.O_RDWR, 0644)
@@ -375,10 +408,19 @@ func rebuildSegment(dir string, baseOffset int64) (*Segment, error) {
 		return nil, fmt.Errorf("failed to create index for rebuild: %w", err)
 	}
 
-	// Scan log and rebuild index
+	// Create fresh time index
+	timeIndex, err := NewTimeIndex(timeIndexPath, baseOffset)
+	if err != nil {
+		file.Close()
+		index.Close()
+		return nil, fmt.Errorf("failed to create time index for rebuild: %w", err)
+	}
+
+	// Scan log and rebuild indices
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		file.Close()
 		index.Close()
+		timeIndex.Close()
 		return nil, err
 	}
 
@@ -402,11 +444,13 @@ func rebuildSegment(dir string, baseOffset int64) (*Segment, error) {
 			break
 		}
 
-		// Extract fields from 32-byte header
+		// Extract fields from 34-byte header
 		messageOffset := int64(binary.BigEndian.Uint64(header[8:16]))
+		timestamp := int64(binary.BigEndian.Uint64(header[16:24]))
 		keyLen := binary.BigEndian.Uint16(header[26:28])
 		valueLen := binary.BigEndian.Uint32(header[28:32])
-		bodySize := int64(keyLen) + int64(valueLen)
+		headersLen := binary.BigEndian.Uint16(header[32:34])
+		bodySize := int64(keyLen) + int64(valueLen) + int64(headersLen)
 		totalSize := int64(HeaderSize) + bodySize
 
 		// Add to index (force first entry, then respect granularity)
@@ -416,6 +460,9 @@ func rebuildSegment(dir string, baseOffset int64) (*Segment, error) {
 		} else {
 			index.MaybeAppend(messageOffset, position)
 		}
+
+		// Add to time index (respects granularity internally)
+		timeIndex.MaybeAppend(timestamp, messageOffset, position)
 
 		// Skip body
 		if _, err := io.CopyN(io.Discard, reader, bodySize); err != nil {
@@ -430,6 +477,7 @@ func rebuildSegment(dir string, baseOffset int64) (*Segment, error) {
 	if err := file.Truncate(position); err != nil {
 		file.Close()
 		index.Close()
+		timeIndex.Close()
 		return nil, err
 	}
 
@@ -437,6 +485,7 @@ func rebuildSegment(dir string, baseOffset int64) (*Segment, error) {
 	if _, err := file.Seek(0, io.SeekEnd); err != nil {
 		file.Close()
 		index.Close()
+		timeIndex.Close()
 		return nil, err
 	}
 
@@ -447,6 +496,7 @@ func rebuildSegment(dir string, baseOffset int64) (*Segment, error) {
 		file:            file,
 		writer:          bufio.NewWriter(file),
 		index:           index,
+		timeIndex:       timeIndex,
 		path:            dir,
 		lastSync:        time.Now(),
 		syncInterval:    DefaultSyncInterval,
@@ -515,6 +565,12 @@ func (s *Segment) Append(msg *Message) (int64, error) {
 		}
 	}
 
+	// Update time index (Milestone 14)
+	// Respects granularity internally - adds entry every 4KB
+	if _, err := s.timeIndex.MaybeAppend(msg.Timestamp, msg.Offset, s.currentPosition); err != nil {
+		return 0, fmt.Errorf("failed to update time index: %w", err)
+	}
+
 	// Update position and offset
 	offset := s.currentOffset
 	s.currentOffset++
@@ -567,6 +623,11 @@ func (s *Segment) Sync() error {
 
 	if err := s.index.Sync(); err != nil {
 		return fmt.Errorf("failed to sync index: %w", err)
+	}
+
+	// Sync time index (Milestone 14)
+	if err := s.timeIndex.Sync(); err != nil {
+		return fmt.Errorf("failed to sync time index: %w", err)
 	}
 
 	s.lastSync = time.Now()
@@ -730,8 +791,9 @@ func (s *Segment) ReadFrom(startOffset int64, maxMessages int) ([]*Message, erro
 //	[25]    Reserved
 //	[26:28] Key length
 //	[28:32] Value length
+//	[32:34] Headers length
 func (s *Segment) readOneMessage(reader *bufio.Reader) (*Message, error) {
-	// Read the full 32-byte header
+	// Read the full 34-byte header
 	header := make([]byte, HeaderSize)
 	if _, err := io.ReadFull(reader, header); err != nil {
 		return nil, err // EOF or read error
@@ -742,12 +804,13 @@ func (s *Segment) readOneMessage(reader *bufio.Reader) (*Message, error) {
 		return nil, ErrInvalidMagic
 	}
 
-	// Get key and value lengths from fixed positions
+	// Get key, value, and headers lengths from fixed positions
 	keyLen := binary.BigEndian.Uint16(header[26:28])
 	valueLen := binary.BigEndian.Uint32(header[28:32])
+	headersLen := binary.BigEndian.Uint16(header[32:34])
 
-	// Read body (key + value)
-	body := make([]byte, int(keyLen)+int(valueLen))
+	// Read body (key + value + headers)
+	body := make([]byte, int(keyLen)+int(valueLen)+int(headersLen))
 	if _, err := io.ReadFull(reader, body); err != nil {
 		return nil, fmt.Errorf("failed to read message body: %w", err)
 	}
@@ -785,6 +848,10 @@ func (s *Segment) Seal() error {
 	if err := s.index.Sync(); err != nil {
 		return fmt.Errorf("failed to sync index: %w", err)
 	}
+	// Sync time index (Milestone 14)
+	if err := s.timeIndex.Sync(); err != nil {
+		return fmt.Errorf("failed to sync time index: %w", err)
+	}
 
 	s.readonly = true
 	return nil
@@ -816,6 +883,11 @@ func (s *Segment) Close() error {
 		errs = append(errs, fmt.Errorf("close index: %w", err))
 	}
 
+	// Close time index (Milestone 14)
+	if err := s.timeIndex.Close(); err != nil {
+		errs = append(errs, fmt.Errorf("close time index: %w", err))
+	}
+
 	s.closed = true
 
 	if len(errs) > 0 {
@@ -835,12 +907,17 @@ func (s *Segment) Delete() error {
 
 	logPath := filepath.Join(s.path, SegmentFileName(s.baseOffset))
 	indexPath := filepath.Join(s.path, IndexFileName(s.baseOffset))
+	timeIndexPath := filepath.Join(s.path, TimeIndexFileName(s.baseOffset))
 
 	if err := os.Remove(logPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to delete log file: %w", err)
 	}
 	if err := os.Remove(indexPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to delete index file: %w", err)
+	}
+	// Delete time index file (Milestone 14)
+	if err := os.Remove(timeIndexPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to delete time index file: %w", err)
 	}
 
 	return nil
@@ -888,4 +965,137 @@ func (s *Segment) MessageCount() int64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.currentOffset - s.baseOffset
+}
+
+// =============================================================================
+// TIME-BASED QUERIES (MILESTONE 14)
+// =============================================================================
+
+// ReadFromTimestamp reads messages starting from a given timestamp.
+//
+// USE CASE:
+//   - "Replay from 2 hours ago"
+//   - "Get all messages since yesterday midnight"
+//
+// ALGORITHM:
+//  1. Use time index to find offset near timestamp
+//  2. Use ReadFrom to read messages from that offset
+//  3. Filter messages to only include those >= timestamp (scan forward if needed)
+//
+// RETURNS:
+//   - Messages with timestamp >= startTimestamp
+//   - maxMessages limit applies (0 = all)
+func (s *Segment) ReadFromTimestamp(startTimestamp int64, maxMessages int) ([]*Message, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.closed {
+		return nil, ErrSegmentClosed
+	}
+
+	// Use time index to find starting offset
+	startOffset, err := s.timeIndex.Lookup(startTimestamp)
+	if err != nil {
+		// No time index entries or timestamp out of range
+		// Start from base offset and filter
+		startOffset = s.baseOffset
+	}
+
+	// Use regular ReadFrom to get messages
+	// Note: We need to unlock before calling ReadFrom (it locks again)
+	s.mu.RUnlock()
+	messages, err := s.ReadFrom(startOffset, 0) // Get all from start offset
+	s.mu.RLock()
+
+	if err != nil {
+		return nil, err
+	}
+
+	// Filter to only messages >= startTimestamp
+	var filtered []*Message
+	for _, msg := range messages {
+		if msg.Timestamp >= startTimestamp {
+			filtered = append(filtered, msg)
+			if maxMessages > 0 && len(filtered) >= maxMessages {
+				break
+			}
+		}
+	}
+
+	return filtered, nil
+}
+
+// ReadTimeRange reads messages in a specific time range [startTime, endTime].
+//
+// USE CASE:
+//   - "Get all messages between 2pm and 3pm"
+//   - "Audit: what happened in the last hour?"
+//
+// RETURNS:
+//   - Messages with startTime <= timestamp < endTime
+func (s *Segment) ReadTimeRange(startTime, endTime int64, maxMessages int) ([]*Message, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.closed {
+		return nil, ErrSegmentClosed
+	}
+
+	// Use time index to find offset range
+	startOffset, endOffsetHint, err := s.timeIndex.LookupRange(startTime, endTime)
+	if err != nil {
+		// Fall back to scanning from base
+		startOffset = s.baseOffset
+		endOffsetHint = -1 // Read to end
+	}
+
+	// Determine max offset to read
+	maxOffset := s.currentOffset
+	if endOffsetHint != -1 && endOffsetHint < maxOffset {
+		maxOffset = endOffsetHint
+	}
+
+	// Calculate approximate message count
+	readCount := 0
+	if maxMessages > 0 {
+		readCount = maxMessages
+	}
+
+	// Read messages in range
+	s.mu.RUnlock()
+	messages, err := s.ReadFrom(startOffset, readCount)
+	s.mu.RLock()
+
+	if err != nil {
+		return nil, err
+	}
+
+	// Filter to time range
+	var filtered []*Message
+	for _, msg := range messages {
+		if msg.Timestamp >= startTime && msg.Timestamp < endTime {
+			filtered = append(filtered, msg)
+			if maxMessages > 0 && len(filtered) >= maxMessages {
+				break
+			}
+		}
+		// Stop if we've passed endTime
+		if msg.Timestamp >= endTime {
+			break
+		}
+	}
+
+	return filtered, nil
+}
+
+// GetFirstTimestamp returns the timestamp of the first message in the segment.
+// Returns ErrTimestampNotFound if the time index is empty.
+func (s *Segment) GetFirstTimestamp() (int64, error) {
+	return s.timeIndex.GetFirstTimestamp()
+}
+
+// GetLastTimestamp returns the timestamp of the last indexed message.
+// Returns ErrTimestampNotFound if the time index is empty.
+func (s *Segment) GetLastTimestamp() (int64, error) {
+	return s.timeIndex.GetLastTimestamp()
 }

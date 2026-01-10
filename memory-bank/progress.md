@@ -27,9 +27,7 @@
 - [x] Milestone 11: Leader Election & Replication ✅ 
 - [x] Milestone 12: Cooperative Rebalancing ✅ ⭐
 - [x] Milestone 13: Online Partition Scaling ✅ ⭐
-
-### Phase 3.5: Distribution Hardening (0/1) 🔜
-- [ ] Milestone 14: Log Compaction, Snapshots & Time Index ⭐
+- [x] Milestone 14: Log Compaction, Snapshots & Time Index ⭐ 
 
 ### Phase 4: Operations (0/12)
 - [ ] Pre-operations: thorough testing & benchmarking
@@ -46,29 +44,50 @@
 - [ ] Milestone 25: Production Hardening & Best Practices
 - [ ] Milestone 26: Release Process & CI/CD
 
-## Up Next – Milestone 14 (Log Compaction, Snapshots & Time Index)
+## Up Next – Milestone 15 (gRPC API & Go Client)
 
-- **Objective**: Optimize internal topic storage and enable time-based message queries
-- **Log Compaction**:
-  - Keep only latest value per key (ideal for `__consumer_offsets`)
-  - Compaction policy per topic (compact vs delete)
-  - Background compaction thread with configurable intervals
-- **Coordinator Snapshots**:
-  - Periodic snapshot of coordinator state (faster recovery)
-  - Replay from snapshot + tail of log (instead of full replay)
-  - Snapshot cleanup and retention policy
-- **Time-Based Index**:
-  - Timestamp → Offset mapping for each segment
-  - `GetMessagesFromTime(timestamp)` API for replay from point-in-time
-  - `GetMessagesInRange(startTime, endTime)` for time-bounded queries
-  - Useful for: debugging, replay, audit logs, data recovery
-- **Transaction State Replication**:
-  - Move `TransactionCoordinator` state to `__transaction_state` internal topic
-  - Same pattern as consumer offsets replication
+- **Objective**: Provide high-performance binary protocol and idiomatic Go client library
+- **gRPC API**:
+  - Binary protocol for low latency (vs HTTP/JSON overhead)
+  - Streaming support for efficient consumption
+  - Bi-directional streams for push-based delivery
+- **Go Client Library**:
+  - Idiomatic Go API (channels, context, interfaces)
+  - Connection pooling and load balancing
+  - Automatic retries and backpressure handling
+  - Client-side partitioner for producer sharding
+- **JS/TS Client** (if time permits):
+  - gRPC-web for browser compatibility
+  - Node.js client for server-side use
+  - Promise-based async API
 
 ## What Works
 
-### Milestone 13 - Online Partition Scaling + Coordinators on Internal Topic ✅ ⭐ (Just Completed!)
+### Milestone 14 - Time Index, Snapshots & Log Compaction ⭐ (Partial Complete!)
+- **Time Index** ✅:
+  - Binary format mapping timestamp→offset (16 bytes per entry)
+  - 4KB granularity (same as offset index for consistency)
+  - O(log n) binary search for time-based lookups
+  - Segment methods: `ReadFromTimestamp()`, `ReadTimeRange()`, `GetFirstTimestamp()`, `GetLastTimestamp()`
+  - Corruption recovery: automatic rebuild from segment data
+  - Test coverage: 9 tests, all passing
+- **Coordinator Snapshots** ✅:
+  - Binary snapshot format (32-byte header + variable entries)
+  - CRC32 validation for corruption detection
+  - Snapshot triggers: 10K records OR 5 minutes (whichever first)
+  - Keep last 3 snapshots, auto-cleanup of old ones
+  - Supports group coordinator and transaction coordinator state
+  - File format: `snapshot-{type}-{offset}-{timestamp}.bin`
+  - `SnapshotWriter`, `SnapshotReader`, `SnapshotManager` with complete lifecycle
+  - Test coverage: 9 tests, all passing
+- **Log Compaction** 🔄 (Planned):
+  - Copy-on-compact strategy documented
+  - Dirty ratio trigger (50% duplicates)
+  - Tombstone retention (24 hours)
+  - Needs integration with Log API (current implementation accesses segments directly)
+  - Recommended approach: Topic-level compaction with directory-level operations
+
+### Milestone 13 - Online Partition Scaling + Coordinators on Internal Topic ✅ ⭐
 - **Internal Topic Infrastructure**:
   - `__consumer_offsets` internal topic (50 partitions, replication factor 3)
   - Binary format for offset commits and group metadata

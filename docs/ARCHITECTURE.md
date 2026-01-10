@@ -2390,4 +2390,362 @@ The Replication system enables partition-level leader election and log replicati
 
 ---
 
-*Last Updated: Milestone 11 Complete - Leader Election & Replication*
+## Milestone 14: Time Index, Coordinator Snapshots & Log Compaction
+
+### Time Index (✅ Completed)
+
+**Purpose**: Enable time-based message queries (e.g., "replay from 2 hours ago") without scanning entire segments.
+
+#### Time Index Structure
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│                         TIME INDEX FILE (.timeindex)                     │
+│                                                                          │
+│  Entry Size: 16 bytes (8 bytes timestamp + 8 bytes offset)               │
+│  Granularity: 4KB (same as offset index for consistency)                 │
+│                                                                          │
+│  ┌────────────────┬────────────────┬────────────────┬──────────────────┐ │
+│  │ Timestamp (8B) │ Offset (8B)    │ Timestamp (8B) │ Offset (8B)      │ │
+│  │ 1640000000000  │ 0              │ 1640000060000  │ 1000             │ │
+│  └────────────────┴────────────────┴────────────────┴──────────────────┘ │
+│                                                                          │
+│  LOOKUP ALGORITHM:                                                       │
+│    - Binary search for timestamp                                         │
+│    - Return offset of first message >= target timestamp                  │
+│    - O(log n) complexity vs O(n) for full segment scan                   │
+│                                                                          │
+│  APPEND STRATEGY:                                                        │
+│    - Only append if 4KB written since last entry (same as offset index)  │
+│    - Maintains sparseness for memory efficiency                          │
+│    - Segment rebuild reconstructs time index if corrupted                │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Time-Based Query Flow
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│ USER REQUEST: "Get messages from last 2 hours"                           │
+│                                                                          │
+│ Step 1: Convert to timestamp                                             │
+│   targetTime = now() - 2 hours = 1640000000000                           │
+│                                                                          │
+│ Step 2: Query time index                                                 │
+│   segment.timeIndex.Lookup(1640000000000)                                │
+│   → returns offset 500 (first message >= target time)                    │
+│                                                                          │
+│ Step 3: Read from offset                                                 │
+│   segment.ReadFromTimestamp(1640000000000)                               │
+│   → starts reading from offset 500                                       │
+│                                                                          │
+│ Step 4: Return messages                                                  │
+│   [message at 500, message at 501, ..., message at latest]               │
+│                                                                          │
+│ PERFORMANCE:                                                             │
+│   - WITHOUT time index: O(n) scan (read all messages, check timestamp)   │
+│   - WITH time index: O(log n) lookup + O(k) read (k = messages to read)  │
+│   - For 1M messages: 1,000,000 ops → 20 ops (50,000x faster)             │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Segment Integration
+
+```go
+// Segment struct updated with time index
+type Segment struct {
+    dataFile    *os.File
+    offsetIndex *Index      // Existing offset index
+    timeIndex   *TimeIndex  // NEW: Time index for timestamp lookups
+    baseOffset  int64
+    // ... other fields
+}
+
+// Time index created/loaded alongside offset index
+func NewSegment(path string, baseOffset int64) (*Segment, error) {
+    // Create offset index: {baseOffset}.index
+    offsetIndex, _ := NewIndex(indexPath)
+    
+    // Create time index: {baseOffset}.timeindex  ← NEW
+    timeIndex, _ := NewTimeIndex(timeIndexPath)
+    
+    return &Segment{
+        offsetIndex: offsetIndex,
+        timeIndex:   timeIndex,  ← NEW
+        // ...
+    }
+}
+
+// Append updates both indices
+func (s *Segment) Append(data []byte, offset int64, timestamp int64) error {
+    // Write data to segment file
+    position, _ := s.dataFile.Write(data)
+    
+    // Update offset index (every 4KB)
+    s.offsetIndex.MaybeAppend(offset, position)
+    
+    // Update time index (every 4KB)  ← NEW
+    s.timeIndex.MaybeAppend(timestamp, offset)
+    
+    return nil
+}
+
+// New query methods
+func (s *Segment) ReadFromTimestamp(timestamp int64) ([]*Message, error)
+func (s *Segment) ReadTimeRange(startTime, endTime int64) ([]*Message, error)
+func (s *Segment) GetFirstTimestamp() (int64, error)
+func (s *Segment) GetLastTimestamp() (int64, error)
+```
+
+---
+
+### Coordinator Snapshots (✅ Completed)
+
+**Purpose**: Enable fast coordinator recovery without replaying entire internal topic log.
+
+#### Snapshot Architecture
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│                      THE SLOW RECOVERY PROBLEM                           │
+│                                                                          │
+│ WITHOUT SNAPSHOTS:                                                       │
+│   __consumer_offsets has 1,000,000 records                               │
+│   Group coordinator crashes → needs to rebuild state                     │
+│   Must replay ALL 1,000,000 records from offset 0                        │
+│   Recovery time: ~5 minutes (200,000 records/min)                        │
+│                                                                          │
+│ WITH SNAPSHOTS:                                                          │
+│   Snapshot at offset 990,000 (10K records ago)                           │
+│   Group coordinator crashes → loads snapshot                             │
+│   Only replays 990,001 to 1,000,000 (10K records)                        │
+│   Recovery time: ~3 seconds                                              │
+│                                                                          │
+│ SPEEDUP: 100x faster recovery (5 min → 3 sec)                            │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Snapshot File Format
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│                    SNAPSHOT BINARY FORMAT                                │
+│                                                                          │
+│ HEADER (32 bytes):                                                       │
+│  ┌────────────┬─────────┬─────────┬─────────┬─────────┬─────────────┐    │
+│  │ Magic (4B) │ Ver (2B)│ Type (1B│ CRC (4B)│ Last    │ Last        │    │
+│  │ 0xC0FEEBEE │ 1       │ 1       │ checksum│ Offset  │ Timestamp   │    │
+│  │            │         │         │         │ (8B)    │ (8B)        │    │
+│  └────────────┴─────────┴─────────┴─────────┴─────────┴─────────────┘    │
+│                                                                          │
+│ ENTRIES (variable size):                                                 │
+│  ┌─────────────────────────────────────────────────────────────────────┐ │
+│  │ Entry 1:                                                            │ │
+│  │  ┌────────┬────────┬─────────┬──────────┬───────────┐               │ │
+│  │  │ Type   │ KeyLen │ Key     │ ValueLen │ Value     │               │ │
+│  │  │ (1B)   │ (4B)   │ (var)   │ (4B)     │ (var)     │               │ │
+│  │  └────────┴────────┴─────────┴──────────┴───────────┘               │ │
+│  │                                                                     │ │
+│  │ Entry 2: ...                                                        │ │
+│  │ Entry N: ...                                                        │ │
+│  └─────────────────────────────────────────────────────────────────────┘ │
+│                                                                          │
+│ FILENAME: snapshot-{type}-{offset}-{timestamp}.bin                       │
+│   Example: snapshot-1-990000-1640000000000.bin                           │
+│             ↑        ↑      ↑                                            │
+│             type     offset  timestamp                                   │
+│                                                                          │
+│ RECORD TYPES:                                                            │
+│   - RecordTypeOffsetCommit (1): Consumer offset commit                   │
+│   - RecordTypeGroupMetadata (2): Consumer group metadata                 │
+│   - RecordTypeTxnPrepare (3): Transaction prepare marker                 │
+│   - RecordTypeTxnCommit (4): Transaction commit marker                   │
+│   - RecordTypeTxnAbort (5): Transaction abort marker                     │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Snapshot Lifecycle
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│                       SNAPSHOT TRIGGER POLICY                            │
+│                                                                          │
+│ TRIGGERS (whichever happens first):                                      │
+│   1. 10,000 records processed since last snapshot                        │
+│   2. 5 minutes elapsed since last snapshot                               │
+│                                                                          │
+│ CLEANUP POLICY:                                                          │
+│   - Keep last 3 snapshots                                                │
+│   - Delete older snapshots automatically                                 │
+│                                                                          │
+│ RECOVERY PROCESS:                                                        │
+│   1. Find latest snapshot file in directory                              │
+│   2. Validate CRC32 checksum (detect corruption)                         │
+│   3. Load all entries into coordinator state                             │
+│   4. Replay log from snapshot.LastOffset + 1 to latest                   │
+│   5. Coordinator ready for requests                                      │
+│                                                                          │
+│ CORRUPTION HANDLING:                                                     │
+│   - CRC mismatch → try previous snapshot                                 │
+│   - All snapshots corrupt → fallback to full log replay                  │
+│   - No snapshots → normal startup (replay from offset 0)                 │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+#### SnapshotManager API
+
+```go
+type SnapshotManager struct {
+    dir              string
+    snapshotType     SnapshotType
+    recordInterval   int64           // Trigger after N records (10K)
+    timeInterval     time.Duration   // Trigger after duration (5 min)
+    maxSnapshots     int            // Keep last N snapshots (3)
+    recordCount      int64          // Records since last snapshot
+    lastSnapshot     time.Time      // Time of last snapshot
+    mu               sync.Mutex
+}
+
+// Check if snapshot should be triggered
+func (sm *SnapshotManager) ShouldSnapshot() bool
+
+// Record that a record was processed
+func (sm *SnapshotManager) RecordProcessed()
+
+// Reset counters after snapshot
+func (sm *SnapshotManager) ResetCounters()
+
+// Find latest valid snapshot
+func (sm *SnapshotManager) GetLatestSnapshot() (string, error)
+
+// Remove old snapshots (keep last 3)
+func (sm *SnapshotManager) CleanupOldSnapshots() error
+```
+
+---
+
+### Log Compaction (⚠️ Planned)
+
+**Purpose**: Keep only the latest value per key for internal topics (__consumer_offsets, __transaction_state).
+
+#### The Compaction Problem
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│                    WHY LOG COMPACTION IS NEEDED                          │
+│                                                                          │
+│ __consumer_offsets WITHOUT compaction:                                   │
+│   Offset 0: group1:topic1:0 → offset:100                                 │
+│   Offset 1: group1:topic1:1 → offset:200                                 │
+│   Offset 2: group1:topic1:0 → offset:150  ← Update                       │
+│   Offset 3: group1:topic1:1 → offset:250  ← Update                       │
+│   Offset 4: group1:topic1:0 → offset:175  ← Update                       │
+│   ...                                                                    │
+│   Offset 1,000,000: Still keeping ALL history                            │
+│                                                                          │
+│ PROBLEMS:                                                                │
+│   - Partition file grows forever (GB → TB)                               │
+│   - Recovery replays all records (slow startup)                          │
+│   - Snapshots include old data (large snapshots)                         │
+│   - Storage waste (95%+ of records are outdated)                         │
+│                                                                          │
+│ __consumer_offsets WITH compaction:                                      │
+│   Offset 4: group1:topic1:0 → offset:175  ← Only latest kept             │
+│   Offset 3: group1:topic1:1 → offset:250  ← Only latest kept             │
+│                                                                          │
+│ BENEFITS:                                                                │
+│   - File size stays bounded (only current state)                         │
+│   - Fast recovery (replay small compacted log)                           │
+│   - Smaller snapshots (only active keys)                                 │
+│   - Storage efficiency (discard 95%+ old records)                        │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Compaction Strategy (Planned Implementation)
+
+**Current Status**: Basic compactor structure created, needs integration with Log API.
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│                      COPY-ON-COMPACT STRATEGY                            │
+│                                                                          │
+│ WHY COPY-ON-COMPACT?                                                     │
+│   - Simple and safe (old segment intact until swap)                      │
+│   - No locking needed (readers use old segment during compaction)        │
+│   - Rollback easy (delete new segment if compaction fails)               │
+│   - Matches Kafka's proven design                                        │
+│                                                                          │
+│ TRADEOFF:                                                                │
+│   - Requires 2x disk space during compaction                             │
+│   - More I/O (copy data vs in-place edit)                                │
+│   - BUT: Internal topics are small (<1GB typical), acceptable            │
+│                                                                          │
+│ COMPACTION FLOW:                                                         │
+│   1. Scan entire partition, build key→record map (last value wins)       │
+│   2. Write compacted segment with only latest records                    │
+│   3. Atomic swap: replace old with new                                   │
+│   4. Delete old segment after successful swap                            │
+│   5. Update partition metadata                                           │
+│                                                                          │
+│ TRIGGERS:                                                                │
+│   - Dirty ratio >= 50% (half of records are duplicates)                  │
+│   - Manual trigger via HTTP API                                          │
+│   - Check every 10 minutes                                               │
+│                                                                          │
+│ TOMBSTONE HANDLING:                                                      │
+│   - Tombstone = record with null value (indicates deletion)              │
+│   - Keep tombstones for 24 hours (default retention)                     │
+│   - After 24h, safe to delete (lagging consumers caught up)              │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Integration Challenges (To Be Resolved)
+
+The current compactor implementation (`internal/broker/compactor.go`) needs updates:
+
+1. **Log API Integration**: Currently tries to access `partition.segments` directly, but Partition uses `Log` abstraction that doesn't expose segments directly.
+
+2. **Compaction Approach Options**:
+   ```
+   Option A: Add compaction support to Log API
+     - Add Log.Compact() method
+     - Manage segment replacement internally
+     - Pros: Clean abstraction
+     - Cons: Changes to core storage layer
+   
+   Option B: Topic-level compaction
+     - Create new Log in temp directory
+     - Read from old log, write compacted to new log
+     - Atomic directory swap
+     - Pros: No changes to Log API
+     - Cons: More complex, requires directory-level operations
+   
+   Option C: Per-segment compaction
+     - Compact individual segments
+     - Similar to Kafka's approach
+     - Pros: Incremental, lower memory
+     - Cons: More complex trigger logic
+   ```
+
+3. **Recommended Path Forward**: Option B (topic-level compaction)
+   - Least invasive to existing architecture
+   - Aligns with snapshot approach (coordinator-level operations)
+   - Works well with internal topics (small, bounded size)
+
+---
+
+### Comparison with Other Systems
+
+| Feature | GoQueue (M14) | Kafka | RabbitMQ | Pulsar |
+|---------|---------------|-------|----------|--------|
+| **Time Index** | ✅ Binary, 4KB granularity | ✅ Binary, configurable | ❌ N/A | ✅ BookKeeper |
+| **Coordinator Snapshots** | ✅ Binary, CRC32, keep 3 | ✅ Per node | ❌ Transient state | ✅ ZooKeeper |
+| **Log Compaction** | 🔄 Planned | ✅ Per segment | ❌ N/A | ✅ Per topic |
+| **Tombstone Retention** | 24h (planned) | Configurable | ❌ N/A | Configurable |
+| **Compaction Strategy** | Copy-on-compact | Copy-on-compact | ❌ N/A | BookKeeper handles |
+| **Dirty Ratio Trigger** | 50% (planned) | 50% default | ❌ N/A | Auto |
+| **Time-based Queries** | ✅ O(log n) | ✅ O(log n) | ❌ Limited | ✅ O(log n) |
+
+---
+
+*Last Updated: Milestone 14 Partial - Time Index ✅, Snapshots ✅, Compaction 🔄*
