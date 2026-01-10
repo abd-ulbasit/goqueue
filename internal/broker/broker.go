@@ -2709,12 +2709,154 @@ func (b *Broker) PublishAt(topic string, key, value []byte, deliverAt time.Time)
 	return partition, offset, nil
 }
 
+// PublishWithDelayAndPriority publishes a delayed message with a specified priority.
+//
+// MILESTONE 5+6 INTEGRATION:
+// This combines delayed delivery (M5) with priority queuing (M6). The message
+// is written immediately with its priority, but remains hidden until the delay
+// expires. When it becomes visible, it enters the priority-aware consumption.
+//
+// PARAMETERS:
+//   - topic: Topic name
+//   - key: Routing key (for partition selection). nil = round-robin.
+//   - value: Message payload
+//   - delay: Duration before message becomes visible (max 7 days)
+//   - priority: Message priority level (Critical/High/Normal/Low/Background)
+//
+// RETURNS:
+//   - Partition the message was written to
+//   - Offset within that partition
+//   - Error if publish fails, delay is invalid, or priority is invalid
+//
+// FLOW:
+//
+//	┌──────────┐                      ┌──────────────────┐
+//	│ Producer │ PublishWithDelay.  ..│ Write with       │
+//	│          │ ──────────────────►  │ Priority to Log  │
+//	└──────────┘                      └────────┬─────────┘
+//	                                           │
+//	                                           ▼
+//	                                  ┌──────────────────┐
+//	                                  │ Register with    │
+//	                                  │ Scheduler        │
+//	                                  └────────┬─────────┘
+//	                                           │
+//	                                     delay expires
+//	                                           │
+//	                                           ▼
+//	                                  ┌──────────────────┐
+//	                                  │ Visible with     │
+//	                                  │ Priority         │
+//	                                  └──────────────────┘
+//
+// EXAMPLE:
+//
+//	// High-priority payment retry in 30 seconds
+//	partition, offset, err := broker.PublishWithDelayAndPriority(
+//	    "payments",
+//	    []byte("order-123"),
+//	    []byte(`{"action":"retry","amount":99.99}`),
+//	    30 * time.Second,
+//	    storage.PriorityHigh,
+//	)
+func (b *Broker) PublishWithDelayAndPriority(topic string, key, value []byte, delay time.Duration, priority storage.Priority) (partition int, offset int64, err error) {
+	deliverAt := time.Now().Add(delay)
+	return b.PublishAtWithPriority(topic, key, value, deliverAt, priority)
+}
+
+// PublishAtWithPriority publishes a message with priority that becomes visible at a specific time.
+//
+// PARAMETERS:
+//   - topic: Topic name
+//   - key: Routing key (for partition selection). nil = round-robin.
+//   - value: Message payload
+//   - deliverAt: Absolute time when message becomes visible
+//   - priority: Message priority level
+//
+// RETURNS:
+//   - Partition the message was written to
+//   - Offset within that partition
+//   - Error if publish fails, deliverAt is invalid, or priority is invalid
+//
+// SEMANTICS:
+//   - If deliverAt is in the past, message is delivered immediately with priority
+//   - Message priority is stored in the log at write time
+//   - When delay expires, message enters priority-aware consumption
+//
+// USE CASES:
+//   - Critical alerts scheduled for specific times
+//   - High-priority batch jobs at off-peak hours
+//   - Priority-based retry with specific retry times
+func (b *Broker) PublishAtWithPriority(topic string, key, value []byte, deliverAt time.Time, priority storage.Priority) (partition int, offset int64, err error) {
+	b.mu.RLock()
+	if b.closed {
+		b.mu.RUnlock()
+		return 0, 0, ErrBrokerClosed
+	}
+
+	t, exists := b.topics[topic]
+	if !exists {
+		b.mu.RUnlock()
+		return 0, 0, fmt.Errorf("%w: %s", ErrTopicNotFound, topic)
+	}
+	b.mu.RUnlock()
+
+	// Validate priority
+	if priority > storage.PriorityBackground {
+		return 0, 0, fmt.Errorf("invalid priority: %d", priority)
+	}
+
+	// Calculate delay duration for validation
+	delay := time.Until(deliverAt)
+
+	// If deliverAt is in the past or very near future, publish with priority immediately
+	if delay <= 0 {
+		return t.PublishWithPriority(key, value, priority)
+	}
+
+	// Check max delay limit
+	if delay > b.scheduler.config.MaxDelay {
+		return 0, 0, fmt.Errorf("delay %v exceeds maximum %v", delay, b.scheduler.config.MaxDelay)
+	}
+
+	// Step 1: Write message to log immediately WITH PRIORITY (ensures durability)
+	partition, offset, err = t.PublishWithPriority(key, value, priority)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	// Step 2: Register with scheduler (timer + delay index)
+	err = b.scheduler.ScheduleAt(topic, partition, offset, deliverAt)
+	if err != nil {
+		// Message is written but not scheduled - it will be visible immediately
+		b.logger.Warn("failed to schedule delayed message with priority, will be visible immediately",
+			"topic", topic,
+			"partition", partition,
+			"offset", offset,
+			"priority", priority,
+			"error", err)
+	}
+
+	b.logger.Debug("published delayed message with priority",
+		"topic", topic,
+		"partition", partition,
+		"offset", offset,
+		"priority", priority,
+		"deliver_at", deliverAt.Format(time.RFC3339),
+		"delay", delay.String())
+
+	return partition, offset, nil
+}
+
 // handleDelayedMessageReady is called when a delayed message timer expires.
 // This makes the message visible to consumers.
 //
 // INTERNAL CALLBACK:
 // Called by the scheduler when timer fires. The message is already in the log;
 // this callback updates the delay index to mark it as delivered.
+//
+// FILTERING: Consumer methods (Consume, ConsumeByOffset) check IsDelayed()
+// which uses the delay index to filter out pending delayed messages.
 func (b *Broker) handleDelayedMessageReady(topic string, partition int, offset int64) error {
 	b.logger.Debug("delayed message ready",
 		"topic", topic,
@@ -2722,13 +2864,9 @@ func (b *Broker) handleDelayedMessageReady(topic string, partition int, offset i
 		"offset", offset)
 
 	// The message is already in the log. The delay index tracks its state.
-	// By marking it delivered in the delay index, consumers will no longer
-	// skip it (once we implement consumer filtering).
-	//
-	// For now, messages are always visible in the log. The delay index is
-	// purely for tracking and recovery. In a full implementation, consumers
-	// would check the delay index to skip messages that aren't ready yet.
-	// TODO: Implement consumer filtering based on delay index.
+	// The scheduler has already marked this entry as DELIVERED in the delay index.
+	// Consumer filtering is implemented in Consume() and ConsumeByOffset() methods
+	// which call b.IsDelayed() to skip pending delayed messages.
 
 	return nil
 }

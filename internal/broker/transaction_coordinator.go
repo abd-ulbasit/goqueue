@@ -757,11 +757,23 @@ func (tc *TransactionCoordinator) CommitTransaction(transactionalId string, pid 
 	// Write COMMIT markers to all partitions
 	if err := tc.writeControlRecords(transactionalId, pid, partitions, true); err != nil {
 		// Failed to write some markers - transaction is in inconsistent state
-		// Mark for abort
-		// TODO: we have marked it for abort, but where are we going to do the actual abort?
-		// Currently, there is no retry mechanism - the client must handle this
+		// Mark for abort and trigger immediate abort attempt
 		tc.producerManager.SetTransactionState(transactionalId, TransactionStatePrepareAbort)
-		return fmt.Errorf("failed to write commit markers: %w", err)
+
+		// Attempt to abort with retry
+		tc.logger.Warn("commit failed, attempting abort",
+			"transactionalId", transactionalId,
+			"transactionId", txnId,
+			"error", err)
+
+		// Try to abort - if this fails, the timeout checker will retry
+		if abortErr := tc.abortTransactionWithRetry(transactionalId, txnId, pid); abortErr != nil {
+			tc.logger.Error("immediate abort also failed, will be retried by timeout checker",
+				"transactionalId", transactionalId,
+				"error", abortErr)
+		}
+
+		return fmt.Errorf("failed to write commit markers, transaction aborted: %w", err)
 	}
 
 	// Transition to CompleteCommit
@@ -907,6 +919,53 @@ func (tc *TransactionCoordinator) writeControlRecords(transactionalId string, pi
 		return fmt.Errorf("failed to write %d control records: %v", len(errs), errs)
 	}
 	return nil
+}
+
+// abortTransactionWithRetry attempts to abort a transaction with retry logic.
+//
+// This is called when a commit fails and we need to abort. It attempts the abort
+// multiple times before giving up. If all retries fail, the timeout checker
+// will eventually process the PrepareAbort state.
+//
+// RETRY STRATEGY:
+//   - 3 attempts with exponential backoff (100ms, 200ms, 400ms)
+//   - Logs each failure but doesn't block indefinitely
+//   - On total failure, relies on timeout checker for eventual cleanup
+func (tc *TransactionCoordinator) abortTransactionWithRetry(transactionalId, txnId string, pid ProducerIdAndEpoch) error {
+	const maxRetries = 3
+	baseDelay := 100 * time.Millisecond
+
+	var lastErr error
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			// Exponential backoff
+			delay := baseDelay * time.Duration(1<<uint(attempt-1))
+			select {
+			case <-tc.ctx.Done():
+				return tc.ctx.Err()
+			case <-time.After(delay):
+			}
+		}
+
+		lastErr = tc.abortTransactionInternal(transactionalId, txnId, pid)
+		if lastErr == nil {
+			if attempt > 0 {
+				tc.logger.Info("abort succeeded after retry",
+					"transactionalId", transactionalId,
+					"attempt", attempt+1)
+			}
+			return nil
+		}
+
+		tc.logger.Warn("abort attempt failed",
+			"transactionalId", transactionalId,
+			"attempt", attempt+1,
+			"maxRetries", maxRetries,
+			"error", lastErr)
+	}
+
+	return fmt.Errorf("abort failed after %d attempts: %w", maxRetries, lastErr)
 }
 
 // completeTransaction cleans up after a transaction completes.
