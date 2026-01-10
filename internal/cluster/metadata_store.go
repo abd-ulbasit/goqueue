@@ -422,6 +422,70 @@ func (ms *MetadataStore) UpdateTopicConfig(name string, config TopicConfig) erro
 	return ms.persistLocked()
 }
 
+// =============================================================================
+// PARTITION SCALING
+// =============================================================================
+//
+// UpdatePartitionCount changes the partition count for a topic.
+//
+// KAFKA-STYLE SEMANTICS:
+// - Can only INCREASE partition count, never decrease
+// - Existing messages stay in original partitions
+// - Only new messages may route to new partitions
+//
+// WHY NO DECREASE?
+// - Messages already routed by hash(key) % oldCount
+// - Decreasing would orphan messages in removed partitions
+// - Consumer offsets would become invalid
+//
+// CALLER RESPONSIBILITY:
+// - Validate new count > old count before calling
+// - Create actual partition directories
+// - Assign replicas for new partitions
+//
+// =============================================================================
+
+// UpdatePartitionCount updates the partition count for a topic.
+// Should only be called by the controller after validating the increase.
+//
+// PARAMETERS:
+//   - name: Topic name
+//   - newCount: New partition count (must be > current count)
+//
+// NOTE: This only updates metadata. Actual partition creation is handled
+// by PartitionScaler which calls this method.
+func (ms *MetadataStore) UpdatePartitionCount(name string, newCount int) error {
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
+
+	topic, exists := ms.meta.Topics[name]
+	if !exists {
+		return fmt.Errorf("topic %s not found", name)
+	}
+
+	// Validate: can only increase
+	if newCount < topic.PartitionCount {
+		return fmt.Errorf("cannot reduce partition count from %d to %d", topic.PartitionCount, newCount)
+	}
+
+	if newCount == topic.PartitionCount {
+		return nil // No-op
+	}
+
+	oldCount := topic.PartitionCount
+	topic.PartitionCount = newCount
+	topic.UpdatedAt = time.Now()
+
+	ms.meta.Version++
+	ms.meta.UpdatedAt = time.Now()
+
+	// Log for debugging
+	_ = oldCount // Would use with logging: fmt.Printf("Updated %s partitions: %d -> %d\n", name, oldCount, newCount)
+
+	ms.notifyListenersLocked()
+	return ms.persistLocked()
+}
+
 // SetAssignment sets the partition assignment.
 // Should only be called by the controller.
 func (ms *MetadataStore) SetAssignment(assign *PartitionAssignment) error {

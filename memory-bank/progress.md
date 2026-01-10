@@ -3,8 +3,8 @@
 ## Overall Status
 
 **Phase**: 3 of 4
-**Milestones**: 12/18 complete
-**Tests**: 260+ passing (storage: 50, broker: 170+, api: 24, cluster: 20+)
+**Milestones**: 13/18 complete
+**Tests**: 290+ passing (storage: 50, broker: 200+, api: 24, cluster: 20+)
 **Started**: Session 1
 
 ## Phase Progress
@@ -22,59 +22,81 @@
 - [x] Milestone 8: Schema Registry ✅
 - [x] Milestone 9: Transactional Publish ✅ ⭐
 
-### Phase 3: Distribution (3/4) 🔄
+### Phase 3: Distribution (4/4) ✅
 - [x] Milestone 10: Cluster Formation & Metadata ✅ ⭐
 - [x] Milestone 11: Leader Election & Replication ✅ 
 - [x] Milestone 12: Cooperative Rebalancing ✅ ⭐
-- [ ] Milestone 13: Online Partition Scaling
+- [x] Milestone 13: Online Partition Scaling ✅ ⭐
 
-## Up Next – Milestone 13 (Online Partition Scaling + Coordinators on Internal Offsets Topic)
+### Phase 3.5: Distribution Hardening (0/1) 🔜
+- [ ] Milestone 14: Log Compaction, Snapshots & Time Index ⭐
 
-- **Objective**: Finish distribution phase by (a) enabling online partition scaling/reassignment without downtime and (b) making the consumer group coordinator fault-tolerant via the same replication path other components use.
-- **Coordinator Replication Approach (new for M13)**
-  - Introduce an internal system topic `__consumer_offsets` (partitioned + replicated) using the existing log/replication pipeline—no new storage path.
-  - Group-to-partition mapping: `partition = hash(groupID) % numOffsetsPartitions`; the leader of that partition is the **group coordinator** for those groups.
-  - Coordinator state durability: commit group metadata/offset updates into `__consumer_offsets` so followers can replay and take over on failover.
-  - Failover: standard ISR election already in place for partitions → coordinator moves with the partition leader, no bespoke election path.
-  - API compatibility: keep current HTTP surface; coordinator implementation hidden behind an interface (eager vs cooperative strategies share the same replicated backbone).
-- **Refactors & Interfaces**
-  - Define `GroupCoordinator` interface; provide `EagerCoordinator` and `CooperativeCoordinator` implementations using a shared persistence layer (offsets topic).
-  - Remove dual-coordinator wrapper; pick strategy per-group/protocol via the interface, routed through the partition-backed coordinator.
-- **Online Partition Scaling deliverables**
-  - Partition reassignment workflow (plan/apply) with controlled leader moves.
-  - Data movement via follower promotion + catch-up; minimize client impact.
-  - Safety checks: throttle reassignments, ensure ISR quorum before moves, metrics around movement progress.
+### Phase 4: Operations (0/12)
+- [ ] Pre-operations: thorough testing & benchmarking
+- [ ] Milestone 15: gRPC API & Go Client (js/ts as well if time)
+- [ ] Milestone 16: CLI Tool
+- [ ] Milestone 17: Prometheus Metrics & Grafana
+- [ ] Milestone 18: Multi-Tenancy & Quotas
+- [ ] Milestone 19: Kubernetes & Chaos Testing
+- [ ] Milestone 20: Final Review & Documentation with Examples and Comparison to Alternatives
+- [ ] Milestone 21: Buffer Pooling & Performance Tuning
+- [ ] Milestone 22: Security - TLS, Auth, RBAC
+- [ ] Milestone 23: Backup & Restore
+- [ ] Milestone 24: Monitoring & Alerting
+- [ ] Milestone 25: Production Hardening & Best Practices
+- [ ] Milestone 26: Release Process & CI/CD
 
+## Up Next – Milestone 14 (Log Compaction, Snapshots & Time Index)
 
-### Phase 4: Operations (0/6)
-- [ ] Pre-operations: thourough testing & benchmarking
-- [ ] Milestone 14: gRPC API & Go Client (js/ts as well if time)
-- [ ] Milestone 15: CLI Tool
-- [ ] Milestone 16: Prometheus Metrics & Grafana
-- [ ] Milestone 17: Multi-Tenancy & Quotas
-- [ ] Milestone 18: Kubernetes & Chaos Testing
-- [ ] Milestone 19: Final Review & Documentation with Examples and Comparison to Alternatives
-- [ ] Milestone 20: Buffer Pooling & Performance Tuning
-- [ ] Milestone 21: Security - TLS, Auth, RBAC
-- [ ] Milestone 22: Backup & Restore
-- [ ] Milestone 23: Monitoring & Alerting
-- [ ] Milestone 24: Production Hardening & Best Practices
-- [ ] Milestone 25: Release Process & CI/CD
+- **Objective**: Optimize internal topic storage and enable time-based message queries
+- **Log Compaction**:
+  - Keep only latest value per key (ideal for `__consumer_offsets`)
+  - Compaction policy per topic (compact vs delete)
+  - Background compaction thread with configurable intervals
+- **Coordinator Snapshots**:
+  - Periodic snapshot of coordinator state (faster recovery)
+  - Replay from snapshot + tail of log (instead of full replay)
+  - Snapshot cleanup and retention policy
+- **Time-Based Index**:
+  - Timestamp → Offset mapping for each segment
+  - `GetMessagesFromTime(timestamp)` API for replay from point-in-time
+  - `GetMessagesInRange(startTime, endTime)` for time-bounded queries
+  - Useful for: debugging, replay, audit logs, data recovery
+- **Transaction State Replication**:
+  - Move `TransactionCoordinator` state to `__transaction_state` internal topic
+  - Same pattern as consumer offsets replication
 
 ## What Works
 
-### Milestone 12 - Cooperative Rebalancing ✅ ⭐ (Just Completed!)
-- **Cooperative protocol** implementing Kafka's KIP-429 for zero-downtime rebalances
-- **Three assignors**: Sticky (default), Range, Round-Robin
-- **Two-phase protocol**: pending_revoke → pending_assign → complete
-- **Sticky assignment**: MaxImbalance=1 to minimize partition movement
-- **Revocation tracking**: 60s timeout with force-complete fallback
-- **Heartbeat integration**: Rebalance state communicated via heartbeat response
-- **Rebalance metrics**: Duration, partition moves, timeouts by reason
-- **HTTP API**: 8 new endpoints for cooperative operations
-- **Assignment diff**: Calculate precise revocations and assignments
+### Milestone 13 - Online Partition Scaling + Coordinators on Internal Topic ✅ ⭐ (Just Completed!)
+- **Internal Topic Infrastructure**:
+  - `__consumer_offsets` internal topic (50 partitions, replication factor 3)
+  - Binary format for offset commits and group metadata
+  - Hash-based group-to-partition mapping: `partition = murmur3(groupID) % 50`
+  - `InternalTopicManager` for lifecycle management
+- **Fault-Tolerant Coordinator**:
+  - `GroupCoordinator` interface abstracting coordinator implementations
+  - `PartitionBackedCoordinator` persisting state to `__consumer_offsets`
+  - `CoordinatorRouter` for hash-based routing to correct coordinator
+  - Coordinator failover via ISR election (no bespoke election path)
+- **Online Partition Scaling**:
+  - Kafka-style scaling (add only, never reduce)
+  - `PartitionScaler` with validation, assignment, and notification
+  - Round-robin replica assignment across cluster nodes
+  - Consumer group notification for automatic rebalance
+- **Partition Reassignment**:
+  - 3-phase workflow: expand replicas → wait catchup → shrink
+  - Throttling support to control data movement rate
+  - Progress tracking with completion percentage
+  - Safety: ISR quorum checks before moves
+- **Admin API** (HTTP endpoints):
+  - `POST /admin/topics/{name}/partitions` - Add partitions
+  - `POST /admin/reassignment` - Start partition reassignment
+  - `GET /admin/reassignment/{id}` - Get reassignment progress
+  - `DELETE /admin/reassignment/{id}` - Cancel reassignment
+  - `GET /admin/scaling/{topic}` - Get scaling status
 
-### Milestone 1 - Storage Engine ✅
+### Milestone 12 - Cooperative Rebalancing ✅ ⭐
 - **Binary message encoding** with CRC32 Castagnoli checksums
 - **Append-only log** with automatic segment rollover at 64MB
 - **Segment files** (.log) with sealed/active states
