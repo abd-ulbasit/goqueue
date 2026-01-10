@@ -3,12 +3,64 @@
 ## Current Focus
 
 **Phase**: 3 - Distribution
-**Milestone**: 10 - Cluster Formation & Metadata ✅ COMPLETE
-**Status**: M10 Complete! Ready for M11 (Leader Election & Replication)
+**Milestone**: 12 - Cooperative Rebalancing ✅ COMPLETE
+**Status**: M12 Complete! Spinning up M13 (Online Partition Scaling + replicated group coordinator)
 
 ## What I'm Working On
 
-### Just Completed (M10 - Cluster Formation & Metadata)
+### Just Completed (M12 - Cooperative Rebalancing)
+- ✅ **Core Types** - RebalanceState state machine, TopicPartition, RebalanceContext
+- ✅ **Sticky Assignor** - Partition assignment with MaxImbalance (minimizes moves)
+- ✅ **Range Assignor** - Contiguous partition ranges per consumer
+- ✅ **Round-Robin Assignor** - Even distribution across members
+- ✅ **Two-Phase Protocol** - pending_revoke → pending_assign → complete
+- ✅ **Revocation Tracking** - PendingRevocation with deadlines (60s timeout)
+- ✅ **Heartbeat Integration** - HeartbeatResponse with rebalance state
+- ✅ **Rebalance Metrics** - Duration, partition moves, timeouts, reasons
+- ✅ **HTTP API** - /join/cooperative, /heartbeat/cooperative, /revoke, /assignment
+- ✅ **Assignment Diff** - Calculate revocations and assignments between states
+- ✅ **Broker Integration** - CooperativeGroupCoordinator in broker
+- ✅ **Tests** - Comprehensive tests for assignors, rebalancer, API
+
+### Key Technical Decisions (M12)
+- **Default Assignor**: Sticky (minimizes partition movement)
+- **MaxImbalance**: 1 partition (allows slight imbalance for stability)
+- **Revocation Timeout**: 60 seconds (matches SQS visibility timeout style)
+- **Protocol**: Full cooperative (two-phase revoke-then-assign)
+- **Rebalance Trigger**: Via heartbeat response (no separate notification)
+- **State Machine**: 4 states (none, pending_revoke, pending_assign, complete)
+- **Generation Tracking**: Incremented on each rebalance
+- **Metrics**: Per-reason breakdown, duration histogram
+
+### Files Created (M12)
+- **Broker Package** (4 files):
+  - `internal/broker/cooperative_rebalance.go` - Core types, state machine
+  - `internal/broker/sticky_assignor.go` - All assignment strategies
+  - `internal/broker/cooperative_rebalancer.go` - Rebalance orchestration
+  - `internal/broker/cooperative_group.go` - Consumer group integration
+- **API Package** (1 file):
+  - `internal/api/cooperative_api.go` - HTTP handlers
+- **Tests** (3 files):
+  - `internal/broker/cooperative_rebalance_test.go` - Core type tests
+  - `internal/broker/cooperative_rebalancer_test.go` - Rebalancer tests
+  - `internal/broker/sticky_assignor_test.go` - Assignor tests
+- **Modified**:
+  - `internal/broker/broker.go` - cooperativeGroupCoordinator field
+  - `internal/api/server.go` - Route registration for cooperative endpoints
+
+### Cooperative Rebalancing API Endpoints (M12)
+```
+POST /groups/{groupID}/join/cooperative        Join with cooperative protocol
+POST /groups/{groupID}/leave/cooperative       Leave with graceful handoff
+POST /groups/{groupID}/heartbeat/cooperative   Get rebalance state + assignments
+POST /groups/{groupID}/revoke                  Acknowledge partition revocation
+GET  /groups/{groupID}/assignment              Get current partition assignment
+GET  /groups/{groupID}/cooperative             Get cooperative group info
+GET  /groups/{groupID}/rebalance/stats         Get group rebalance statistics
+GET  /rebalance/stats                          Get global rebalance statistics
+```
+
+### Previously Completed (M10 - Cluster Formation & Metadata)
 - ✅ **Node Identity** - NodeID with hostname fallback, NodeAddress parsing
 - ✅ **Cluster Types** - NodeStatus (Unknown→Alive→Suspect→Dead→Leaving), NodeRole (Follower|Controller)
 - ✅ **Membership Manager** - Thread-safe node registry with event listeners
@@ -91,12 +143,16 @@ GET  /cluster/health      Health check endpoint
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### Next Steps (M11 - Leader Election & Replication)
-1. Log replication protocol (ISR concept)
-2. Leader election for partitions (not just controller)
-3. Follower fetch loop
-4. Replica acknowledgment and high watermark
-5. Partition reassignment on failure
+### Next Steps (M13 - Online Partition Scaling + Replicated Coordinator)
+1. Milestone 13 scope:
+  - **Replicated Group Coordinator** via internal `__consumer_offsets` topic (partitioned + replicated). Group coordinator = leader of hashed offsets partition; followers can replay to take over.
+  - **Coordinator Interface**: Define `GroupCoordinator` interface with eager/cooperative implementations; remove dual-coordinator wrapper by routing through strategy selection on replicated backbone.
+  - **Durability Path**: Persist group membership/offset commits into the offsets topic (reuse existing log/replication stack instead of new storage path).
+  - **Failover Behavior**: Rely on ISR leader election for the offsets topic; coordinator failover follows partition leadership—no bespoke election.
+2. Online Partition Scaling (core of M13):
+  - Plan/apply partition reassignments with throttling and safety checks (ISR healthy, lag bounds) to minimize client disruption.
+  - Data movement via follower catch-up + leader promotion to avoid double-write paths.
+  - Metrics and progress tracking for reassignment, plus hooks to pause/resume operations.
 
 ## Recent Changes
 

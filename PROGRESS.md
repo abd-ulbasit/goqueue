@@ -3,8 +3,8 @@
 ## Status: Phase 3 - In Progress
 
 **Target Milestones**: 18
-**Completed**: 11
-**Current**: Milestone 12 (Cooperative Rebalancing)
+**Completed**: 12
+**Current**: Milestone 13 (Online Partition Scaling)
 
 ---
 
@@ -577,25 +577,78 @@ ReplicationConfig{
 
 ---
 
-### Milestone 12: Cooperative Rebalancing ⭐ UNIQUE
+### Milestone 12: Cooperative Rebalancing ✅ COMPLETE ⭐ UNIQUE
 
-**Goal:** Zero-downtime consumer rebalancing.
+**Goal:** Zero-downtime consumer rebalancing using Kafka's KIP-429 cooperative protocol.
 
 **Learning Focus:**
-- Kafka's stop-the-world problem
-- Incremental cooperative protocol
-- Partition handoff without stopping
+- Kafka's stop-the-world problem (why traditional rebalancing stops all consumers)
+- Incremental cooperative protocol (two-phase revoke-then-assign)
+- Sticky partition assignment (minimize partition movement)
+- Partition handoff without stopping processing
 
 **Deliverables:**
-- [ ] Cooperative protocol implementation
-- [ ] Incremental assignment
-- [ ] Sticky assignment (minimize moves)
-- [ ] Graceful partition handoff
-- [ ] Rebalance metrics
-- [ ] Rebalance timeout handling
+- [x] Core cooperative rebalancing types and state machine
+- [x] Sticky partition assignor (minimizes partition movement)
+- [x] Range and round-robin assignors
+- [x] Two-phase rebalance protocol (revoke → assign)
+- [x] Visibility timeout for revocation acknowledgment
+- [x] Rebalance metrics (duration, partition moves, timeouts)
+- [x] HTTP API for cooperative operations
+- [x] Consumer group integration with cooperative mode
+- [x] Assignment diff calculation
+- [x] Graceful partition handoff
+
+**Implementation Details:**
+```
+COOPERATIVE REBALANCE FLOW (KIP-429):
+
+Traditional (Stop-the-World):
+┌─────────────────────────────────────────────────────────────┐
+│  Consumer-1: ████████████░░░░░░░░░░░░░░░████████████████    │
+│  Consumer-2: ████████████░░░░░░░░░░░░░░░████████████████    │
+│  Consumer-3:              NEW JOINS HERE                    │
+│              ├─ ALL STOP ─┤             ├── RESUME ──────   │
+│              (rebalance window - all processing halted)     │
+└─────────────────────────────────────────────────────────────┘
+
+Cooperative (Incremental):
+┌─────────────────────────────────────────────────────────────┐
+│  Consumer-1: ████████████│revoke│████████████████████████   │
+│  Consumer-2: ██████████████████████████████████████████████ │
+│  Consumer-3:                    │assign│████████████████    │
+│              └── Only affected partitions stop briefly ──┘  │
+└─────────────────────────────────────────────────────────────┘
+
+STATE MACHINE:
+  pending_revoke → pending_assign → complete
+       ↑                              │
+       └──────── (new trigger) ───────┘
+
+STICKY ASSIGNMENT:
+  - MaxImbalance: Allows 1 partition imbalance before forcing moves
+  - Preserves existing assignments when members join/leave
+  - Only moves partitions when absolutely necessary
+```
+
+**Key Files:**
+- `cooperative_rebalance.go` - Core types, state machine, metrics
+- `sticky_assignor.go` - Partition assignment strategies
+- `cooperative_rebalancer.go` - Rebalance orchestration
+- `cooperative_group.go` - Consumer group integration
+- `cooperative_api.go` - HTTP API handlers
+
+**Tests:**
+- [x] Sticky assignor preserves assignments on member join
+- [x] Range and round-robin assignors distribute evenly
+- [x] Assignment diff calculation
+- [x] Rebalancer state machine transitions
+- [x] Metrics recording
+- [x] Concurrent group rebalances
+- [x] Generation tracking
 
 **Why This Matters:**
-> "Kafka's rebalancing stops all consumers even when one joins. I implemented Kafka's KIP-429 cooperative protocol as the default, making rebalances nearly invisible."
+> "Kafka's traditional rebalancing stops ALL consumers when ONE joins - a major pain point. I implemented Kafka's KIP-429 cooperative protocol, making rebalances nearly invisible. Consumers continue processing unaffected partitions during rebalance."
 
 ---
 

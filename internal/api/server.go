@@ -210,8 +210,14 @@ func (s *Server) registerRoutes() {
 			// Offsets
 			r.Post("/offsets", s.commitOffsets)
 			r.Get("/offsets", s.getOffsets)
+
+			// Cooperative rebalancing routes (M12)
+			s.RegisterCooperativeGroupRoutes(r)
 		})
 	})
+
+	// Global cooperative routes (M12)
+	s.RegisterCooperativeGlobalRoutes(s.router)
 
 	// ==========================================================================
 	// MESSAGE ACKNOWLEDGMENT (M4 - RELIABILITY)
@@ -418,6 +424,62 @@ func (s *Server) registerRoutes() {
 		r.Post("/commit", s.commitTransaction)
 		r.Post("/abort", s.abortTransaction)
 	})
+
+	// ==========================================================================
+	// COOPERATIVE REBALANCING API (M12)
+	// ==========================================================================
+	//
+	// These endpoints provide cooperative rebalancing for consumer groups.
+	// Cooperative rebalancing minimizes consumer downtime during rebalances
+	// by only revoking partitions that need to move (Kafka KIP-429 style).
+	//
+	// COOPERATIVE ENDPOINTS:
+	//   POST /groups/{groupID}/join/cooperative      Join with cooperative protocol
+	//   POST /groups/{groupID}/leave/cooperative     Leave with cooperative protocol
+	//   POST /groups/{groupID}/heartbeat/cooperative Heartbeat with rebalance response
+	//   POST /groups/{groupID}/revoke                Acknowledge partition revocation
+	//   GET  /groups/{groupID}/assignment            Get current assignment
+	//   GET  /groups/{groupID}/cooperative           Get cooperative group info
+	//   GET  /groups/{groupID}/rebalance/stats       Get rebalance stats for group
+	//   GET  /rebalance/stats                        Get global rebalance stats
+	//
+	// FLOW (cooperative join):
+	//   ┌─────────────────────────────────────────────────────────────────────┐
+	//   │  1. POST /groups/{group}/join/cooperative                           │
+	//   │     Body: {"client_id": "consumer-1", "topics": ["orders"]}         │
+	//   │     Response: {"member_id": "...", "generation": 1,                 │
+	//   │               "rebalance_required": true, "protocol": "cooperative"}│
+	//   │                                                                     │
+	//   │  2. POST /groups/{group}/heartbeat/cooperative (poll for work)      │
+	//   │     Body: {"member_id": "...", "generation": 1}                     │
+	//   │     Response: {"rebalance_required": true,                          │
+	//   │                "partitions_to_revoke": [...],                       │
+	//   │                "state": "pending_revoke"}                           │
+	//   │                                                                     │
+	//   │  3. Consumer: stop processing revoked partitions, commit offsets    │
+	//   │                                                                     │
+	//   │  4. POST /groups/{group}/revoke                                     │
+	//   │     Body: {"member_id": "...", "generation": 1,                     │
+	//   │            "revoked_partitions": [...]}                             │
+	//   │     Response: {"status": "acknowledged"}                            │
+	//   │                                                                     │
+	//   │  5. POST /groups/{group}/heartbeat/cooperative (poll again)         │
+	//   │     Response: {"rebalance_required": true,                          │
+	//   │                "partitions_assigned": [...],                        │
+	//   │                "state": "pending_assign"}                           │
+	//   │                                                                     │
+	//   │  6. Consumer: start processing newly assigned partitions            │
+	//   └─────────────────────────────────────────────────────────────────────┘
+	//
+	// KEY BENEFITS:
+	//   - Consumers keep processing unaffected partitions during rebalance
+	//   - Sticky assignment minimizes partition movement
+	//   - Two-phase protocol ensures clean handoff
+	//
+	// ==========================================================================
+	// NOTE: Cooperative routes are registered inside the /groups/{groupID} block
+	// above via RegisterCooperativeGroupRoutes() and globally via
+	// RegisterCooperativeGlobalRoutes() to avoid duplicate path registration.
 }
 
 // loggingMiddleware logs all HTTP requests.
