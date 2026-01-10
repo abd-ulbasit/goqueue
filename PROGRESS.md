@@ -1,10 +1,10 @@
 # GoQueue Development Progress
 
-## Status: Phase 3 - In Progress
+## Status: Phase 3.5 - In Progress
 
 **Target Milestones**: 18
-**Completed**: 12
-**Current**: Milestone 13 (Online Partition Scaling)
+**Completed**: 13
+**Current**: Milestone 14 (Time Index, Snapshots & Log Compaction) - Partial Complete
 
 ---
 
@@ -662,16 +662,116 @@ STICKY ASSIGNMENT:
 - Key-based routing during splits
 
 **Deliverables:**
-- [ ] Add partition API
-- [ ] Data redistribution (optional)
-- [ ] Key routing during transition
-- [ ] Minimal rebalance impact
+- [x] Add partition API ✅
+- [x] Partition reassignment with throttling ✅
+- [x] Coordinator on internal topics ✅
+- [x] Consumer group notification ✅
+
+**Status:** ✅ COMPLETE
 
 ---
 
-## Phase 4: Operations (Milestones 14-18)
+## Phase 3.5: Distribution Hardening
 
-### Milestone 14: gRPC API & Go Client
+### Milestone 14: Time Index, Snapshots & Log Compaction ⭐
+
+**Goal:** Optimize internal topic storage and enable time-based message queries.
+
+**Learning Focus:**
+- Time-based indices for efficient replay
+- Snapshot strategies for fast recovery
+- Log compaction for space efficiency
+- Tombstone handling
+
+**Deliverables:**
+- [x] Time Index (Binary format, 4KB granularity, O(log n) lookup) ✅
+  - `TimeIndex` with MaybeAppend, Lookup, LookupRange methods
+  - Segment integration: ReadFromTimestamp, ReadTimeRange
+  - Corruption recovery with automatic rebuild
+  - Test coverage: 9 tests, all passing
+- [x] Coordinator Snapshots (Binary format, CRC32 validation) ✅
+  - SnapshotWriter, SnapshotReader, SnapshotManager
+  - Trigger: 10K records OR 5 minutes
+  - Keep last 3 snapshots, auto-cleanup
+  - Test coverage: 9 tests, all passing
+- [ ] Log Compaction (Infrastructure created, needs Log API integration) 🔄
+  - Copy-on-compact strategy documented
+  - Dirty ratio trigger (50% threshold)
+  - Tombstone retention (24 hours)
+  - Needs refactoring to work with Log abstraction
+
+**Key Concepts:**
+
+**Time Index:**
+```
+┌──────────────────────────────────────────────────────────────┐
+│                   TIME INDEX (.timeindex)                    │
+│                                                              │
+│  Entry: 16 bytes (8B timestamp + 8B offset)                  │
+│  Granularity: 4KB (same as offset index)                     │
+│                                                              │
+│  Timestamp    Offset       Timestamp    Offset               │
+│  1640000000   0           1640000060   1000                  │
+│                                                              │
+│  Lookup: O(log n) binary search vs O(n) full scan            │
+│  Use case: "Replay from 2 hours ago"                         │
+└──────────────────────────────────────────────────────────────┘
+```
+
+**Coordinator Snapshots:**
+```
+┌──────────────────────────────────────────────────────────────┐
+│                   SNAPSHOT LIFECYCLE                         │
+│                                                              │
+│  WITHOUT: Replay 1M records from offset 0 (~5 min)           │
+│  WITH: Load snapshot @ 990K + replay 10K records (~3 sec)    │
+│                                                              │
+│  SPEEDUP: 100x faster recovery                               │
+│                                                              │
+│  Format: snapshot-{type}-{offset}-{timestamp}.bin            │
+│  Header: 32 bytes (magic, version, type, CRC, offsets)       │
+│  Entries: Type + KeyLen + Key + ValueLen + Value             │
+│                                                              │
+│  Trigger: 10K records OR 5 minutes (whichever first)         │
+│  Cleanup: Keep last 3 snapshots                              │
+└──────────────────────────────────────────────────────────────┘
+```
+
+**Log Compaction (Planned):**
+```
+┌──────────────────────────────────────────────────────────────┐
+│                 COPY-ON-COMPACT STRATEGY                     │
+│                                                              │
+│  BEFORE: 1M records, 10K unique keys (990K duplicates)       │
+│  AFTER:  10K records (one per key, 99% reduction)            │
+│                                                              │
+│  Strategy: Last value wins per key                           │
+│  Trigger: Dirty ratio >= 50% (half are duplicates)           │
+│  Tombstones: Null value = delete after 24h retention         │
+│                                                              │
+│  Use case: __consumer_offsets, __transaction_state           │
+└──────────────────────────────────────────────────────────────┘
+```
+
+**Key Files:**
+- `internal/storage/time_index.go` - Time index implementation
+- `internal/storage/time_index_test.go` - Time index tests  
+- `internal/storage/segment.go` - Updated with time index integration
+- `internal/broker/coordinator_snapshot.go` - Snapshot infrastructure
+- `internal/broker/coordinator_snapshot_test.go` - Snapshot tests
+- `internal/broker/compactor.go` - Compaction (needs Log API work)
+- `docs/ARCHITECTURE.md` - Updated with M14 documentation
+
+**Why This Matters:**
+> "Time-based queries enable debugging and replay use cases ('show me messages from last 2 hours'). Snapshots accelerate coordinator recovery from minutes to seconds. Log compaction keeps internal topics bounded."
+
+**Status:** ⭐ PARTIAL COMPLETE (Time Index ✅, Snapshots ✅, Compaction 🔄)
+
+---
+
+## Phase 4: Operations (Milestones 15-18)
+
+### Milestone 15: gRPC API & Go Client
 
 **Goal:** High-performance gRPC API and idiomatic Go client.
 
