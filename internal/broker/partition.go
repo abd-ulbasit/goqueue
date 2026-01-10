@@ -459,6 +459,12 @@ func (p *Partition) Dir() string {
 	return p.dir
 }
 
+// Log returns the underlying storage log.
+// This is used by internal components that need direct log access.
+func (p *Partition) Log() *storage.Log {
+	return p.log
+}
+
 // =============================================================================
 // PARTITION MANAGEMENT
 // =============================================================================
