@@ -350,11 +350,17 @@ func (s *ClusterState) Clone() *ClusterState {
 }
 
 // GetNode returns the NodeInfo for a given ID, or nil if not found.
+// Returns a clone to prevent data races when caller reads while
+// other goroutines may be updating the node.
 func (s *ClusterState) GetNode(id NodeID) *NodeInfo {
 	if s == nil || s.Nodes == nil {
 		return nil
 	}
-	return s.Nodes[id]
+	node := s.Nodes[id]
+	if node == nil {
+		return nil
+	}
+	return node.Clone()
 }
 
 // AliveNodes returns all nodes with status ALIVE.

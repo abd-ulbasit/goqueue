@@ -817,9 +817,8 @@ func (s *Server) publishMessages(w http.ResponseWriter, r *http.Request) {
 		// NOTE: Delayed messages with priority will be tracked in the delay index
 		// and the priority will be honored when the message becomes visible.
 		if isDelayed {
-			// Delayed message (M5) - priority is stored but not used until delivery
-			// TODO: Add PublishAtWithPriority to broker for full M5+M6 integration
-			partition, offset, err = s.broker.PublishAt(topicName, key, value, deliverAt)
+			// Delayed message with priority (M5+M6 integration)
+			partition, offset, err = s.broker.PublishAtWithPriority(topicName, key, value, deliverAt, priority)
 			results[i] = PublishResult{
 				Partition: partition,
 				Offset:    offset,
