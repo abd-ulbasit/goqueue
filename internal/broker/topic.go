@@ -626,3 +626,150 @@ func (t *Topic) Delete() error {
 
 	return nil
 }
+
+// =============================================================================
+// ONLINE PARTITION SCALING
+// =============================================================================
+//
+// AddPartition adds a new partition to the topic at runtime.
+//
+// KAFKA-STYLE PARTITION SCALING:
+// - Partitions can only be added, never removed
+// - Existing messages stay in original partitions
+// - Only new messages may route to new partitions (if key hashes differently)
+//
+// WHY NO REMOVAL?
+//   - Messages already exist in partitions based on hash(key) % oldCount
+//   - Removing partition N would orphan all messages in partition N
+//   - Consumer offsets for partition N would become invalid
+//   - Guaranteed message loss
+//
+// IMPACT ON MESSAGE ROUTING:
+//
+//   BEFORE: 3 partitions
+//     hash("user-123") = 1234567 → 1234567 % 3 = 1 → partition 1
+//
+//   AFTER: 6 partitions
+//     hash("user-123") = 1234567 → 1234567 % 6 = 3 → partition 3
+//
+//   RESULT:
+//     - Old messages for "user-123" remain in partition 1
+//     - New messages for "user-123" go to partition 3
+//     - Consumer must handle reading from both partitions for same key
+//
+// WHEN TO ADD PARTITIONS:
+//   1. Need more consumer parallelism (max consumers = partition count)
+//   2. Partition throughput maxed out
+//   3. Rebalancing load (if some partitions have more data)
+//
+// WHEN NOT TO ADD:
+//   1. Key ordering is critical (messages with same key may span partitions)
+//   2. Consumer can't handle reading from more partitions
+//   3. Cluster doesn't have capacity for more partition replicas
+//
+// COMPARISON:
+//   - Kafka: Supports partition expansion only (kafka-topics.sh --alter)
+//   - RabbitMQ: Queues aren't partitioned (different model)
+//   - Pulsar: Supports partition expansion with similar semantics
+//   - goqueue: Follows Kafka model
+//
+// =============================================================================
+
+// AddPartition adds a new partition to the topic.
+//
+// PARAMETERS:
+//   - partitionID: The ID for the new partition (must be > current max)
+//
+// RETURNS:
+//   - error if partition already exists or creation fails
+//
+// USAGE:
+//
+//	// Add partition 3 to a topic that currently has partitions 0, 1, 2
+//	err := topic.AddPartition(3)
+//
+// NOTE: This is typically called by PartitionScaler during online scaling.
+// The partitionID should be sequential (no gaps allowed).
+func (t *Topic) AddPartition(partitionID int) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.closed {
+		return ErrTopicClosed
+	}
+
+	// Validate partition ID
+	// Must be exactly len(partitions) to maintain contiguous IDs
+	if partitionID != len(t.partitions) {
+		return fmt.Errorf("invalid partition ID %d: expected %d (partitions must be sequential)", partitionID, len(t.partitions))
+	}
+
+	// Create the new partition
+	partition, err := NewPartition(t.baseDir, t.config.Name, partitionID)
+	if err != nil {
+		return fmt.Errorf("failed to create partition %d: %w", partitionID, err)
+	}
+
+	// Append to partitions slice
+	t.partitions = append(t.partitions, partition)
+
+	// Update config
+	t.config.NumPartitions = len(t.partitions)
+
+	return nil
+}
+
+// AddPartitions adds multiple new partitions to the topic.
+// This is more efficient than calling AddPartition multiple times
+// as it only takes the lock once.
+//
+// PARAMETERS:
+//   - count: Number of partitions to add
+//
+// RETURNS:
+//   - List of new partition IDs
+//   - error if creation fails
+//
+// EXAMPLE:
+//
+//	// Add 3 more partitions to a topic with 4 partitions
+//	newIDs, err := topic.AddPartitions(3)  // Returns [4, 5, 6]
+func (t *Topic) AddPartitions(count int) ([]int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.closed {
+		return nil, ErrTopicClosed
+	}
+
+	if count <= 0 {
+		return nil, fmt.Errorf("count must be positive, got %d", count)
+	}
+
+	startID := len(t.partitions)
+	newIDs := make([]int, 0, count)
+
+	// Create all new partitions
+	for i := 0; i < count; i++ {
+		partitionID := startID + i
+
+		partition, err := NewPartition(t.baseDir, t.config.Name, partitionID)
+		if err != nil {
+			// Rollback: close any partitions we created
+			for j := 0; j < i; j++ {
+				t.partitions[startID+j].Delete()
+			}
+			// Restore original slice
+			t.partitions = t.partitions[:startID]
+			return nil, fmt.Errorf("failed to create partition %d: %w", partitionID, err)
+		}
+
+		t.partitions = append(t.partitions, partition)
+		newIDs = append(newIDs, partitionID)
+	}
+
+	// Update config
+	t.config.NumPartitions = len(t.partitions)
+
+	return newIDs, nil
+}

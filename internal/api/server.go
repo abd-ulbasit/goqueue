@@ -480,6 +480,25 @@ func (s *Server) registerRoutes() {
 	// NOTE: Cooperative routes are registered inside the /groups/{groupID} block
 	// above via RegisterCooperativeGroupRoutes() and globally via
 	// RegisterCooperativeGlobalRoutes() to avoid duplicate path registration.
+
+	// ==========================================================================
+	// ADMIN API (M13)
+	// ==========================================================================
+	//
+	// Administrative endpoints for cluster operations:
+	//   - Partition scaling (add partitions to existing topics)
+	//   - Partition reassignment (move replicas between nodes)
+	//   - Coordinator management (view and discover group coordinators)
+	//
+	// SECURITY NOTE:
+	// These endpoints should be protected in production environments.
+	// Consider adding:
+	//   - Authentication (API keys, OAuth)
+	//   - Authorization (role-based access)
+	//   - Audit logging
+	//
+	// ==========================================================================
+	s.RegisterAdminRoutes(s.router)
 }
 
 // loggingMiddleware logs all HTTP requests.
