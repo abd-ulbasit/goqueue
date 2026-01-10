@@ -58,9 +58,9 @@
 │  │  │  └─────────────┘           └─────────────┘           └─────────────┘           │  ││
 │  │  │                                                                                │  ││
 │  │  │  ┌──────────────────────────────────────────────────────────────────────────┐  │  ││
-│  │  │  │                    Group Coordinator (Milestone 3)                       │  │  ││
+│  │  │  │                    Group Coordinator (Milestone 3 + 12 ✅)               │  │  ││
 │  │  │  │  • Consumer group membership    • Partition assignment (range/sticky)    │  │  ││
-│  │  │  │  • Heartbeat monitoring         • Rebalance orchestration                │  │  ││
+│  │  │  │  • Heartbeat monitoring         • Cooperative rebalance (KIP-429) ✅     │  │  ││
 │  │  │  │  • Session timeout detection    • Generation ID tracking                 │  │  ││
 │  │  │  └──────────────────────────────────────────────────────────────────────────┘  │  ││
 │  │  │                                                                                │  ││
@@ -392,6 +392,165 @@ Consumer                    Broker                    In-Flight Index         DL
        │                 │        │
        │  6. Resume fetching from assigned partitions
        │                 │        │
+```
+
+### 5. Cooperative Rebalancing Flow (Milestone 12 ✅)
+
+GoQueue implements Kafka's KIP-429 cooperative rebalancing protocol, which enables
+incremental partition reassignment without stopping all consumers.
+
+#### Traditional vs Cooperative Rebalancing
+
+```
+TRADITIONAL (Stop-the-World) - What Kafka originally did:
+┌────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                │
+│  Time ──────────────────────────────────────────────────────────────────────►  │
+│                                                                                │
+│  Consumer-1: ██████████████████░░░░░░░░░░░░░░░░░░░██████████████████████████   │
+│              Processing       │ ALL STOPPED      │ Processing                  │
+│                               │ (rebalancing)    │                             │
+│  Consumer-2: ██████████████████░░░░░░░░░░░░░░░░░░░██████████████████████████   │
+│                               │                  │                             │
+│  Consumer-3:                  │ NEW MEMBER       │ ████████████████████████    │
+│                               │ JOINS HERE       │ Processing                  │
+│                               │                  │                             │
+│              Problem: ALL consumers stop, even those keeping their partitions  │
+│                                                                                │
+└────────────────────────────────────────────────────────────────────────────────┘
+
+COOPERATIVE (Incremental) - GoQueue's default:
+┌────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                │
+│  Time ──────────────────────────────────────────────────────────────────────►  │
+│                                                                                │
+│  Consumer-1: ████████████████│R│██████████████████████████████████████████████ │
+│              Processing   Revoke Processing (unaffected partitions continue)   │
+│                               │                                                │
+│  Consumer-2: ██████████████████████████████████████████████████████████████████ │
+│              Processing (never stops - no partitions revoked)                  │
+│                                                                                │
+│  Consumer-3:                    │A│████████████████████████████████████████████ │
+│                             Assign Processing                                  │
+│                                                                                │
+│              R = Revoke phase (brief), A = Assign phase                        │
+│              Only affected partitions experience brief pause                   │
+│                                                                                │
+└────────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Cooperative Rebalance State Machine
+
+```
+                          ┌──────────────────────┐
+                          │   TRIGGER:           │
+                          │   • Member joins     │
+                          │   • Member leaves    │
+                          │   • Partition change │
+                          └──────────┬───────────┘
+                                     │
+                                     ▼
+                     ┌───────────────────────────────┐
+                     │    STATE: pending_revoke     │
+                     │                               │
+                     │  • Calculate assignment diff  │
+                     │  • Send revoke requests       │
+                     │  • Wait for ACKs (60s timeout)│
+                     └───────────────┬───────────────┘
+                                     │
+                                     │ All revocations
+                                     │ acknowledged (or timeout)
+                                     ▼
+                     ┌───────────────────────────────┐
+                     │    STATE: pending_assign     │
+                     │                               │
+                     │  • Send new assignments via   │
+                     │    heartbeat responses        │
+                     │  • Consumers start processing │
+                     │    newly assigned partitions  │
+                     └───────────────┬───────────────┘
+                                     │
+                                     │ All consumers
+                                     │ received assignments
+                                     ▼
+                     ┌───────────────────────────────┐
+                     │    STATE: complete           │
+                     │                               │
+                     │  • Rebalance finished        │
+                     │  • Metrics recorded          │
+                     │  • Ready for next trigger    │
+                     └───────────────────────────────┘
+```
+
+#### Partition Assignment Strategies
+
+```
+STICKY ASSIGNOR (Default) - Minimizes partition movement
+┌────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                │
+│  Before (2 consumers):              After (3 consumers join):                  │
+│  ┌──────────────────┐               ┌──────────────────┐                       │
+│  │ Consumer-1: [P0,P1,P2] │  ───►   │ Consumer-1: [P0,P1] │  (keeps P0,P1)    │
+│  │ Consumer-2: [P3,P4,P5] │         │ Consumer-2: [P3,P4] │  (keeps P3,P4)    │
+│  └──────────────────┘               │ Consumer-3: [P2,P5] │  (gets moved)     │
+│                                     └──────────────────┘                       │
+│                                                                                │
+│  Key: MaxImbalance = 1 (allows up to 1 extra partition per consumer)           │
+│       Only moves partitions when member has > (fairShare + MaxImbalance)       │
+│                                                                                │
+└────────────────────────────────────────────────────────────────────────────────┘
+
+RANGE ASSIGNOR - Assigns contiguous partition ranges per consumer
+┌────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                │
+│  Topic "orders" with 6 partitions, 3 consumers:                                │
+│  ┌──────────────────────────────────────────────────────────────────┐          │
+│  │ Consumer-1: [P0, P1]    (partitions 0-1)                         │          │
+│  │ Consumer-2: [P2, P3]    (partitions 2-3)                         │          │
+│  │ Consumer-3: [P4, P5]    (partitions 4-5)                         │          │
+│  └──────────────────────────────────────────────────────────────────┘          │
+│                                                                                │
+└────────────────────────────────────────────────────────────────────────────────┘
+
+ROUND-ROBIN ASSIGNOR - Even distribution across all members
+┌────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                │
+│  Topics "orders"(3 parts) + "events"(3 parts), 2 consumers:                    │
+│  ┌──────────────────────────────────────────────────────────────────┐          │
+│  │ Consumer-1: [orders-0, orders-2, events-1]                       │          │
+│  │ Consumer-2: [orders-1, events-0, events-2]                       │          │
+│  └──────────────────────────────────────────────────────────────────┘          │
+│                                                                                │
+└────────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### HTTP API Endpoints (Cooperative Mode)
+
+```
+POST /groups/{groupID}/join/cooperative
+  Request:  { "consumer_id": "...", "subscriptions": ["orders", "events"] }
+  Response: { "member_id": "...", "generation": 1, "protocol": "cooperative" }
+
+POST /groups/{groupID}/heartbeat/cooperative
+  Request:  { "member_id": "...", "generation": 1 }
+  Response: {
+    "rebalance_required": true|false,
+    "state": "pending_revoke|pending_assign|stable",
+    "partitions_to_revoke": [...],
+    "partitions_assigned": [...]
+  }
+
+POST /groups/{groupID}/revoke
+  Request:  { "member_id": "...", "generation": 1, "revoked_partitions": [...] }
+  Response: { "status": "acknowledged" }
+
+GET /groups/{groupID}/rebalance/stats
+  Response: {
+    "total_rebalances": 42,
+    "active_rebalances": 1,
+    "avg_duration_ms": 150,
+    "partitions_moved": 8
+  }
 ```
 
 ---
@@ -1067,7 +1226,7 @@ Phase 1: Foundations           Phase 2: Advanced            Phase 3: Distributio
  [M2] Topics ✅                 [M6] Priority ✅ ⭐           [M11] Replication
       │                              │                            │
       ▼                              ▼                            ▼
- [M3] Consumer ✅               [M7] Tracing ✅ ⭐            [M12] Coop Rebalance ⭐
+ [M3] Consumer ✅               [M7] Tracing ✅ ⭐            [M12] Coop Rebalance ✅ ⭐
       │                              │                            │
       ▼                              ▼                            ▼
  [M4] Reliability ✅            [M8] Schema ✅                [M13] Partition Scale

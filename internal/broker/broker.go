@@ -351,6 +351,59 @@ type Broker struct {
 	// ==========================================================================
 	clusterCoordinator *clusterCoordinator
 
+	// ==========================================================================
+	// MILESTONE 12: COOPERATIVE REBALANCING
+	// ==========================================================================
+	//
+	// The cooperative group coordinator extends consumer group functionality
+	// with cooperative rebalancing (Kafka KIP-429 style incremental rebalance).
+	//
+	// EAGER REBALANCE (before M12):
+	//   ┌──────────┐    join    ┌────────────┐
+	//   │ Consumer │───────────►│ REVOKE ALL │ ← Stop-the-world!
+	//   │ joins    │            │ partitions │
+	//   └──────────┘            └─────┬──────┘
+	//                                 │
+	//                                 ▼
+	//                          ┌────────────┐
+	//                          │ Reassign   │
+	//                          │ all        │
+	//                          └─────┬──────┘
+	//                                │
+	//                                ▼
+	//                          ┌────────────┐
+	//                          │ Resume     │
+	//                          └────────────┘
+	//
+	// COOPERATIVE REBALANCE (M12):
+	//   ┌──────────┐    join    ┌────────────┐
+	//   │ Consumer │───────────►│ Revoke     │ ← Only affected!
+	//   │ joins    │            │ partitions │
+	//   └──────────┘            │ that MOVE  │
+	//                           └─────┬──────┘
+	//                                 │
+	//                                 ▼
+	//                          ┌────────────┐
+	//                          │ Reassign   │
+	//                          │ + new ones │
+	//                          └─────┬──────┘
+	//                                │
+	//                                ▼
+	//                          ┌────────────┐
+	//                          │ Consumers  │
+	//                          │ keep other │ ← No downtime for unchanged!
+	//                          │ partitions │
+	//                          └────────────┘
+	//
+	// KEY CONCEPTS:
+	//   - Two-phase protocol: revoke affected → assign new
+	//   - Sticky assignment: minimize partition moves
+	//   - Incremental: consumers keep unaffected partitions
+	//   - Heartbeat-based: rebalance info in heartbeat response
+	//
+	// ==========================================================================
+	cooperativeGroupCoordinator *CooperativeGroupCoordinator
+
 	// mu protects topics map
 	mu sync.RWMutex
 
@@ -583,6 +636,32 @@ func NewBroker(config BrokerConfig) (*Broker, error) {
 		}
 		cancel()
 	}
+
+	// ==========================================================================
+	// MILESTONE 12: INITIALIZE COOPERATIVE GROUP COORDINATOR
+	// ==========================================================================
+	//
+	// The cooperative group coordinator provides incremental rebalancing
+	// (Kafka KIP-429 style) that minimizes consumer downtime.
+	//
+	// KEY BENEFITS:
+	//   - Consumers keep processing unaffected partitions during rebalance
+	//   - Only partitions that need to move are revoked
+	//   - Sticky assignment minimizes unnecessary partition movement
+	//   - Two-phase protocol (revoke → assign) ensures clean handoff
+	//
+	// CONFIGURATION:
+	//   - Default assignment strategy: Sticky (minimize moves)
+	//   - Revocation timeout: 60 seconds
+	//   - Supported protocols: Cooperative (incremental), Eager (legacy)
+	//
+	// This wraps the existing GroupCoordinator and adds cooperative features.
+	// Groups can choose their protocol (cooperative or eager) at creation time.
+	//
+	// ==========================================================================
+	coopConfig := DefaultCooperativeGroupConfig()
+	cooperativeGroupCoordinator := NewCooperativeGroupCoordinator(groupCoordinator, coopConfig)
+	broker.cooperativeGroupCoordinator = cooperativeGroupCoordinator
 
 	// Discover and load existing topics
 	if err := broker.loadExistingTopics(); err != nil {
@@ -2200,6 +2279,13 @@ func (b *Broker) DataDir() string {
 // Used by the API layer for consumer group operations.
 func (b *Broker) GroupCoordinator() *GroupCoordinator {
 	return b.groupCoordinator
+}
+
+// CooperativeGroupCoordinator returns the broker's cooperative group coordinator.
+// Used by the API layer for cooperative rebalancing operations (M12).
+// Returns nil if cooperative rebalancing is not enabled.
+func (b *Broker) CooperativeGroupCoordinator() *CooperativeGroupCoordinator {
+	return b.cooperativeGroupCoordinator
 }
 
 // Uptime returns how long the broker has been running.
