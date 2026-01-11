@@ -100,6 +100,40 @@ type ControllerElector struct {
 	// votedEpoch is the epoch we voted in
 	votedEpoch int64
 
+	// ==========================================================================
+	// VOTE TRACKING (M15 - C1/C2)
+	// ==========================================================================
+	//
+	// PROPER MAJORITY COUNTING:
+	//   Previously: We became controller after any single vote (buggy)
+	//   Now: We track all votes and only become controller with majority
+	//
+	// VOTE COUNTING RULES:
+	//   1. totalVoters = len(aliveNodes) + 1 (including ourselves)
+	//   2. votesNeeded = (totalVoters / 2) + 1 (strict majority)
+	//   3. We start with 1 vote (our own)
+	//   4. Each granted vote increments votesReceived
+	//   5. Become controller only when votesReceived >= votesNeeded
+	//
+	// EXAMPLE (3-node cluster):
+	//   totalVoters = 3, votesNeeded = 2
+	//   Our vote (1) + one other vote (1) = 2 ✓ Majority!
+	//
+	// EXAMPLE (5-node cluster):
+	//   totalVoters = 5, votesNeeded = 3
+	//   Our vote (1) + two other votes (2) = 3 ✓ Majority!
+	//
+	// ==========================================================================
+
+	// votesReceived tracks votes received in current election
+	votesReceived map[NodeID]bool
+
+	// votesNeeded is the majority threshold for current election
+	votesNeeded int
+
+	// electionEpoch is the epoch for which we're currently collecting votes
+	electionEpoch int64
+
 	// electionTimer fires to start election when no controller
 	electionTimer *time.Timer
 
@@ -373,8 +407,21 @@ func (ce *ControllerElector) startElectionLocked() {
 	ce.votedFor = ce.localNode.ID()
 	ce.votedEpoch = ce.currentEpoch
 
+	// Initialize vote tracking for this election
+	ce.electionEpoch = ce.currentEpoch
+	ce.votesReceived = make(map[NodeID]bool)
+	ce.votesReceived[ce.localNode.ID()] = true // Vote for ourselves
+
+	// Calculate majority needed
+	// totalVoters = us + other alive nodes
+	otherNodes := ce.membership.GetAliveOtherNodes()
+	totalVoters := 1 + len(otherNodes)
+	ce.votesNeeded = (totalVoters / 2) + 1
+
 	ce.logger.Info("became candidate",
 		"epoch", ce.currentEpoch,
+		"total_voters", totalVoters,
+		"votes_needed", ce.votesNeeded,
 	)
 
 	// Request votes from all alive nodes
@@ -385,6 +432,8 @@ func (ce *ControllerElector) startElectionLocked() {
 func (ce *ControllerElector) requestVotes() {
 	ce.mu.RLock()
 	epoch := ce.currentEpoch
+	votesNeeded := ce.votesNeeded
+	currentVotes := len(ce.votesReceived)
 	ce.mu.RUnlock()
 
 	nodes := ce.membership.GetAliveOtherNodes()
@@ -396,14 +445,14 @@ func (ce *ControllerElector) requestVotes() {
 		LeaseExpiry: time.Now().Add(ce.config.LeaseTimeout),
 	}
 
-	// Count our own vote
-	votesReceived := 1                  // Vote for ourselves
-	votesNeeded := (len(nodes) + 2) / 2 // +1 for ourselves, then majority
-
-	if votesNeeded <= votesReceived {
-		// Single node cluster, we win immediately
+	// Check if we already have majority (single-node cluster)
+	if currentVotes >= votesNeeded {
 		ce.mu.Lock()
 		if ce.state == ControllerStateCandidate && ce.currentEpoch == epoch {
+			ce.logger.Info("single node cluster, becoming controller immediately",
+				"votes", currentVotes,
+				"needed", votesNeeded,
+			)
 			ce.becomeControllerLocked()
 		}
 		ce.mu.Unlock()
@@ -418,6 +467,7 @@ func (ce *ControllerElector) requestVotes() {
 		ce.logger.Warn("no requestVote function set, cannot request votes")
 		ce.mu.Lock()
 		ce.state = ControllerStateFollower
+		ce.votesReceived = nil
 		ce.resetElectionTimerLocked()
 		ce.mu.Unlock()
 		return
@@ -463,6 +513,11 @@ func (ce *ControllerElector) handleVoteResult(result VoteResult) {
 		return
 	}
 
+	// Ignore votes for stale elections
+	if ce.electionEpoch != ce.currentEpoch {
+		return
+	}
+
 	if result.Error != nil {
 		ce.logger.Warn("vote request failed",
 			"node_id", result.NodeID,
@@ -477,16 +532,27 @@ func (ce *ControllerElector) handleVoteResult(result VoteResult) {
 
 	// Check if vote was granted
 	if result.Response.VoteGranted {
-		ce.logger.Info("received vote",
-			"from", result.NodeID,
-			"epoch", ce.currentEpoch,
-		)
-		// Count votes and check if we have majority
-		// TODO: we have to track votes properly
-		// Note: In a full implementation, we'd track vote counts properly
-		// For simplicity, we'll become controller after getting first vote
-		// (since we already have our own vote, any additional vote gives us 2 votes)
-		ce.becomeControllerLocked()
+		// Track this vote (idempotent - same node voting twice doesn't count twice)
+		if !ce.votesReceived[result.NodeID] {
+			ce.votesReceived[result.NodeID] = true
+
+			currentVotes := len(ce.votesReceived)
+			ce.logger.Info("received vote",
+				"from", result.NodeID,
+				"epoch", ce.currentEpoch,
+				"votes_received", currentVotes,
+				"votes_needed", ce.votesNeeded,
+			)
+
+			// Check if we have majority
+			if currentVotes >= ce.votesNeeded {
+				ce.logger.Info("majority achieved",
+					"votes", currentVotes,
+					"needed", ce.votesNeeded,
+				)
+				ce.becomeControllerLocked()
+			}
+		}
 	} else {
 		ce.logger.Info("vote denied",
 			"from", result.NodeID,
@@ -499,6 +565,7 @@ func (ce *ControllerElector) handleVoteResult(result VoteResult) {
 			ce.currentEpoch = result.Response.Epoch
 			ce.currentControllerID = result.Response.CurrentControllerID
 			ce.state = ControllerStateFollower
+			ce.votesReceived = nil // Clear vote tracking
 			ce.resetElectionTimerLocked()
 		}
 	}
@@ -507,6 +574,9 @@ func (ce *ControllerElector) handleVoteResult(result VoteResult) {
 // becomeControllerLocked transitions to controller state.
 // Must be called with mu held.
 func (ce *ControllerElector) becomeControllerLocked() {
+	// Clear vote tracking since election is complete
+	ce.votesReceived = nil
+
 	ce.state = ControllerStateLeader
 	ce.currentControllerID = ce.localNode.ID()
 	ce.leaseExpiry = time.Now().Add(ce.config.LeaseTimeout)

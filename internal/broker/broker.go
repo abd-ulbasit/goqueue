@@ -2904,6 +2904,10 @@ func (b *Broker) CancelDelayed(topic string, partition int, offset int64) (bool,
 		if errors.Is(err, ErrDelayedMessageNotFound) {
 			return false, nil
 		}
+		if errors.Is(err, ErrDelayedMessageNotPending) {
+			// Idempotency: already delivered/cancelled/expired isn't an error.
+			return false, nil
+		}
 		return false, err
 	}
 	return true, nil

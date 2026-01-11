@@ -164,7 +164,7 @@ type FetcherStats struct {
 	// BytesFetched is total bytes fetched.
 	BytesFetched int64
 
-	// AvgFetchLatencyMs is average fetch latency.
+	// AvgFetchLatencyMs is average fetch latency (using EMA).
 	AvgFetchLatencyMs float64
 
 	// SnapshotDownloads is number of snapshot downloads for catch-up.
@@ -176,6 +176,44 @@ type FetcherStats struct {
 	// LastErrorTime is when last error occurred.
 	LastErrorTime time.Time
 }
+
+// =============================================================================
+// EMA SMOOTHING FACTOR
+// =============================================================================
+//
+// EXPONENTIAL MOVING AVERAGE (EMA) FOR LATENCY
+//
+// WHY EMA?
+//   - Simple moving average (SMA) gives equal weight to all samples
+//   - EMA gives more weight to recent samples, adapting faster to changes
+//   - More responsive to network condition changes
+//   - Constant memory (O(1)) vs O(window_size) for SMA
+//
+// FORMULA:
+//   EMA(t) = α * new_value + (1 - α) * EMA(t-1)
+//
+// α (ALPHA) SELECTION:
+//   - α = 0.1 → slow adaptation, smooth (like ~20 sample SMA)
+//   - α = 0.2 → moderate adaptation
+//   - α = 0.3 → fast adaptation, more responsive to spikes
+//
+// COMPARISON:
+//   - Kafka: Uses exponential backoff for retries
+//   - TCP: Uses EWMA for RTT estimation (α ≈ 0.125, RFC 6298)
+//   - goqueue: We use α = 0.2 for balance of responsiveness and smoothness
+//
+// RELATIONSHIP TO SMA:
+//   α relates to equivalent SMA window: window ≈ 2/α - 1
+//   α = 0.2 → equivalent to ~9 sample SMA
+//
+// =============================================================================
+
+const (
+	// emaAlpha is the smoothing factor for EMA latency calculation.
+	// Value of 0.2 gives reasonable smoothing while still being responsive
+	// to network condition changes. Lower = smoother, higher = more reactive.
+	emaAlpha = 0.2
+)
 
 // =============================================================================
 // CONSTRUCTOR
@@ -219,18 +257,34 @@ func (ff *FollowerFetcher) Start() {
 		"leader_addr", ff.config.LeaderAddr,
 		"epoch", ff.config.LeaderEpoch)
 
-	// Initialize fetch offset from local replica state.
-	state := ff.replicaManager.GetReplicaState(ff.config.Topic, ff.config.Partition)
-	if state != nil {
-		ff.fetchOffset = state.LogEndOffset
-	}
+	// NOTE:
+	//   We intentionally do NOT call back into ReplicaManager here.
+	//
+	// WHY:
+	//   ReplicaManager can start a fetcher while holding its internal mutex.
+	//   If Start() were to call ReplicaManager (e.g. GetReplicaState), we'd create
+	//   a lock inversion / self-deadlock.
+	//
+	// The owning ReplicaManager is responsible for seeding ff.fetchOffset before
+	// calling Start() (typically to the local replica's current LogEndOffset).
 
 	ff.wg.Add(1)
 	go ff.fetchLoop()
 }
 
-// Stop stops the fetch loop.
-func (ff *FollowerFetcher) Stop() {
+// requestStop transitions the fetcher into a stopped state without waiting.
+//
+// WHY THIS EXISTS:
+//
+//	Some error paths are detected *inside* the fetchLoop goroutine (e.g.
+//	FetchErrorNotLeader / FetchErrorEpochFenced). Calling Stop() from within
+//	that goroutine would deadlock because Stop() waits for ff.wg, which includes
+//	the currently running fetchLoop itself.
+//
+// PATTERN:
+//   - Internal goroutine: call requestStop() (cancel, return, let fetchLoop exit)
+//   - External owner (ReplicaManager, tests): call Stop() (cancel + wait)
+func (ff *FollowerFetcher) requestStop() {
 	ff.mu.Lock()
 	if !ff.running {
 		ff.mu.Unlock()
@@ -239,8 +293,13 @@ func (ff *FollowerFetcher) Stop() {
 	ff.running = false
 	ff.mu.Unlock()
 
-	ff.logger.Info("stopping follower fetcher")
 	ff.cancel()
+}
+
+// Stop stops the fetch loop.
+func (ff *FollowerFetcher) Stop() {
+	ff.logger.Info("stopping follower fetcher")
+	ff.requestStop()
 	ff.wg.Wait()
 	ff.logger.Info("follower fetcher stopped")
 }
@@ -303,9 +362,20 @@ func (ff *FollowerFetcher) doFetch() {
 	ff.lastFetchTime = time.Now()
 	ff.stats.SuccessfulFetches++
 
-	// Update latency stats (simple moving average).
-	// TODO: this seems incorrect, consider using a proper moving average calculation, or at least weight it properly. or exponential moving average.
-	ff.stats.AvgFetchLatencyMs = (ff.stats.AvgFetchLatencyMs + float64(fetchLatency.Milliseconds())) / 2
+	// Update latency stats using Exponential Moving Average (EMA).
+	//
+	// EMA formula: EMA(t) = α * new_value + (1 - α) * EMA(t-1)
+	// This gives more weight to recent samples, adapting quickly to
+	// network condition changes while maintaining stability.
+	//
+	// First fetch: use the raw value (no prior data to weight)
+	// Subsequent: blend new sample with existing average
+	newLatency := float64(fetchLatency.Milliseconds())
+	if ff.stats.SuccessfulFetches == 1 {
+		ff.stats.AvgFetchLatencyMs = newLatency
+	} else {
+		ff.stats.AvgFetchLatencyMs = emaAlpha*newLatency + (1-emaAlpha)*ff.stats.AvgFetchLatencyMs
+	}
 
 	// Process messages.
 	if len(resp.Messages) > 0 {
@@ -358,9 +428,12 @@ func (ff *FollowerFetcher) handleFetchError(err error) {
 		"consecutive_errors", ff.consecutiveErrors,
 		"backoff_ms", backoff.Milliseconds())
 
+	// GOROUTINE LEAK FIX: Use NewTimer instead of time.After
+	timer := time.NewTimer(backoff)
 	select {
 	case <-ff.ctx.Done():
-	case <-time.After(backoff):
+		timer.Stop()
+	case <-timer.C:
 	}
 }
 
@@ -375,14 +448,14 @@ func (ff *FollowerFetcher) handleResponseError(resp *FetchResponse) {
 		// Leader changed - stop fetcher (coordinator will restart with new leader).
 		ff.logger.Warn("not leader error, stopping fetcher",
 			"error", resp.ErrorMessage)
-		ff.Stop()
+		ff.requestStop()
 
 	case FetchErrorEpochFenced:
 		// Our epoch is stale - stop fetcher.
 		ff.logger.Warn("epoch fenced, stopping fetcher",
 			"our_epoch", ff.config.LeaderEpoch,
 			"leader_epoch", resp.LeaderEpoch)
-		ff.Stop()
+		ff.requestStop()
 
 	case FetchErrorOffsetOutOfRange:
 		// Our offset is invalid - need to reset or get snapshot.
@@ -400,9 +473,12 @@ func (ff *FollowerFetcher) handleResponseError(resp *FetchResponse) {
 			"message", resp.ErrorMessage,
 			"backoff_ms", backoff.Milliseconds())
 
+		// GOROUTINE LEAK FIX: Use NewTimer instead of time.After
+		timer := time.NewTimer(backoff)
 		select {
 		case <-ff.ctx.Done():
-		case <-time.After(backoff):
+			timer.Stop()
+		case <-timer.C:
 		}
 	}
 }

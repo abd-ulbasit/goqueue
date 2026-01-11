@@ -683,6 +683,12 @@ func (cc *ClusterClient) RequestSnapshot(ctx context.Context, leaderAddr string,
 // The snapshot is saved to the specified destination directory.
 // Returns the path to the downloaded snapshot file.
 func (cc *ClusterClient) DownloadSnapshot(ctx context.Context, leaderAddr string, downloadURL string, destDir string) (string, error) {
+	// Be defensive: callers may pass an empty destination directory.
+	// In that case we download into the current working directory.
+	if destDir == "" {
+		destDir = "."
+	}
+
 	// Build full URL.
 	url := fmt.Sprintf("http://%s%s", leaderAddr, downloadURL)
 
@@ -701,6 +707,11 @@ func (cc *ClusterClient) DownloadSnapshot(ctx context.Context, leaderAddr string
 
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("download failed: status %d", resp.StatusCode)
+	}
+
+	// Ensure destination directory exists.
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		return "", fmt.Errorf("create dest dir: %w", err)
 	}
 
 	// Create destination file.
@@ -779,8 +790,50 @@ func (cc *ClusterClient) doRequest(ctx context.Context, addr string, path string
 	return nil
 }
 
+// =============================================================================
+// GOSSIP-STYLE MEMBERSHIP PROPAGATION
+// =============================================================================
+//
+// WHY MERGE HEARTBEAT RESPONSES?
+//
+// PROBLEM WITHOUT GOSSIP:
+//   - Node A knows about [A, B, C]
+//   - Node D joins via Node B only
+//   - Node A never learns about D until D heartbeats to A directly
+//   - In a large cluster, this creates "pockets" of inconsistent membership
+//
+// SOLUTION - GOSSIP-LIKE PROPAGATION:
+//   - When A heartbeats to B, B responds with its full membership view
+//   - A merges B's view into its own
+//   - Eventually, all nodes converge to same membership
+//
+// FLOW:
+//   ┌──────────────────────────────────────────────────────────────────────┐
+//   │  Gossip Propagation                                                  │
+//   │                                                                      │
+//   │   Node A heartbeats → Node B                                         │
+//   │   Node B responds with {A, B, C, D}                                  │
+//   │   Node A merges → now knows {A, B, C, D}                             │
+//   │                                                                      │
+//   │   Node A heartbeats → Node C                                         │
+//   │   Node A tells C about D (in its heartbeat state)                    │
+//   │   Node C responds with {A, B, C}                                     │
+//   │   Node C learns about D from A's heartbeat                           │
+//   │                                                                      │
+//   │   After O(log N) rounds, all nodes have consistent view              │
+//   └──────────────────────────────────────────────────────────────────────┘
+//
+// COMPARISON:
+//   - Cassandra: Full gossip protocol (SWIM-based)
+//   - Kafka: Controller broadcasts state, followers don't gossip
+//   - Consul: SWIM + Serf for membership
+//   - goqueue: Simple piggyback gossip on heartbeats
+//
+// =============================================================================
+
 // BroadcastHeartbeats sends heartbeats to all known nodes.
 // Called periodically by the heartbeat sender.
+// Implements gossip-style membership propagation by merging responses.
 func (cc *ClusterClient) BroadcastHeartbeats(ctx context.Context) {
 	nodes := cc.membership.AliveNodes()
 	myID := cc.node.ID()
@@ -791,11 +844,30 @@ func (cc *ClusterClient) BroadcastHeartbeats(ctx context.Context) {
 		}
 
 		go func(nodeID NodeID) {
-			_, err := cc.SendHeartbeat(ctx, nodeID)
+			resp, err := cc.SendHeartbeat(ctx, nodeID)
 			if err != nil {
 				cc.logger.Debug("heartbeat failed",
 					"to", nodeID,
 					"error", err)
+				return
+			}
+
+			// Gossip: merge the response's membership view into ours.
+			// This propagates membership changes transitively through the cluster.
+			// If the remote node knows about nodes we don't, we learn about them.
+			if resp.Nodes != nil && len(resp.Nodes) > 0 {
+				clusterState := &ClusterState{
+					Version:         resp.Version,
+					ControllerID:    resp.ControllerID,
+					ControllerEpoch: resp.ControllerEpoch,
+					Nodes:           resp.Nodes,
+				}
+
+				if err := cc.membership.MergeState(clusterState); err != nil {
+					cc.logger.Debug("failed to merge heartbeat state",
+						"from", nodeID,
+						"error", err)
+				}
 			}
 		}(node.ID)
 	}

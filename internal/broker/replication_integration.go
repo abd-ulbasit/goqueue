@@ -420,6 +420,12 @@ func (rc *replicationCoordinator) ApplyFetchedMessages(topic string, partition i
 		return fmt.Errorf("topic %s not found", topic)
 	}
 
+	// Defensive bounds check: callers pass partition IDs over the network.
+	// Without this, a bad partition index would panic and crash the broker.
+	if partition < 0 || partition >= len(topicObj.partitions) {
+		return fmt.Errorf("partition %d not found in topic %s", partition, topic)
+	}
+
 	partitionObj := topicObj.partitions[partition]
 	if partitionObj == nil {
 		return fmt.Errorf("partition %d not found in topic %s", partition, topic)

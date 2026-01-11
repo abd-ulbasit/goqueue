@@ -407,7 +407,13 @@ func (cg *CooperativeGroup) GetMemberAssignment(memberID string) ([]TopicPartiti
 	defer cg.mu.RUnlock()
 
 	partitions, exists := cg.currentAssignment[memberID]
-	return partitions, exists
+	if !exists {
+		return nil, false
+	}
+	// Return a copy to prevent aliasing and potential data races
+	result := make([]TopicPartition, len(partitions))
+	copy(result, partitions)
+	return result, true
 }
 
 // IsPartitionAssignedCoop checks if a partition is assigned to a member (TopicPartition version).

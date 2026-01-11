@@ -158,6 +158,9 @@ type OffsetManager struct {
 	// mu protects cache access
 	mu sync.RWMutex
 
+	// closed tracks whether Close() has been called (prevents double-close panic)
+	closed bool
+
 	// autoCommitEnabled globally enables/disables auto-commit
 	autoCommitEnabled bool
 
@@ -684,7 +687,18 @@ func (om *OffsetManager) copyGroupOffsets(src *GroupOffsets) *GroupOffsets {
 // =============================================================================
 
 // Close shuts down the offset manager gracefully.
+//
+// BUG FIX: Protected against double-close panic by tracking closed state.
+// Previously, calling Close() twice would panic on close(om.stopCh).
 func (om *OffsetManager) Close() error {
+	om.mu.Lock()
+	if om.closed {
+		om.mu.Unlock()
+		return nil // Already closed
+	}
+	om.closed = true
+	om.mu.Unlock()
+
 	// Signal auto-commit goroutine to stop
 	close(om.stopCh)
 

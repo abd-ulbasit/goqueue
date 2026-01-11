@@ -99,6 +99,16 @@ var (
 	// ErrDelayedMessageNotFound means no delay exists for the given message
 	ErrDelayedMessageNotFound = errors.New("delayed message not found")
 
+	// ErrDelayedMessageNotPending means a delay entry exists but is no longer
+	// cancellable (already delivered/cancelled/expired).
+	//
+	// WHY A SENTINEL ERROR?
+	// The broker API wants CancelDelayed() to be idempotent and return
+	// (false, nil) for "already processed" cases. Using a sentinel error
+	// lets the broker layer map the internal state cleanly without
+	// brittle string matching.
+	ErrDelayedMessageNotPending = errors.New("delayed message not pending")
+
 	// ErrTooManyDelayed means the topic or partition has too many delayed messages
 	ErrTooManyDelayed = errors.New("too many delayed messages")
 )
@@ -422,7 +432,7 @@ func (s *Scheduler) Cancel(topic string, partition int, offset int64) error {
 	}
 
 	if entry.State != delayStatePending {
-		return fmt.Errorf("message already processed (state=%d)", entry.State)
+		return ErrDelayedMessageNotPending
 	}
 
 	// Cancel timer
@@ -487,24 +497,43 @@ func (s *Scheduler) GetDelayedMessage(topic string, partition int, offset int64)
 
 // GetDelayedMessages returns all pending delayed messages for a topic.
 // Supports pagination with limit and skip parameters.
+//
+// ============================================================================
+// PAGINATION STRATEGY
+// ============================================================================
+//
+// WHY PAGINATE AT INDEX LEVEL?
+//   - Avoids loading ALL pending entries into memory
+//   - For 1M delayed messages, this was loading ~100MB of data
+//   - Now only loads what's needed for the current page
+//
+// HOW IT WORKS:
+//
+//	┌─────────────────────────────────────────────────────────────────────┐
+//	│ Before (Memory Problem):                                           │
+//	│   GetPendingEntries() → returns ALL entries → slice in scheduler   │
+//	│   Memory: O(n) where n = total pending messages                    │
+//	│                                                                    │
+//	│ After (Paginated):                                                 │
+//	│   GetPendingEntriesPaginated(limit, skip) → returns page only      │
+//	│   Memory: O(pageSize) regardless of total messages                 │
+//	└─────────────────────────────────────────────────────────────────────┘
+//
+// COMPARISON:
+//   - Kafka: Consumer fetches limited batch from broker
+//   - SQS: ReceiveMessage has MaxNumberOfMessages (1-10)
+//   - goqueue: We paginate at index level for memory efficiency
+//
+// ============================================================================
 func (s *Scheduler) GetDelayedMessages(topic string, limit int, skip int) []*ScheduledMessage {
 	idx, err := s.getIndex(topic)
 	if err != nil {
 		return []*ScheduledMessage{}
 	}
-	// TODO: shouldn't we do this pagination in the index itself to avoid loading all entries into memory ?
-	entries := idx.GetPendingEntries()
 
-	// Apply skip
-	if skip >= len(entries) {
-		return []*ScheduledMessage{}
-	}
-	entries = entries[skip:]
-
-	// Apply limit
-	if limit > 0 && limit < len(entries) {
-		entries = entries[:limit]
-	}
+	// Use paginated retrieval to avoid loading all entries into memory
+	// This is critical for topics with many delayed messages
+	entries, _ := idx.GetPendingEntriesPaginated(limit, skip)
 
 	result := make([]*ScheduledMessage, 0, len(entries))
 	for _, entry := range entries {

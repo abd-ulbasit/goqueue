@@ -338,6 +338,11 @@ const (
 
 	// DLQReasonPoisonMessage means the message consistently causes errors
 	DLQReasonPoisonMessage DLQReason = "POISON_MESSAGE"
+
+	// DLQReasonBackpressure means the retry queue was full (backpressure)
+	// This is NOT a retry failure - the message couldn't be queued for retry
+	// because the system is overloaded. Operators should investigate capacity.
+	DLQReasonBackpressure DLQReason = "BACKPRESSURE"
 )
 
 // DLQMessage contains the original message plus metadata for debugging.

@@ -148,6 +148,9 @@ type CooperativeRebalancer struct {
 	// stopCh signals the background goroutine to stop
 	stopCh chan struct{}
 	wg     sync.WaitGroup
+
+	// closed tracks whether Stop() has been called (prevents double-close panic)
+	closed bool
 }
 
 // NewCooperativeRebalancer creates a new cooperative rebalancer.
@@ -172,7 +175,18 @@ func (cr *CooperativeRebalancer) Start() {
 }
 
 // Stop gracefully shuts down the rebalancer.
+//
+// BUG FIX: Protected against double-close panic by tracking closed state.
+// Previously, calling Stop() twice would panic on close(cr.stopCh).
 func (cr *CooperativeRebalancer) Stop() {
+	cr.mu.Lock()
+	if cr.closed {
+		cr.mu.Unlock()
+		return // Already stopped
+	}
+	cr.closed = true
+	cr.mu.Unlock()
+
 	close(cr.stopCh)
 	cr.wg.Wait()
 }

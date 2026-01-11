@@ -122,6 +122,9 @@ type GroupCoordinator struct {
 
 	// wg tracks background goroutines
 	wg sync.WaitGroup
+
+	// closed tracks whether Close() has been called (prevents double-close panic)
+	closed bool
 }
 
 // NewGroupCoordinator creates a new group coordinator.
@@ -528,7 +531,18 @@ func (gc *GroupCoordinator) GetAllGroupsInfo() []GroupInfo {
 // =============================================================================
 
 // Close shuts down the coordinator gracefully.
+//
+// BUG FIX: Protected against double-close panic by tracking closed state.
+// Previously, calling Close() twice would panic on close(gc.stopCh).
 func (gc *GroupCoordinator) Close() error {
+	gc.mu.Lock()
+	if gc.closed {
+		gc.mu.Unlock()
+		return nil // Already closed
+	}
+	gc.closed = true
+	gc.mu.Unlock()
+
 	// Signal goroutines to stop
 	close(gc.stopCh)
 

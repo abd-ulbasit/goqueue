@@ -17,8 +17,10 @@ package storage
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestSegment_NewAndClose(t *testing.T) {
@@ -344,6 +346,166 @@ func TestSegmentFileName(t *testing.T) {
 	}
 }
 
+func TestSegment_TimeBasedQueries(t *testing.T) {
+	// =============================================================================
+	// TIME-BASED QUERIES (M14)
+	// =============================================================================
+	//
+	// WHY THIS TEST EXISTS:
+	// The storage layer supports time-based replay and auditing via:
+	//   - ReadFromTimestamp(start)
+	//   - ReadTimeRange([start,end))
+	//   - GetFirstTimestamp / GetLastTimestamp
+	//
+	// These APIs must be correct even when the time index is sparse.
+	// We validate the observable behavior (returned messages), not the internal
+	// time-index entry density.
+	// =============================================================================
+
+	dir := t.TempDir()
+
+	seg, err := NewSegment(dir, 0)
+	if err != nil {
+		t.Fatalf("NewSegment failed: %v", err)
+	}
+	defer seg.Close()
+
+	// Use deterministic, increasing timestamps so we can make crisp assertions.
+	baseTS := time.Now().UnixNano()
+	step := int64(time.Second)
+
+	// Write 5 messages with timestamps: baseTS + i*1s
+	//
+	// IMPORTANT:
+	// The time index is sparse (one entry per ~4KB of log data). If we write tiny
+	// messages, we might only get 1 entry, which makes boundary timestamp helpers
+	// less informative.
+	//
+	// So we write values sized to TimeIndexGranularity to ensure we cross the
+	// indexing threshold between appends.
+	for i := 0; i < 5; i++ {
+		value := make([]byte, TimeIndexGranularity)
+		value[0] = byte(i) // Make each payload distinct.
+
+		msg := NewMessage(
+			[]byte(fmt.Sprintf("key-%d", i)),
+			value,
+		)
+		msg.Timestamp = baseTS + int64(i)*step
+
+		if _, err := seg.Append(msg); err != nil {
+			t.Fatalf("Append %d failed: %v", i, err)
+		}
+	}
+
+	// -----------------------------------------------------------------------------
+	// First/last timestamp helpers
+	// -----------------------------------------------------------------------------
+	firstTS, err := seg.GetFirstTimestamp()
+	if err != nil {
+		t.Fatalf("GetFirstTimestamp failed: %v", err)
+	}
+	if firstTS != baseTS {
+		t.Fatalf("GetFirstTimestamp=%d, want %d", firstTS, baseTS)
+	}
+
+	lastTS, err := seg.GetLastTimestamp()
+	if err != nil {
+		t.Fatalf("GetLastTimestamp failed: %v", err)
+	}
+	expectedLast := baseTS + 4*step
+	if lastTS != expectedLast {
+		t.Fatalf("GetLastTimestamp=%d, want %d", lastTS, expectedLast)
+	}
+
+	// -----------------------------------------------------------------------------
+	// ReadFromTimestamp
+	// -----------------------------------------------------------------------------
+	start := baseTS + 2*step
+	msgs, err := seg.ReadFromTimestamp(start, 0)
+	if err != nil {
+		t.Fatalf("ReadFromTimestamp failed: %v", err)
+	}
+	if len(msgs) != 3 {
+		t.Fatalf("ReadFromTimestamp returned %d msgs, want 3", len(msgs))
+	}
+	for i, m := range msgs {
+		wantOffset := int64(2 + i)
+		if m.Offset != wantOffset {
+			t.Fatalf("msg[%d].Offset=%d, want %d", i, m.Offset, wantOffset)
+		}
+		if m.Timestamp < start {
+			t.Fatalf("msg[%d].Timestamp=%d, want >= %d", i, m.Timestamp, start)
+		}
+	}
+
+	// MaxMessages should cap the results.
+	msgs, err = seg.ReadFromTimestamp(start, 2)
+	if err != nil {
+		t.Fatalf("ReadFromTimestamp(max=2) failed: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("ReadFromTimestamp(max=2) returned %d msgs, want 2", len(msgs))
+	}
+	if msgs[0].Offset != 2 || msgs[1].Offset != 3 {
+		t.Fatalf("ReadFromTimestamp(max=2) offsets=%d,%d want 2,3", msgs[0].Offset, msgs[1].Offset)
+	}
+
+	// -----------------------------------------------------------------------------
+	// ReadTimeRange: [start,end) = [t+1s, t+4s) should yield offsets 1,2,3
+	// -----------------------------------------------------------------------------
+	rangeStart := baseTS + 1*step
+	rangeEnd := baseTS + 4*step
+
+	msgs, err = seg.ReadTimeRange(rangeStart, rangeEnd, 0)
+	if err != nil {
+		t.Fatalf("ReadTimeRange failed: %v", err)
+	}
+	if len(msgs) != 3 {
+		t.Fatalf("ReadTimeRange returned %d msgs, want 3", len(msgs))
+	}
+	for i, m := range msgs {
+		wantOffset := int64(1 + i)
+		if m.Offset != wantOffset {
+			t.Fatalf("range msg[%d].Offset=%d, want %d", i, m.Offset, wantOffset)
+		}
+		if m.Timestamp < rangeStart || m.Timestamp >= rangeEnd {
+			t.Fatalf("range msg[%d].Timestamp=%d, want in [%d,%d)", i, m.Timestamp, rangeStart, rangeEnd)
+		}
+	}
+
+	msgs, err = seg.ReadTimeRange(rangeStart, rangeEnd, 1)
+	if err != nil {
+		t.Fatalf("ReadTimeRange(max=1) failed: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("ReadTimeRange(max=1) returned %d msgs, want 1", len(msgs))
+	}
+	if msgs[0].Offset != 1 {
+		t.Fatalf("ReadTimeRange(max=1) first offset=%d, want 1", msgs[0].Offset)
+	}
+}
+
+func TestSegment_TimeBasedQueries_ErrSegmentClosed(t *testing.T) {
+	dir := t.TempDir()
+
+	seg, err := NewSegment(dir, 0)
+	if err != nil {
+		t.Fatalf("NewSegment failed: %v", err)
+	}
+
+	if err := seg.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	if _, err := seg.ReadFromTimestamp(time.Now().UnixNano(), 0); err != ErrSegmentClosed {
+		t.Fatalf("ReadFromTimestamp on closed segment error=%v, want %v", err, ErrSegmentClosed)
+	}
+	if _, err := seg.ReadTimeRange(time.Now().UnixNano(), time.Now().UnixNano()+1, 0); err != ErrSegmentClosed {
+		t.Fatalf("ReadTimeRange on closed segment error=%v, want %v", err, ErrSegmentClosed)
+	}
+}
+
 func BenchmarkSegment_Append(b *testing.B) {
 	dir := b.TempDir()
 	seg, _ := NewSegment(dir, 0)
@@ -354,6 +516,179 @@ func BenchmarkSegment_Append(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		seg.Append(msg)
+	}
+}
+
+func TestSegment_Sync(t *testing.T) {
+	dir := t.TempDir()
+
+	seg, err := NewSegment(dir, 0)
+	if err != nil {
+		t.Fatalf("NewSegment failed: %v", err)
+	}
+	defer seg.Close()
+
+	// Write a message
+	msg := NewMessage([]byte("key"), []byte("value"))
+	if _, err := seg.Append(msg); err != nil {
+		t.Fatalf("Append failed: %v", err)
+	}
+
+	// Sync should not fail
+	if err := seg.Sync(); err != nil {
+		t.Errorf("Sync failed: %v", err)
+	}
+
+	// Sync on closed segment should fail
+	seg.Close()
+	if err := seg.Sync(); err != ErrSegmentClosed {
+		t.Errorf("Expected ErrSegmentClosed, got %v", err)
+	}
+}
+
+func TestSegment_Delete(t *testing.T) {
+	dir := t.TempDir()
+
+	seg, err := NewSegment(dir, 0)
+	if err != nil {
+		t.Fatalf("NewSegment failed: %v", err)
+	}
+
+	// Write a message to create files
+	msg := NewMessage([]byte("key"), []byte("value"))
+	if _, err := seg.Append(msg); err != nil {
+		t.Fatalf("Append failed: %v", err)
+	}
+
+	// Verify files exist before delete
+	logPath := filepath.Join(dir, SegmentFileName(0))
+	indexPath := filepath.Join(dir, IndexFileName(0))
+	timeIndexPath := filepath.Join(dir, TimeIndexFileName(0))
+
+	if _, err := os.Stat(logPath); os.IsNotExist(err) {
+		t.Error("Log file should exist before delete")
+	}
+	if _, err := os.Stat(indexPath); os.IsNotExist(err) {
+		t.Error("Index file should exist before delete")
+	}
+	if _, err := os.Stat(timeIndexPath); os.IsNotExist(err) {
+		t.Error("Time index file should exist before delete")
+	}
+
+	// Delete segment
+	if err := seg.Delete(); err != nil {
+		t.Fatalf("Delete failed: %v", err)
+	}
+
+	// Verify files are deleted after delete
+	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
+		t.Error("Log file should be deleted")
+	}
+	if _, err := os.Stat(indexPath); !os.IsNotExist(err) {
+		t.Error("Index file should be deleted")
+	}
+	if _, err := os.Stat(timeIndexPath); !os.IsNotExist(err) {
+		t.Error("Time index file should be deleted")
+	}
+
+	// Delete should be idempotent (calling again should not fail)
+	if err := seg.Delete(); err != nil {
+		t.Errorf("Second delete should not fail: %v", err)
+	}
+}
+
+func TestSegment_Close_ErrorHandling(t *testing.T) {
+	dir := t.TempDir()
+
+	seg, err := NewSegment(dir, 0)
+	if err != nil {
+		t.Fatalf("NewSegment failed: %v", err)
+	}
+
+	// Write a message to have something to flush
+	msg := NewMessage([]byte("key"), []byte("value"))
+	if _, err := seg.Append(msg); err != nil {
+		t.Fatalf("Append failed: %v", err)
+	}
+
+	// Close should succeed
+	if err := seg.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	// Close should be idempotent
+	if err := seg.Close(); err != nil {
+		t.Errorf("Second Close should be idempotent, got error: %v", err)
+	}
+
+	// Operations after close should fail
+	if _, err := seg.Read(0); err != ErrSegmentClosed {
+		t.Errorf("Read after close should fail with ErrSegmentClosed, got: %v", err)
+	}
+	if _, err := seg.Append(msg); err != ErrSegmentClosed {
+		t.Errorf("Append after close should fail with ErrSegmentClosed, got: %v", err)
+	}
+}
+
+func TestSegment_RebuildSegment(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create a segment and write messages
+	seg1, err := NewSegment(dir, 0)
+	if err != nil {
+		t.Fatalf("NewSegment failed: %v", err)
+	}
+
+	for i := 0; i < 5; i++ {
+		msg := NewMessage([]byte(fmt.Sprintf("key-%d", i)), []byte(fmt.Sprintf("value-%d", i)))
+		if _, err := seg1.Append(msg); err != nil {
+			seg1.Close()
+			t.Fatalf("Append %d failed: %v", i, err)
+		}
+	}
+	seg1.Close()
+
+	// Delete index files to simulate corruption
+	indexPath := filepath.Join(dir, IndexFileName(0))
+	timeIndexPath := filepath.Join(dir, TimeIndexFileName(0))
+	os.Remove(indexPath)
+	os.Remove(timeIndexPath)
+
+	// Rebuild segment
+	seg2, err := rebuildSegment(dir, 0)
+	if err != nil {
+		t.Fatalf("rebuildSegment failed: %v", err)
+	}
+	defer seg2.Close()
+
+	// Verify segment state
+	if seg2.BaseOffset() != 0 {
+		t.Errorf("BaseOffset = %d, want 0", seg2.BaseOffset())
+	}
+	if seg2.NextOffset() != 5 {
+		t.Errorf("NextOffset = %d, want 5", seg2.NextOffset())
+	}
+
+	// Verify can read messages
+	for i := 0; i < 5; i++ {
+		msg, err := seg2.Read(int64(i))
+		if err != nil {
+			t.Fatalf("Read %d failed: %v", i, err)
+		}
+		expectedKey := fmt.Sprintf("key-%d", i)
+		if string(msg.Key) != expectedKey {
+			t.Errorf("Message %d key = %s, want %s", i, msg.Key, expectedKey)
+		}
+	}
+
+	// Verify can continue appending
+	msg := NewMessage([]byte("new-key"), []byte("new-value"))
+	offset, err := seg2.Append(msg)
+	if err != nil {
+		t.Fatalf("Append after rebuild failed: %v", err)
+	}
+	if offset != 5 {
+		t.Errorf("New message offset = %d, want 5", offset)
 	}
 }
 

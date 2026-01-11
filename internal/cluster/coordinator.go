@@ -81,6 +81,16 @@ type Coordinator struct {
 	// running indicates if coordinator is active
 	running bool
 
+	// startedAt is when Start() successfully began running.
+	//
+	// WHY:
+	//   CoordinatorStats exposes an Uptime field, but without tracking a start
+	//   timestamp we would always report 0.
+	//
+	// THREAD SAFETY:
+	//   Protected by c.mu.
+	startedAt time.Time
+
 	// ctx is the coordinator's context
 	ctx context.Context
 
@@ -241,6 +251,7 @@ func (c *Coordinator) Start(ctx context.Context) error {
 		return fmt.Errorf("coordinator already running")
 	}
 	c.running = true
+	c.startedAt = time.Now()
 	c.ctx, c.cancel = context.WithCancel(ctx)
 	c.mu.Unlock()
 
@@ -278,6 +289,8 @@ func (c *Coordinator) Stop(ctx context.Context) error {
 		return nil
 	}
 	c.running = false
+	// Reset uptime once stopped so Stats() reflects a non-running coordinator.
+	c.startedAt = time.Time{}
 	c.mu.Unlock()
 
 	c.logger.Info("stopping cluster coordinator")
@@ -376,6 +389,28 @@ func (c *Coordinator) bootstrap() error {
 	if c.membership.ControllerID() == "" {
 		c.logger.Info("no controller, starting election")
 		c.elector.Start()
+
+		// =====================================================================
+		// SINGLE-NODE BOOTSTRAP: ELECT IMMEDIATELY
+		// =====================================================================
+		// WHY:
+		//   In single-node mode there is no risk of split-brain, and waiting for
+		//   the lease-based election timer (15–30s by default) makes the node look
+		//   "ready" while controller-only operations are still unavailable.
+		//
+		// HOW:
+		//   We trigger an election immediately once bootstrap is complete.
+		//   The controller elector has a fast-path for single-node clusters:
+		//     votesNeeded == 1 ⇒ become controller immediately.
+		//
+		// SAFETY:
+		//   We only do this when no peers are configured and quorumSize=1.
+		//   In multi-node clusters, an immediate election attempt during bootstrap
+		//   can race peer discovery and leave a node stuck as a candidate.
+		if len(c.config.Peers) == 0 && c.config.QuorumSize == 1 {
+			c.logger.Info("single-node cluster, triggering immediate controller election")
+			c.elector.TriggerElection()
+		}
 	} else {
 		c.logger.Info("controller exists",
 			"controller", c.membership.ControllerID())
@@ -446,12 +481,20 @@ func (c *Coordinator) joinViaDiscovery() error {
 			continue
 		}
 
+		// Be defensive: even if a peer says "success", we need an actual
+		// ClusterState to apply. Without it we can't learn the controller,
+		// membership list, or epoch — and we would panic below when logging.
+		if resp.ClusterState == nil || resp.ClusterState.Nodes == nil {
+			c.logger.Warn("join accepted but missing cluster state",
+				"peer", peer,
+				"controller", resp.ControllerID)
+			continue
+		}
+
 		// Success! Apply cluster state
-		if resp.ClusterState != nil {
-			if err := c.membership.ApplyState(resp.ClusterState); err != nil {
-				c.logger.Warn("failed to apply cluster state",
-					"error", err)
-			}
+		if err := c.membership.ApplyState(resp.ClusterState); err != nil {
+			c.logger.Warn("failed to apply cluster state",
+				"error", err)
 		}
 
 		c.logger.Info("joined cluster",
@@ -701,6 +744,15 @@ type CoordinatorStats struct {
 
 // Stats returns coordinator statistics.
 func (c *Coordinator) Stats() CoordinatorStats {
+	c.mu.RLock()
+	startedAt := c.startedAt
+	c.mu.RUnlock()
+
+	uptime := time.Duration(0)
+	if !startedAt.IsZero() {
+		uptime = time.Since(startedAt)
+	}
+
 	state := c.membership.State()
 	fdStats := c.failureDetector.Stats()
 
@@ -716,6 +768,7 @@ func (c *Coordinator) Stats() CoordinatorStats {
 		HasQuorum:       fdStats.AliveCount >= c.config.QuorumSize,
 		QuorumSize:      c.config.QuorumSize,
 		MetadataVersion: c.metadataStore.Version(),
+		Uptime:          uptime,
 		FailureDetector: fdStats,
 	}
 }
