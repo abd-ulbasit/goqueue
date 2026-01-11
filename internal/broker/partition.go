@@ -465,6 +465,27 @@ func (p *Partition) Log() *storage.Log {
 	return p.log
 }
 
+// GetOffsetByTimestamp returns the first offset with timestamp >= given timestamp.
+//
+// TIME-BASED OFFSET LOOKUP:
+//
+// USE CASES:
+//   - Consumer group offset reset by time
+//   - "Replay from 2 hours ago"
+//   - Disaster recovery: reprocess from specific point in time
+//
+// COMPARISON:
+//   - Kafka: offsetsForTimes() on KafkaConsumer
+//   - SQS: Not applicable (no offset concept)
+//   - RabbitMQ: Not applicable (queue-based, not log-based)
+//
+// RETURNS:
+//   - Offset of first message with timestamp >= given timestamp
+//   - 0 if partition is empty or timestamp is before all messages
+func (p *Partition) GetOffsetByTimestamp(timestamp int64) (int64, error) {
+	return p.log.GetOffsetByTimestamp(timestamp)
+}
+
 // =============================================================================
 // PARTITION MANAGEMENT
 // =============================================================================

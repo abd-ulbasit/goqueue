@@ -1,0 +1,910 @@
+// =============================================================================
+// GOQUEUE PROTOCOL BUFFER DEFINITIONS
+// =============================================================================
+//
+// WHAT IS THIS?
+// Protocol Buffers (protobuf) define the contract for gRPC communication.
+// Think of it like a schema for binary serialization - strongly typed,
+// compact, and language-agnostic.
+//
+// WHY PROTOCOL BUFFERS?
+//
+//   ┌─────────────────────────────────────────────────────────────────────────┐
+//   │ JSON                          │ Protocol Buffers                        │
+//   ├───────────────────────────────┼─────────────────────────────────────────┤
+//   │ {"topic": "orders"}           │ 0a 06 6f 72 64 65 72 73                 │
+//   │ Human readable                │ Binary (10x smaller)                    │
+//   │ Schema optional               │ Schema required (good!)                 │
+//   │ No code generation            │ Auto-generates client/server code       │
+//   │ Parse at runtime              │ Zero-copy deserialization possible      │
+//   └───────────────────────────────┴─────────────────────────────────────────┘
+//
+// FILE ORGANIZATION:
+// This single file defines all goqueue gRPC services. We keep it monolithic
+// for simplicity - split into multiple files if it grows beyond ~500 lines.
+//
+// SERVICES DEFINED:
+//   1. PublishService   - Publish messages (unary + streaming)
+//   2. ConsumeService   - Stream messages to consumers (server streaming)
+//   3. AckService       - Acknowledge messages (unary)
+//   4. OffsetService    - Commit/fetch offsets (unary)
+//
+// FIELD NUMBERING RULES:
+//   - Numbers 1-15 use 1 byte on wire (use for frequent fields)
+//   - Numbers 16-2047 use 2 bytes
+//   - Never reuse field numbers (for backwards compatibility)
+//   - Mark deprecated fields with [deprecated = true]
+//
+// COMPARISON WITH OTHER SYSTEMS:
+//   - Kafka: Custom binary protocol (Kafka protocol)
+//   - Pulsar: Uses protobuf internally
+//   - NATS: Simple text protocol + protobuf option
+//   - RabbitMQ: AMQP binary protocol
+//   - goqueue: gRPC/protobuf (modern, well-tooled)
+//
+// =============================================================================
+
+syntax = "proto3";
+
+package goqueue.v1;
+
+// Go package path for generated code
+// This tells protoc where to put the generated Go files
+option go_package = "goqueue/api/proto/goqueue/v1;goqueuepb";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/duration.proto";
+
+// =============================================================================
+// COMMON TYPES
+// =============================================================================
+//
+// These types are shared across multiple services. Defining them once
+// ensures consistency and reduces duplication.
+//
+// DESIGN PRINCIPLE:
+// Keep messages flat where possible. Nested messages are harder to evolve
+// and add serialization overhead.
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// Message - The core unit of data in goqueue
+// -----------------------------------------------------------------------------
+//
+// WIRE FORMAT (simplified):
+//   ┌──────────────────────────────────────────────────────────────────────────┐
+//   │ Field 1 (topic)   │ Field 2 (partition) │ Field 3 (offset) │ ...         │
+//   │ [tag][len][data]  │ [tag][varint]       │ [tag][varint]    │             │
+//   └──────────────────────────────────────────────────────────────────────────┘
+//
+// Each field is prefixed with a "tag" = (field_number << 3) | wire_type
+// Wire types: 0=varint, 1=64-bit, 2=length-delimited, 5=32-bit
+//
+// COMPARISON WITH KAFKA:
+//   Kafka Message:
+//     - crc, magic, attributes, timestamp, key, value, headers
+//   goqueue Message:
+//     - Similar but with additional fields for our features (priority, delay)
+//
+message Message {
+  // Metadata (set by broker on publish)
+  string topic = 1; // Topic name (e.g., "orders")
+  int32 partition = 2; // Partition number (0-based)
+  int64 offset = 3; // Unique offset within partition
+  
+  // Timestamps
+  // Using google.protobuf.Timestamp for precision and interop
+  // Alternative: int64 millis (simpler but less explicit)
+  google.protobuf.Timestamp timestamp = 4; // When message was published
+  google.protobuf.Timestamp deliver_at = 5; // For delayed messages (M5)
+  
+  // Payload
+  bytes key = 6; // Partition key (for ordering)
+  bytes value = 7; // Message payload (opaque bytes)
+  map<string, string> headers = 8; // Optional metadata headers
+  
+  // Advanced features
+  int32 priority = 9; // Priority level 0-4 (M6), 0=highest
+  string trace_id = 10; // Distributed tracing ID (M7)
+  
+  // Reliability (set by broker)
+  int32 retry_count = 11; // How many times redelivered
+  string receipt_handle = 12; // Handle for ACK/NACK (like SQS)
+}
+
+// -----------------------------------------------------------------------------
+// Error - Structured error information
+// -----------------------------------------------------------------------------
+//
+// WHY STRUCTURED ERRORS?
+// gRPC has built-in error codes (NOT_FOUND, INTERNAL, etc.) but they're
+// generic. We add goqueue-specific error details for better debugging.
+//
+// USAGE:
+//   When returning an error, include Error in the google.rpc.Status details.
+//
+message Error {
+  // Error code enum (defined below)
+  ErrorCode code = 1;
+  
+  // Human-readable message
+  string message = 2;
+  
+  // Additional context (e.g., which topic wasn't found)
+  map<string, string> details = 3;
+  
+  // For retryable errors, suggested wait time
+  google.protobuf.Duration retry_after = 4;
+}
+
+// ErrorCode - goqueue-specific error codes
+//
+// DESIGN: Use ranges for different error categories
+//   0-99:    Success and general
+//   100-199: Topic/partition errors  
+//   200-299: Consumer group errors
+//   300-399: Message errors
+//   400-499: Transaction errors
+//   500-599: Cluster errors
+//
+enum ErrorCode {
+  ERROR_CODE_UNSPECIFIED = 0;
+  
+  // Topic/Partition errors (100-199)
+  ERROR_CODE_TOPIC_NOT_FOUND = 100;
+  ERROR_CODE_TOPIC_ALREADY_EXISTS = 101;
+  ERROR_CODE_PARTITION_NOT_FOUND = 102;
+  ERROR_CODE_INVALID_PARTITION = 103;
+  
+  // Consumer group errors (200-299)
+  ERROR_CODE_GROUP_NOT_FOUND = 200;
+  ERROR_CODE_NOT_GROUP_MEMBER = 201;
+  ERROR_CODE_REBALANCE_IN_PROGRESS = 202;
+  ERROR_CODE_INVALID_GENERATION = 203;
+  ERROR_CODE_SESSION_TIMEOUT = 204;
+  
+  // Message errors (300-399)
+  ERROR_CODE_MESSAGE_TOO_LARGE = 300;
+  ERROR_CODE_INVALID_MESSAGE = 301;
+  ERROR_CODE_RECEIPT_HANDLE_INVALID = 302;
+  ERROR_CODE_RECEIPT_HANDLE_EXPIRED = 303;
+  ERROR_CODE_MESSAGE_NOT_FOUND = 304;
+  
+  // Transaction errors (400-499)
+  ERROR_CODE_TRANSACTION_NOT_FOUND = 400;
+  ERROR_CODE_TRANSACTION_TIMEOUT = 401;
+  ERROR_CODE_PRODUCER_FENCED = 402;
+  ERROR_CODE_INVALID_TXN_STATE = 403;
+  
+  // Cluster errors (500-599)
+  ERROR_CODE_NOT_LEADER = 500;
+  ERROR_CODE_LEADER_NOT_AVAILABLE = 501;
+  ERROR_CODE_BROKER_NOT_AVAILABLE = 502;
+  ERROR_CODE_REPLICATION_FAILED = 503;
+}
+
+// =============================================================================
+// PUBLISH SERVICE
+// =============================================================================
+//
+// PURPOSE:
+// Handles message publishing with two modes:
+//   1. Unary Publish - Single message, wait for ACK
+//   2. Streaming Publish - Batch messages, get ACKs as they're written
+//
+// WHEN TO USE WHICH:
+//   ┌─────────────────────────────────────────────────────────────────────────┐
+//   │ Use Case                    │ Mode              │ Why                   │
+//   ├─────────────────────────────┼───────────────────┼───────────────────────┤
+//   │ Single important message    │ Unary             │ Immediate feedback    │
+//   │ Batch import                │ Client Streaming  │ Throughput            │
+//   │ Real-time event stream      │ Bidirectional     │ Flow control          │
+//   │ Fire-and-forget             │ Unary (no wait)   │ Lowest latency        │
+//   └─────────────────────────────────────────────────────────────────────────┘
+//
+// COMPARISON:
+//   - Kafka Producer: Async with callbacks, batches internally
+//   - Pulsar Producer: Sync or async, batching configurable
+//   - goqueue: gRPC streaming for batch, unary for single
+//
+// =============================================================================
+
+service PublishService {
+  // Publish - Single message publish with immediate acknowledgment
+  //
+  // FLOW:
+  //   Client ─── PublishRequest ───► Server
+  //   Client ◄── PublishResponse ─── Server
+  //
+  // LATENCY: ~1-5ms (includes disk fsync if acks=leader)
+  //
+  rpc Publish(PublishRequest) returns (PublishResponse);
+  
+  // PublishStream - Bidirectional streaming for high-throughput publishing
+  //
+  // FLOW:
+  //   Client ═══ PublishStreamRequest 1 ═══►
+  //   Client ═══ PublishStreamRequest 2 ═══►  Server
+  //   Client ◄══ PublishStreamResponse 1 ═══
+  //   Client ═══ PublishStreamRequest 3 ═══►
+  //   Client ◄══ PublishStreamResponse 2,3 ═
+  //
+  // The server batches ACKs and sends them periodically or when buffer fills.
+  // This allows the client to keep sending without waiting for each ACK.
+  //
+  // FLOW CONTROL:
+  // gRPC HTTP/2 has built-in flow control. If the server is slow, the client
+  // will automatically slow down (backpressure). No manual implementation needed!
+  //
+  rpc PublishStream(stream PublishStreamRequest) returns (stream PublishStreamResponse);
+}
+
+// PublishRequest - Request to publish a single message
+message PublishRequest {
+  string topic = 1; // Target topic
+  bytes key = 2; // Partition key (optional, for ordering)
+  bytes value = 3; // Message payload
+  map<string, string> headers = 4; // Optional headers
+  
+  // Optional: Explicit partition (overrides key-based routing)
+  // Use -1 to let broker decide based on key
+  int32 partition = 5;
+  
+  // Advanced features
+  int32 priority = 6; // Priority 0-4 (M6)
+  google.protobuf.Duration delay = 7; // Delay before delivery (M5)
+  google.protobuf.Timestamp deliver_at = 8; // Specific delivery time (M5)
+  
+  // Ack mode - how long to wait for confirmation
+  AckMode ack_mode = 9;
+  
+  // Idempotency (M9)
+  int64 producer_id = 10; // Producer ID for dedup
+  int32 producer_epoch = 11; // Producer epoch (zombie fencing)
+  int64 sequence = 12; // Sequence number for ordering
+}
+
+// AckMode - How to acknowledge published messages
+//
+// COMPARISON:
+//   - Kafka: acks=0 (fire-and-forget), acks=1 (leader), acks=all
+//   - SQS: Always durable (no option)
+//   - RabbitMQ: Publisher confirms (similar to acks=1)
+//
+enum AckMode {
+  // Wait for broker acknowledgment (default, safe)
+  ACK_MODE_LEADER = 0;
+  
+  // Don't wait - fire and forget (fastest, may lose messages)
+  ACK_MODE_NONE = 1;
+  
+  // Wait for all in-sync replicas (strongest, slower)
+  ACK_MODE_ALL = 2;
+}
+
+// PublishResponse - Response after publishing
+message PublishResponse {
+  // Where the message landed
+  string topic = 1;
+  int32 partition = 2;
+  int64 offset = 3;
+  
+  // Timestamp assigned by broker
+  google.protobuf.Timestamp timestamp = 4;
+  
+  // Error if publish failed
+  Error error = 5;
+}
+
+// PublishStreamRequest - Request in streaming publish
+message PublishStreamRequest {
+  // Correlation ID to match responses
+  // Client generates this, server echoes it back
+  string correlation_id = 1;
+  
+  // Message to publish
+  string topic = 2;
+  bytes key = 3;
+  bytes value = 4;
+  map<string, string> headers = 5;
+  int32 partition = 6;
+  int32 priority = 7;
+  google.protobuf.Duration delay = 8;
+  AckMode ack_mode = 9;
+  
+  // Idempotency
+  int64 producer_id = 10;
+  int32 producer_epoch = 11;
+  int64 sequence = 12;
+}
+
+// PublishStreamResponse - Acknowledgment in streaming publish
+message PublishStreamResponse {
+  // Echoed correlation ID from request
+  string correlation_id = 1;
+  
+  // Result
+  string topic = 2;
+  int32 partition = 3;
+  int64 offset = 4;
+  google.protobuf.Timestamp timestamp = 5;
+  
+  // Error if this message failed
+  Error error = 6;
+}
+
+// =============================================================================
+// CONSUME SERVICE
+// =============================================================================
+//
+// PURPOSE:
+// Stream messages to consumers in real-time. Unlike HTTP polling, the server
+// pushes messages as soon as they're available.
+//
+// WHY SERVER STREAMING (not bidirectional)?
+//
+//   ┌─────────────────────────────────────────────────────────────────────────┐
+//   │ Bidirectional: More complex, ACKs on same stream                        │
+//   │ Server streaming + separate ACK RPC: Simpler, clearer separation        │
+//   │                                                                         │
+//   │ We chose server streaming because:                                      │
+//   │ 1. ACKs are less frequent than messages (batch ACKs)                    │
+//   │ 2. Separate ACK RPC is easier to understand and debug                   │
+//   │ 3. Matches how Kafka consumers work (poll + commit)                     │
+//   │ 4. Can upgrade to bidirectional later if needed                         │
+//   └─────────────────────────────────────────────────────────────────────────┘
+//
+// FLOW:
+//   Consumer ─── ConsumeRequest ───────► Broker
+//   Consumer ◄── Message 1 ─────────────
+//   Consumer ◄── Message 2 ─────────────  [Server pushes as available]
+//   Consumer ◄── Message 3 ─────────────
+//   ...
+//   Consumer ─── AckRequest (separate RPC) ─► Broker
+//
+// =============================================================================
+
+service ConsumeService {
+  // Consume - Server streaming of messages
+  //
+  // The stream stays open until:
+  //   - Client cancels (context.Cancel)
+  //   - Server closes (rebalance, shutdown)
+  //   - Error occurs (network, auth)
+  //
+  // HEARTBEAT:
+  // The server sends periodic heartbeat messages (empty, just to keep alive)
+  // if no real messages are available. This prevents TCP timeouts.
+  //
+  rpc Consume(ConsumeRequest) returns (stream ConsumeResponse);
+  
+  // Subscribe - Long-lived subscription with consumer group
+  //
+  // Unlike Consume, this handles:
+  //   - Consumer group membership
+  //   - Automatic partition assignment
+  //   - Rebalancing notifications
+  //
+  // FLOW:
+  //   Consumer ─── SubscribeRequest ────► Broker (includes group_id)
+  //   Consumer ◄── Assignment ──────────  [Which partitions you got]
+  //   Consumer ◄── Message 1 ───────────
+  //   Consumer ◄── Message 2 ───────────
+  //   Consumer ◄── RebalanceStart ──────  [Rebalance triggered]
+  //   Consumer ◄── Assignment ──────────  [New assignment]
+  //   ...
+  //
+  rpc Subscribe(SubscribeRequest) returns (stream ConsumeResponse);
+}
+
+// ConsumeRequest - Request to start consuming
+message ConsumeRequest {
+  string topic = 1;
+  
+  // Which partitions to consume
+  // Empty = all partitions (for standalone consumers)
+  repeated int32 partitions = 2;
+  
+  // Starting position
+  ConsumeStartPosition start_position = 3;
+  
+  // Optional: specific offset to start from (if start_position = OFFSET)
+  int64 start_offset = 4;
+  
+  // Optional: timestamp to start from (if start_position = TIMESTAMP)
+  google.protobuf.Timestamp start_timestamp = 5;
+  
+  // Maximum messages per batch (server may send fewer)
+  int32 max_messages = 6;
+  
+  // Maximum bytes per batch
+  int32 max_bytes = 7;
+  
+  // Maximum wait time if no messages available
+  google.protobuf.Duration max_wait = 8;
+  
+  // Consumer identification (for tracking, not group membership)
+  string consumer_id = 9;
+}
+
+// ConsumeStartPosition - Where to start consuming
+//
+// COMPARISON:
+//   - Kafka: auto.offset.reset = earliest|latest
+//   - SQS: Always from available messages
+//   - RabbitMQ: From queue head
+//
+enum ConsumeStartPosition {
+  // Start from earliest available message
+  CONSUME_START_POSITION_EARLIEST = 0;
+  
+  // Start from latest (new messages only)
+  CONSUME_START_POSITION_LATEST = 1;
+  
+  // Start from specific offset
+  CONSUME_START_POSITION_OFFSET = 2;
+  
+  // Start from specific timestamp (uses time index, M14)
+  CONSUME_START_POSITION_TIMESTAMP = 3;
+}
+
+// SubscribeRequest - Request to subscribe with consumer group
+message SubscribeRequest {
+  // Topics to subscribe to
+  repeated string topics = 1;
+  
+  // Consumer group ID (required)
+  string group_id = 2;
+  
+  // Consumer instance ID (optional, for static membership)
+  string consumer_id = 3;
+  
+  // Starting position for new partitions
+  ConsumeStartPosition start_position = 4;
+  
+  // Fetch configuration
+  int32 max_messages = 5;
+  int32 max_bytes = 6;
+  google.protobuf.Duration max_wait = 7;
+  
+  // Session timeout (how long before considered dead)
+  google.protobuf.Duration session_timeout = 8;
+  
+  // Heartbeat interval (server expects heartbeats this often)
+  // Note: With streaming, the stream itself acts as heartbeat
+  google.protobuf.Duration heartbeat_interval = 9;
+}
+
+// ConsumeResponse - A batch of messages or control message
+message ConsumeResponse {
+  // Response type
+  oneof payload {
+    // Batch of messages
+    MessageBatch messages = 1;
+    
+    // Heartbeat (keep-alive, no messages)
+    Heartbeat heartbeat = 2;
+    
+    // Assignment change (for Subscribe)
+    Assignment assignment = 3;
+    
+    // Rebalance notification
+    RebalanceNotification rebalance = 4;
+    
+    // Error
+    Error error = 5;
+  }
+}
+
+// MessageBatch - A batch of messages
+message MessageBatch {
+  repeated Message messages = 1;
+  
+  // High watermark - highest offset fully replicated
+  // Consumer can safely commit up to this offset
+  int64 high_watermark = 2;
+}
+
+// Heartbeat - Keep-alive message
+message Heartbeat {
+  google.protobuf.Timestamp timestamp = 1;
+}
+
+// Assignment - Partition assignment for consumer group
+message Assignment {
+  // Current generation (increments on each rebalance)
+  int32 generation = 1;
+  
+  // Assigned partitions
+  repeated TopicPartition partitions = 2;
+  
+  // Member ID assigned by coordinator
+  string member_id = 3;
+}
+
+// TopicPartition - A topic-partition pair
+message TopicPartition {
+  string topic = 1;
+  int32 partition = 2;
+}
+
+// RebalanceNotification - Notification of rebalance
+message RebalanceNotification {
+  RebalanceType type = 1;
+  
+  // For REVOKE: partitions being taken away
+  // For ASSIGN: partitions being assigned
+  repeated TopicPartition partitions = 2;
+  
+  // New generation after rebalance completes
+  int32 generation = 3;
+}
+
+// RebalanceType - Type of rebalance event
+//
+// COOPERATIVE REBALANCING (KIP-429):
+// Instead of stop-the-world, we do incremental revoke-then-assign.
+// 1. REVOKE sent with partitions to give up
+// 2. Consumer commits offsets, stops processing those partitions
+// 3. ASSIGN sent with new assignment
+// 4. Consumer starts processing new partitions
+//
+enum RebalanceType {
+  REBALANCE_TYPE_UNSPECIFIED = 0;
+  
+  // Partitions being revoked (stop processing, commit offsets)
+  REBALANCE_TYPE_REVOKE = 1;
+  
+  // Partitions being assigned (start processing)
+  REBALANCE_TYPE_ASSIGN = 2;
+}
+
+// =============================================================================
+// ACK SERVICE
+// =============================================================================
+//
+// PURPOSE:
+// Handle message acknowledgment, negative acknowledgment, and rejection.
+//
+// WHY SEPARATE FROM CONSUME?
+//   ┌─────────────────────────────────────────────────────────────────────────┐
+//   │ 1. Different frequency: Messages stream fast, ACKs are batched          │
+//   │ 2. Different lifetime: Consume stream is long-lived, ACKs are instant   │
+//   │ 3. Clearer semantics: Consume = read, Ack = confirm                     │
+//   │ 4. Easier debugging: Can trace ACKs separately                          │
+//   └─────────────────────────────────────────────────────────────────────────┘
+//
+// ACK vs NACK vs REJECT:
+//   - ACK: "I processed this successfully, delete it"
+//   - NACK: "I failed, but retry later (transient error)"
+//   - REJECT: "This message is bad, send to DLQ (permanent error)"
+//
+// COMPARISON:
+//   - Kafka: Offset commit (implicit ACK), no NACK
+//   - SQS: DeleteMessage (ACK), ChangeMessageVisibility (NACK)
+//   - RabbitMQ: basic.ack, basic.nack, basic.reject
+//
+// =============================================================================
+
+service AckService {
+  // Ack - Acknowledge successful processing
+  rpc Ack(AckRequest) returns (AckResponse);
+  
+  // Nack - Negative acknowledgment (retry later)
+  rpc Nack(NackRequest) returns (NackResponse);
+  
+  // Reject - Reject message (send to DLQ)
+  rpc Reject(RejectRequest) returns (RejectResponse);
+  
+  // ExtendVisibility - Extend processing time
+  rpc ExtendVisibility(ExtendVisibilityRequest) returns (ExtendVisibilityResponse);
+  
+  // BatchAck - Acknowledge multiple messages at once
+  rpc BatchAck(BatchAckRequest) returns (BatchAckResponse);
+}
+
+// AckRequest - Acknowledge a message
+message AckRequest {
+  // Consumer group
+  string group_id = 1;
+  
+  // Receipt handle from consumed message
+  string receipt_handle = 2;
+  
+  // Alternative: specify topic/partition/offset directly
+  string topic = 3;
+  int32 partition = 4;
+  int64 offset = 5;
+}
+
+// AckResponse - Acknowledgment result
+message AckResponse {
+  bool success = 1;
+  Error error = 2;
+}
+
+// NackRequest - Negative acknowledgment
+message NackRequest {
+  string group_id = 1;
+  string receipt_handle = 2;
+  
+  // How long to wait before redelivering
+  google.protobuf.Duration visibility_timeout = 3;
+  
+  // Alternative: specific topic/partition/offset
+  string topic = 4;
+  int32 partition = 5;
+  int64 offset = 6;
+}
+
+// NackResponse - NACK result
+message NackResponse {
+  bool success = 1;
+  
+  // When the message will become visible again
+  google.protobuf.Timestamp next_visible_at = 2;
+  
+  Error error = 3;
+}
+
+// RejectRequest - Reject to DLQ
+message RejectRequest {
+  string group_id = 1;
+  string receipt_handle = 2;
+  
+  // Reason for rejection (stored in DLQ message headers)
+  string reason = 3;
+  
+  // Alternative: specific topic/partition/offset
+  string topic = 4;
+  int32 partition = 5;
+  int64 offset = 6;
+}
+
+// RejectResponse - Rejection result
+message RejectResponse {
+  bool success = 1;
+  
+  // Where the message went in DLQ
+  string dlq_topic = 2;
+  int32 dlq_partition = 3;
+  int64 dlq_offset = 4;
+  
+  Error error = 5;
+}
+
+// ExtendVisibilityRequest - Extend processing time
+message ExtendVisibilityRequest {
+  string group_id = 1;
+  string receipt_handle = 2;
+  
+  // New visibility timeout (from now)
+  google.protobuf.Duration visibility_timeout = 3;
+}
+
+// ExtendVisibilityResponse - Extension result
+message ExtendVisibilityResponse {
+  bool success = 1;
+  
+  // New deadline
+  google.protobuf.Timestamp new_deadline = 2;
+  
+  Error error = 3;
+}
+
+// BatchAckRequest - Acknowledge multiple messages
+message BatchAckRequest {
+  string group_id = 1;
+  
+  // Multiple receipt handles
+  repeated string receipt_handles = 2;
+  
+  // Or multiple offsets
+  repeated OffsetAck offsets = 3;
+}
+
+// OffsetAck - A single offset acknowledgment
+message OffsetAck {
+  string topic = 1;
+  int32 partition = 2;
+  int64 offset = 3;
+}
+
+// BatchAckResponse - Batch acknowledgment result
+message BatchAckResponse {
+  // Number successfully acknowledged
+  int32 success_count = 1;
+  
+  // Failed acknowledgments
+  repeated AckError failures = 2;
+}
+
+// AckError - Error for a specific acknowledgment
+message AckError {
+  string receipt_handle = 1;
+  string topic = 2;
+  int32 partition = 3;
+  int64 offset = 4;
+  Error error = 5;
+}
+
+// =============================================================================
+// OFFSET SERVICE
+// =============================================================================
+//
+// PURPOSE:
+// Manage consumer offsets - where each consumer group is in each partition.
+//
+// WHY SEPARATE FROM ACK?
+// ACK = "I'm done with this message"
+// Commit = "Remember my position in case I crash"
+//
+// They're often combined, but can be separate:
+//   - Process 100 messages
+//   - ACK each one
+//   - Commit offset once (at the end)
+//
+// This reduces commit frequency while maintaining per-message reliability.
+//
+// COMPARISON:
+//   - Kafka: commitSync/commitAsync, offset stored in __consumer_offsets topic
+//   - SQS: No commits (messages deleted on receive or ACK)
+//   - RabbitMQ: No commits (queue position is implicit)
+//
+// =============================================================================
+
+service OffsetService {
+  // CommitOffsets - Commit consumer offsets
+  rpc CommitOffsets(CommitOffsetsRequest) returns (CommitOffsetsResponse);
+  
+  // FetchOffsets - Get committed offsets
+  rpc FetchOffsets(FetchOffsetsRequest) returns (FetchOffsetsResponse);
+  
+  // ResetOffsets - Reset offsets to specific position
+  rpc ResetOffsets(ResetOffsetsRequest) returns (ResetOffsetsResponse);
+}
+
+// CommitOffsetsRequest - Commit offsets for consumer group
+message CommitOffsetsRequest {
+  string group_id = 1;
+  
+  // Offsets to commit
+  repeated OffsetCommit offsets = 2;
+  
+  // Generation ID (for group membership validation)
+  int32 generation = 3;
+  
+  // Member ID (for validation)
+  string member_id = 4;
+}
+
+// OffsetCommit - A single offset commit
+message OffsetCommit {
+  string topic = 1;
+  int32 partition = 2;
+  int64 offset = 3;
+  
+  // Optional metadata (e.g., timestamp, hostname)
+  string metadata = 4;
+}
+
+// CommitOffsetsResponse - Commit result
+message CommitOffsetsResponse {
+  // Per-partition results
+  repeated OffsetCommitResult results = 1;
+}
+
+// OffsetCommitResult - Result for single partition
+message OffsetCommitResult {
+  string topic = 1;
+  int32 partition = 2;
+  bool success = 3;
+  Error error = 4;
+}
+
+// FetchOffsetsRequest - Get committed offsets
+message FetchOffsetsRequest {
+  string group_id = 1;
+  
+  // Partitions to fetch (empty = all)
+  repeated TopicPartition partitions = 2;
+}
+
+// FetchOffsetsResponse - Committed offsets
+message FetchOffsetsResponse {
+  repeated OffsetFetchResult offsets = 1;
+}
+
+// OffsetFetchResult - Offset for single partition
+message OffsetFetchResult {
+  string topic = 1;
+  int32 partition = 2;
+  int64 offset = 3;
+  string metadata = 4;
+  Error error = 5;
+}
+
+// ResetOffsetsRequest - Reset offsets
+message ResetOffsetsRequest {
+  string group_id = 1;
+  
+  // Reset strategy
+  OffsetResetStrategy strategy = 2;
+  
+  // Partitions to reset (empty = all)
+  repeated TopicPartition partitions = 3;
+  
+  // For TIMESTAMP strategy: target timestamp
+  google.protobuf.Timestamp timestamp = 4;
+  
+  // For OFFSET strategy: target offsets
+  repeated OffsetCommit offsets = 5;
+}
+
+// OffsetResetStrategy - How to reset offsets
+enum OffsetResetStrategy {
+  OFFSET_RESET_STRATEGY_UNSPECIFIED = 0;
+  
+  // Reset to earliest available
+  OFFSET_RESET_STRATEGY_EARLIEST = 1;
+  
+  // Reset to latest (end of log)
+  OFFSET_RESET_STRATEGY_LATEST = 2;
+  
+  // Reset to specific timestamp
+  OFFSET_RESET_STRATEGY_TIMESTAMP = 3;
+  
+  // Reset to specific offsets
+  OFFSET_RESET_STRATEGY_OFFSET = 4;
+}
+
+// ResetOffsetsResponse - Reset result
+message ResetOffsetsResponse {
+  repeated OffsetResetResult results = 1;
+}
+
+// OffsetResetResult - Result for single partition
+message OffsetResetResult {
+  string topic = 1;
+  int32 partition = 2;
+  int64 old_offset = 3;
+  int64 new_offset = 4;
+  Error error = 5;
+}
+
+// =============================================================================
+// HEALTH SERVICE
+// =============================================================================
+//
+// PURPOSE:
+// Health checking for load balancers and orchestrators.
+// Follows the gRPC health checking protocol (standard).
+//
+// =============================================================================
+
+service HealthService {
+  // Check - Standard health check
+  rpc Check(HealthCheckRequest) returns (HealthCheckResponse);
+  
+  // Watch - Stream health status changes
+  rpc Watch(HealthCheckRequest) returns (stream HealthCheckResponse);
+}
+
+// HealthCheckRequest - Health check request
+message HealthCheckRequest {
+  // Service name (empty = overall health)
+  string service = 1;
+}
+
+// HealthCheckResponse - Health status
+message HealthCheckResponse {
+  ServingStatus status = 1;
+}
+
+// ServingStatus - Health status enum
+enum ServingStatus {
+  SERVING_STATUS_UNKNOWN = 0;
+  SERVING_STATUS_SERVING = 1;
+  SERVING_STATUS_NOT_SERVING = 2;
+  SERVING_STATUS_SERVICE_UNKNOWN = 3;
+}

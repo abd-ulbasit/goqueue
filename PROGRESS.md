@@ -920,3 +920,8 @@ directly transfer bytes from a file channel to a socket channel.
 This typically avoids 2 of the copies and 1 system call introduced
 in steps (2) and (3). Kafka exploits the sendfile API to efficiently
 deliver bytes in a log segment file from a broker to a consumer
+
+
+
+
+Refactor the HTTP SERVERs and generate the POST MAN documentation and anyother that is standard for testing/ shipping for cloud native applications..  Also add a new milestone to add a web page for this go queue as well as documentation for this .. also build that page and create a github page site for that and link it on our github project with github gh cli (use no pager to do this )

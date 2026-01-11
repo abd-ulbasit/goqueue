@@ -2,9 +2,9 @@
 
 ## Overall Status
 
-**Phase**: 3 of 4
-**Milestones**: 14/18 complete
-**Tests**: 590+ passing (storage: 50+, broker: 450+, api: 24, cluster: 50+)
+**Phase**: 4 of 4
+**Milestones**: 15/18 complete
+**Tests**: 620+ passing (storage: 50+, broker: 450+, api: 24, grpc: 16, client: 14, cluster: 50+)
 **Started**: Session 1
 
 ## Critical Issues Fixed (2026-01-11)
@@ -44,8 +44,8 @@
 - [x] Milestone 13: Online Partition Scaling ✅ ⭐
 - [x] Milestone 14: Log Compaction, Snapshots & Time Index ⭐ 
 
-### Phase 4: Operations (0/12)
-- [ ] Milestone 15: gRPC API & Go Client (js/ts as well if time)
+### Phase 4: Operations (1/12)
+- [x] Milestone 15: gRPC API & Go Client ✅ ⭐
 - [ ] Milestone 16: CLI Tool
 - [ ] Milestone 17: Prometheus Metrics & Grafana
 - [ ] Milestone 18: Multi-Tenancy & Quotas
@@ -58,22 +58,90 @@
 - [ ] Milestone 25: Production Hardening & Best Practices
 - [ ] Milestone 26: Release Process & CI/CD
 
-## Up Next – Milestone 15 (gRPC API & Go Client)
+## Up Next – Milestone 16 (CLI Tool)
 
-- **Objective**: Provide high-performance binary protocol and idiomatic Go client library
-- **gRPC API**:
-  - Binary protocol for low latency (vs HTTP/JSON overhead)
-  - Streaming support for efficient consumption
-  - Bi-directional streams for push-based delivery
-- **Go Client Library**:
-  - Idiomatic Go API (channels, context, interfaces)
-  - Connection pooling and load balancing
-  - Automatic retries and backpressure handling
-  - Client-side partitioner for producer sharding
-- **JS/TS Client** (if time permits):
-  - gRPC-web for browser compatibility
-  - Node.js client for server-side use
-  - Promise-based async API
+- **Objective**: Provide command-line interface for managing goqueue
+- **Commands**:
+  - `goqueue topic create/list/delete/describe`
+  - `goqueue consumer-group list/describe/reset`
+  - `goqueue publish <topic> <message>`
+  - `goqueue consume <topic> [--group]`
+  - `goqueue cluster status/nodes`
+- **Features**:
+  - Human-readable and JSON output formats
+  - Shell completion
+  - Configuration file support
+
+## Milestone 15 - gRPC API & Go Client ⭐ (COMPLETE!)
+
+### What Was Built
+
+**gRPC Server** (`internal/grpc/`):
+- Protocol Buffers v3 definitions with comprehensive service contracts
+- `PublishService` - Single message and streaming publish
+- `ConsumeService` - Server streaming for continuous message delivery
+- `AckService` - Message acknowledgment (ack, nack, reject, extend visibility)
+- `OffsetService` - Consumer offset commit, fetch, and reset
+- `HealthService` - Standard gRPC health checking
+- Request logging interceptor for observability
+- Integration with existing broker
+
+**Go Client Library** (`pkg/client/`):
+- Low-level `Client` - Direct gRPC wrapper with all operations
+- High-level `Producer` - Async sending, batching, key-based partitioning
+- High-level `Consumer` - Consumer group support, auto-ack, message channels
+- Connection management with keepalives
+- Retry logic with exponential backoff
+- Comprehensive comments explaining patterns
+
+**Integration**:
+- gRPC server starts alongside HTTP server in main.go
+- Port 9000 for gRPC, Port 8080 for HTTP
+- Graceful shutdown handling
+
+**Tests**:
+- `internal/grpc/server_test.go` - 13 tests covering all services
+- `pkg/client/client_test.go` - 14 tests for client library
+- Integration tests for publish/consume flow
+- Concurrent access tests
+
+### Architecture Decisions
+
+| Decision | Choice | Why |
+|----------|--------|-----|
+| Protocol | gRPC with HTTP/2 | Binary, streaming, multiplexed |
+| Consume Pattern | Server streaming | Push-based, efficient |
+| Error Handling | gRPC status codes | Standard, well-defined |
+| Client Design | Low-level + High-level | Flexibility + convenience |
+| Health Check | Standard protocol | Compatible with K8s, load balancers |
+
+### Files Created
+
+```
+api/proto/
+├── goqueue.proto          # Service definitions
+├── buf.yaml               # buf configuration  
+├── buf.gen.yaml           # Code generation config
+└── gen/go/                # Generated Go code
+    ├── goqueue.pb.go
+    └── goqueue_grpc.pb.go
+
+internal/grpc/
+├── server.go              # gRPC server setup
+├── services.go            # Service implementations
+├── publish_service.go     # Publish operations
+├── consume_service.go     # Consume streaming
+├── ack_service.go         # Acknowledgment operations
+├── offset_service.go      # Offset management
+├── health_service.go      # Health checking
+└── server_test.go         # Server tests
+
+pkg/client/
+├── client.go              # Low-level gRPC client
+├── producer.go            # High-level producer
+├── consumer.go            # High-level consumer
+└── client_test.go         # Client tests
+```
 
 ## What Works
 

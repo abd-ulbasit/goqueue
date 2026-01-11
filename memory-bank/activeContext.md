@@ -2,52 +2,62 @@
 
 ## Current Focus
 
-**Phase**: 3.5 - Distribution Hardening
-**Milestone**: 14 - Time Index, Snapshots & Log Compaction
-**Status**: M14 Partial Complete! (Time Index ✅, Snapshots ✅, Compaction 🔄)
+**Phase**: 4 - Operations
+**Milestone**: 15 - gRPC API & Go Client ✅ COMPLETE
+**Status**: Milestone 15 fully implemented with tests
 
-## What I'm Working On
+## What I Just Completed
 
-### Just Completed (M14 - Time Index & Coordinator Snapshots)
-- ✅ **Time Index** - Binary format mapping timestamp→offset for time-based queries
-- ✅ **Time Index File Format** - 16 bytes per entry (8B timestamp + 8B offset)
-- ✅ **Time Index Granularity** - 4KB (matches offset index)
-- ✅ **Time Index Lookup** - O(log n) binary search vs O(n) full scan
-- ✅ **Segment Integration** - ReadFromTimestamp, ReadTimeRange, GetFirstTimestamp, GetLastTimestamp
-- ✅ **Corruption Recovery** - Automatic time index rebuild from segment data
-- ✅ **Time Index Tests** - 9 tests, all passing (create, append, lookup, range, persistence, truncate)
-- ✅ **Coordinator Snapshots** - Binary format with CRC32 validation
-- ✅ **Snapshot File Format** - 32-byte header + variable entries
-- ✅ **Snapshot Triggers** - 10K records OR 5 minutes (whichever first)
-- ✅ **Snapshot Management** - Keep last 3 snapshots, auto-cleanup
-- ✅ **Snapshot Writer/Reader** - Complete lifecycle with corruption detection
-- ✅ **Snapshot Tests** - 9 tests, all passing (encode/decode, write/read, corruption, manager, cleanup)
-- 🔄 **Log Compaction** - Infrastructure created but needs Log API integration
+### Milestone 15 - gRPC API & Go Client ⭐
 
-### Key Technical Decisions (M14)
-- **Time Index Format**: Binary, 16 bytes per entry (timestamp:8B, offset:8B)
-- **Time Index Granularity**: 4KB (same as offset index for consistency)
-- **Time Index Lookup**: Binary search O(log n) with LookupRange for time ranges
-- **Snapshot Format**: Binary with 32-byte header (magic, version, type, CRC, offsets)
-- **Snapshot Trigger**: 10K records OR 5 minutes (matches Kafka defaults)
-- **Snapshot Cleanup**: Keep last 3 snapshots (balance recoverability vs disk)
-- **Snapshot CRC**: CRC32 for corruption detection
-- **Compaction Strategy**: Copy-on-compact (simpler, safer, matches Kafka)
-- **Dirty Ratio**: 50% threshold (compact when half are duplicates)
-- **Tombstone Retention**: 24 hours (matches Kafka delete.retention.ms)
-- **Compaction Scope**: Internal topics only (__consumer_offsets, __transaction_state)
+**gRPC Server Implementation** (`internal/grpc/`):
+- ✅ Protocol Buffers v3 definitions (`api/proto/goqueue.proto`)
+- ✅ Code generation with buf tool
+- ✅ `PublishService` - Single message and streaming publish
+- ✅ `ConsumeService` - Server streaming for continuous delivery
+- ✅ `AckService` - Ack, Nack, Reject, ExtendVisibility
+- ✅ `OffsetService` - CommitOffsets, FetchOffsets, ResetOffsets
+- ✅ `HealthService` - Standard gRPC health checking
+- ✅ Request logging interceptor
+- ✅ Graceful shutdown handling
 
-### Files Created/Modified (M14)
-- **Storage Package** (2 new files):
-  - `internal/storage/time_index.go` - TimeIndex implementation (~650 lines)
-  - `internal/storage/time_index_test.go` - Comprehensive tests (~405 lines)
-- **Storage Modified**:
-  - `internal/storage/segment.go` - Added timeIndex field, ReadFromTimestamp/ReadTimeRange methods
-- **Broker Package** (4 new files):
-  - `internal/broker/coordinator_snapshot.go` - Snapshot infrastructure (~670 lines)
-  - `internal/broker/coordinator_snapshot_test.go` - Snapshot tests (~400 lines)
-  - `internal/broker/compactor.go` - Compaction logic (~650 lines, needs Log API work)
-  - `internal/broker/compactor_test.go` - Compaction tests (~500 lines)
+**Go Client Library** (`pkg/client/`):
+- ✅ Low-level `Client` - Direct gRPC wrapper (~900 lines)
+- ✅ High-level `Producer` - Async sending, batching, key partitioning
+- ✅ High-level `Consumer` - Consumer groups, auto-ack, channels
+- ✅ Connection management with keepalives
+- ✅ Retry logic with exponential backoff
+- ✅ Comprehensive educational comments
+
+**Integration**:
+- ✅ gRPC server in main.go (port 9000)
+- ✅ Runs alongside HTTP server (port 8080)
+- ✅ Graceful shutdown sequence
+
+**Tests**:
+- ✅ `internal/grpc/server_test.go` - 13 tests
+- ✅ `pkg/client/client_test.go` - 14 tests
+- ✅ All tests passing
+
+### Architecture Decisions Made (M15)
+| Decision | Choice | Why |
+|----------|--------|-----|
+| Protocol | gRPC + HTTP/2 | Binary, streaming, multiplexed |
+| Consume | Server streaming | Push-based, efficient |
+| Errors | gRPC status codes | Standard, well-defined |
+| Client | Low-level + High-level | Flexibility + convenience |
+| Health | Standard protocol | K8s/LB compatible |
+
+## What's Next
+
+### Milestone 16 - CLI Tool
+- `goqueue topic create/list/delete/describe`
+- `goqueue consumer-group list/describe/reset`
+- `goqueue publish <topic> <message>`
+- `goqueue consume <topic> [--group]`
+- `goqueue cluster status/nodes`
+
+## Previous Work (M14)
 - **Documentation**:
   - `docs/ARCHITECTURE.md` - Added comprehensive M14 section (~400 lines)
 
