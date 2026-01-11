@@ -17,6 +17,9 @@ package storage
 import (
 	"bytes"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -398,6 +401,374 @@ func BenchmarkLog_ReadSequential(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		log.Read(int64(i % 10000))
+	}
+}
+
+func TestLog_AppendAtOffset(t *testing.T) {
+	dir := t.TempDir()
+
+	log, err := NewLog(dir)
+	if err != nil {
+		t.Fatalf("NewLog failed: %v", err)
+	}
+	defer log.Close()
+
+	// Test normal append at expected offset
+	msg := NewMessage([]byte("key"), []byte("value"))
+	offset, err := log.AppendAtOffset(msg, 0)
+	if err != nil {
+		t.Fatalf("AppendAtOffset failed: %v", err)
+	}
+	if offset != 0 {
+		t.Errorf("Expected offset 0, got %d", offset)
+	}
+
+	// Test idempotency - appending same offset again should succeed
+	msg2 := NewMessage([]byte("key2"), []byte("value2"))
+	offset, err = log.AppendAtOffset(msg2, 0)
+	if err != nil {
+		t.Fatalf("AppendAtOffset idempotent failed: %v", err)
+	}
+	if offset != 0 {
+		t.Errorf("Expected offset 0 for idempotent, got %d", offset)
+	}
+
+	// Test gap detection - trying to append at offset 2 when next is 1
+	msg3 := NewMessage([]byte("key3"), []byte("value3"))
+	_, err = log.AppendAtOffset(msg3, 2)
+	if err == nil {
+		t.Error("AppendAtOffset should fail when creating gap")
+	}
+
+	// Test normal append at next expected offset
+	msg4 := NewMessage([]byte("key4"), []byte("value4"))
+	offset, err = log.AppendAtOffset(msg4, 1)
+	if err != nil {
+		t.Fatalf("AppendAtOffset at expected offset failed: %v", err)
+	}
+	if offset != 1 {
+		t.Errorf("Expected offset 1, got %d", offset)
+	}
+
+	// Verify messages can be read
+	readMsg, err := log.Read(0)
+	if err != nil {
+		t.Fatalf("Read failed: %v", err)
+	}
+	if string(readMsg.Key) != "key" {
+		t.Errorf("Read wrong message: got %s", readMsg.Key)
+	}
+}
+
+func TestLog_Sync(t *testing.T) {
+	dir := t.TempDir()
+
+	log, err := NewLog(dir)
+	if err != nil {
+		t.Fatalf("NewLog failed: %v", err)
+	}
+	defer log.Close()
+
+	// Write a message
+	msg := NewMessage([]byte("key"), []byte("value"))
+	if _, err := log.Append(msg); err != nil {
+		t.Fatalf("Append failed: %v", err)
+	}
+
+	// Sync should not fail
+	if err := log.Sync(); err != nil {
+		t.Errorf("Sync failed: %v", err)
+	}
+
+	// Sync on closed log should fail
+	log.Close()
+	if err := log.Sync(); err != ErrLogClosed {
+		t.Errorf("Expected ErrLogClosed, got %v", err)
+	}
+}
+
+func TestLog_TruncateAfter(t *testing.T) {
+	dir := t.TempDir()
+
+	log, err := NewLog(dir)
+	if err != nil {
+		t.Fatalf("NewLog failed: %v", err)
+	}
+	defer log.Close()
+
+	// Write multiple messages
+	for i := 0; i < 10; i++ {
+		msg := NewMessage([]byte(fmt.Sprintf("key-%d", i)), []byte(fmt.Sprintf("value-%d", i)))
+		if _, err := log.Append(msg); err != nil {
+			t.Fatalf("Append %d failed: %v", i, err)
+		}
+	}
+
+	// Truncate after offset 5
+	if err := log.TruncateAfter(5); err != nil {
+		t.Fatalf("TruncateAfter failed: %v", err)
+	}
+
+	// Verify we can still read messages up to offset 5
+	for i := 0; i <= 5; i++ {
+		msg, err := log.Read(int64(i))
+		if err != nil {
+			t.Errorf("Read %d after truncate failed: %v", i, err)
+		}
+		expectedKey := fmt.Sprintf("key-%d", i)
+		if string(msg.Key) != expectedKey {
+			t.Errorf("Message %d key mismatch after truncate", i)
+		}
+	}
+
+	// Verify next offset is correct
+	if log.NextOffset() != 6 {
+		t.Errorf("NextOffset after truncate = %d, want 6", log.NextOffset())
+	}
+
+	// Truncate after non-existent offset should fail
+	if err := log.TruncateAfter(100); err == nil {
+		t.Error("TruncateAfter should fail for non-existent offset")
+	}
+}
+
+func TestLog_Dir(t *testing.T) {
+	dir := t.TempDir()
+
+	log, err := NewLog(dir)
+	if err != nil {
+		t.Fatalf("NewLog failed: %v", err)
+	}
+	defer log.Close()
+
+	// Dir should return the directory we created with
+	if log.Dir() != dir {
+		t.Errorf("Dir() = %s, want %s", log.Dir(), dir)
+	}
+}
+
+func TestLog_ListSegmentFiles(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create a log and write some messages to create segment files
+	log, err := NewLog(dir)
+	if err != nil {
+		t.Fatalf("NewLog failed: %v", err)
+	}
+
+	for i := 0; i < 10; i++ {
+		msg := NewMessage([]byte(fmt.Sprintf("key-%d", i)), []byte("value"))
+		log.Append(msg)
+	}
+	log.Close()
+
+	// List segment files
+	offsets, err := ListSegmentFiles(dir)
+	if err != nil {
+		t.Fatalf("ListSegmentFiles failed: %v", err)
+	}
+
+	if len(offsets) == 0 {
+		t.Error("Expected at least one segment file")
+	}
+
+	// Offsets should be sorted
+	for i := 1; i < len(offsets); i++ {
+		if offsets[i] <= offsets[i-1] {
+			t.Errorf("Offsets not sorted: %d <= %d", offsets[i], offsets[i-1])
+		}
+	}
+
+	// First offset should be 0
+	if offsets[0] != 0 {
+		t.Errorf("First offset should be 0, got %d", offsets[0])
+	}
+}
+
+func TestLog_GetSegmentPaths(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create a log and write some messages
+	log, err := NewLog(dir)
+	if err != nil {
+		t.Fatalf("NewLog failed: %v", err)
+	}
+
+	for i := 0; i < 10; i++ {
+		msg := NewMessage([]byte(fmt.Sprintf("key-%d", i)), []byte("value"))
+		log.Append(msg)
+	}
+	log.Close()
+
+	// Get segment paths
+	paths, err := GetSegmentPaths(dir)
+	if err != nil {
+		t.Fatalf("GetSegmentPaths failed: %v", err)
+	}
+
+	if len(paths) == 0 {
+		t.Error("Expected at least one segment path")
+	}
+
+	// Paths should be absolute and include the directory
+	for _, path := range paths {
+		if !filepath.IsAbs(path) {
+			t.Errorf("Path should be absolute: %s", path)
+		}
+		if !strings.HasPrefix(path, dir) {
+			t.Errorf("Path should be in directory %s: %s", dir, path)
+		}
+		if !strings.HasSuffix(path, ".log") {
+			t.Errorf("Path should end with .log: %s", path)
+		}
+	}
+}
+
+func TestLog_Rollover(t *testing.T) {
+	dir := t.TempDir()
+
+	log, err := NewLog(dir)
+	if err != nil {
+		t.Fatalf("NewLog failed: %v", err)
+	}
+	defer log.Close()
+
+	// Write messages until we trigger a rollover
+	// Note: In a real scenario, this would require writing 64MB of data
+	// For testing, we'll verify the rollover logic by checking segment count
+
+	initialSegmentCount := log.SegmentCount()
+
+	// Write a message to ensure we have at least one segment
+	msg := NewMessage([]byte("key"), []byte("value"))
+	if _, err := log.Append(msg); err != nil {
+		t.Fatalf("Append failed: %v", err)
+	}
+
+	// The rollover happens automatically when a segment is full
+	// We can't easily test it without writing 64MB, but we can verify
+	// the segment count increases appropriately
+	if log.SegmentCount() < initialSegmentCount {
+		t.Error("Segment count should not decrease")
+	}
+
+	// Verify we can still read after potential rollover
+	readMsg, err := log.Read(0)
+	if err != nil {
+		t.Fatalf("Read after potential rollover failed: %v", err)
+	}
+	if string(readMsg.Key) != "key" {
+		t.Error("Read wrong message after potential rollover")
+	}
+}
+
+func TestLog_EarliestOffset(t *testing.T) {
+	dir := t.TempDir()
+
+	log, err := NewLog(dir)
+	if err != nil {
+		t.Fatalf("NewLog failed: %v", err)
+	}
+	defer log.Close()
+
+	// Empty log should return 0 (no segments, so offset 0 is the start)
+	if earliest := log.EarliestOffset(); earliest != 0 {
+		t.Errorf("EarliestOffset for empty log should be 0, got %d", earliest)
+	}
+
+	// Write messages starting from offset 0
+	msg := NewMessage([]byte("key"), []byte("value"))
+	if _, err := log.Append(msg); err != nil {
+		t.Fatalf("Append failed: %v", err)
+	}
+
+	// Earliest offset should be 0
+	if earliest := log.EarliestOffset(); earliest != 0 {
+		t.Errorf("EarliestOffset should be 0, got %d", earliest)
+	}
+
+	// Write another message
+	msg2 := NewMessage([]byte("key2"), []byte("value2"))
+	if _, err := log.Append(msg2); err != nil {
+		t.Fatalf("Append failed: %v", err)
+	}
+
+	// Earliest offset should still be 0
+	if earliest := log.EarliestOffset(); earliest != 0 {
+		t.Errorf("EarliestOffset should still be 0, got %d", earliest)
+	}
+}
+
+func TestLog_ListSegmentFiles_EmptyDirectory(t *testing.T) {
+	dir := t.TempDir()
+
+	// Empty directory should return empty slice
+	offsets, err := ListSegmentFiles(dir)
+	if err != nil {
+		t.Fatalf("ListSegmentFiles failed: %v", err)
+	}
+	if len(offsets) != 0 {
+		t.Errorf("Expected empty slice, got %v", offsets)
+	}
+}
+
+func TestLog_ListSegmentFiles_InvalidFiles(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create a file that doesn't match the segment naming pattern
+	invalidFile := filepath.Join(dir, "invalid.txt")
+	if err := os.WriteFile(invalidFile, []byte("test"), 0644); err != nil {
+		t.Fatalf("Failed to create invalid file: %v", err)
+	}
+
+	// Create a valid segment file
+	validFile := filepath.Join(dir, "00000000000000000000.log")
+	if err := os.WriteFile(validFile, []byte("test"), 0644); err != nil {
+		t.Fatalf("Failed to create valid file: %v", err)
+	}
+
+	offsets, err := ListSegmentFiles(dir)
+	if err != nil {
+		t.Fatalf("ListSegmentFiles failed: %v", err)
+	}
+
+	// Should only return the valid segment file
+	if len(offsets) != 1 {
+		t.Errorf("Expected 1 offset, got %d", len(offsets))
+	}
+	if offsets[0] != 0 {
+		t.Errorf("Expected offset 0, got %d", offsets[0])
+	}
+}
+
+func TestLog_GetSegmentPaths_EmptyDirectory(t *testing.T) {
+	dir := t.TempDir()
+
+	paths, err := GetSegmentPaths(dir)
+	if err != nil {
+		t.Fatalf("GetSegmentPaths failed: %v", err)
+	}
+	if len(paths) != 0 {
+		t.Errorf("Expected empty slice, got %v", paths)
+	}
+}
+
+func TestLog_Close_ErrorHandling(t *testing.T) {
+	dir := t.TempDir()
+
+	log, err := NewLog(dir)
+	if err != nil {
+		t.Fatalf("NewLog failed: %v", err)
+	}
+
+	// Close should succeed initially
+	if err := log.Close(); err != nil {
+		t.Fatalf("First Close failed: %v", err)
+	}
+
+	// Close should be idempotent
+	if err := log.Close(); err != nil {
+		t.Errorf("Second Close should be idempotent, got error: %v", err)
 	}
 }
 

@@ -499,6 +499,145 @@ func BenchmarkCRC32_1KB(b *testing.B) {
 	}
 }
 
+func TestMessage_Priority_String(t *testing.T) {
+	testCases := []struct {
+		priority Priority
+		expected string
+	}{
+		{PriorityCritical, "critical"},
+		{PriorityHigh, "high"},
+		{PriorityNormal, "normal"},
+		{PriorityLow, "low"},
+		{PriorityBackground, "background"},
+		{Priority(255), "unknown(255)"}, // Invalid priority
+	}
+
+	for _, tc := range testCases {
+		if tc.priority.String() != tc.expected {
+			t.Errorf("Priority(%d).String() = %s, want %s", tc.priority, tc.priority.String(), tc.expected)
+		}
+	}
+}
+
+func TestParsePriority(t *testing.T) {
+	testCases := []struct {
+		input    string
+		expected Priority
+	}{
+		{"critical", PriorityCritical},
+		{"Critical", PriorityCritical},
+		{"CRITICAL", PriorityCritical},
+		{"high", PriorityHigh},
+		{"High", PriorityHigh},
+		{"HIGH", PriorityHigh},
+		{"normal", PriorityNormal},
+		{"Normal", PriorityNormal},
+		{"NORMAL", PriorityNormal},
+		{"", PriorityNormal}, // Empty defaults to normal
+		{"low", PriorityLow},
+		{"Low", PriorityLow},
+		{"LOW", PriorityLow},
+		{"background", PriorityBackground},
+		{"Background", PriorityBackground},
+		{"BACKGROUND", PriorityBackground},
+		{"invalid", PriorityNormal}, // Invalid defaults to normal
+	}
+
+	for _, tc := range testCases {
+		if ParsePriority(tc.input) != tc.expected {
+			t.Errorf("ParsePriority(%q) = %v, want %v", tc.input, ParsePriority(tc.input), tc.expected)
+		}
+	}
+}
+
+func TestMessage_ControlRecordMethods(t *testing.T) {
+	// Test regular message
+	msg := NewMessage([]byte("key"), []byte("value"))
+	if msg.IsControlRecord() {
+		t.Error("Regular message should not be control record")
+	}
+	if msg.IsTransactionCommit() {
+		t.Error("Regular message should not be transaction commit")
+	}
+	if msg.IsTransactionAbort() {
+		t.Error("Regular message should not be transaction abort")
+	}
+
+	// Test commit control record
+	commitMsg := NewCommitControlRecord(100, 12345, 1, "txn-123")
+	if !commitMsg.IsControlRecord() {
+		t.Error("Commit control record should be control record")
+	}
+	if !commitMsg.IsTransactionCommit() {
+		t.Error("Commit control record should be transaction commit")
+	}
+	if commitMsg.IsTransactionAbort() {
+		t.Error("Commit control record should not be transaction abort")
+	}
+
+	// Test abort control record
+	abortMsg := NewAbortControlRecord(200, 12345, 1, "txn-123")
+	if !abortMsg.IsControlRecord() {
+		t.Error("Abort control record should be control record")
+	}
+	if abortMsg.IsTransactionCommit() {
+		t.Error("Abort control record should not be transaction commit")
+	}
+	if !abortMsg.IsTransactionAbort() {
+		t.Error("Abort control record should be transaction abort")
+	}
+
+	// Verify control record payload extraction
+	payload, err := commitMsg.GetControlRecordPayload()
+	if err != nil {
+		t.Fatalf("GetControlRecordPayload failed: %v", err)
+	}
+	if payload.ProducerId != 12345 {
+		t.Errorf("ProducerId = %d, want 12345", payload.ProducerId)
+	}
+	if payload.Epoch != 1 {
+		t.Errorf("Epoch = %d, want 1", payload.Epoch)
+	}
+	if payload.TransactionalId != "txn-123" {
+		t.Errorf("TransactionalId = %s, want txn-123", payload.TransactionalId)
+	}
+
+	// Verify payload extraction fails for regular message
+	_, err = msg.GetControlRecordPayload()
+	if err == nil {
+		t.Error("GetControlRecordPayload should fail for regular message")
+	}
+}
+
+func TestNewMessageWithPriority(t *testing.T) {
+	key := []byte("key")
+	value := []byte("value")
+
+	// Test with valid priority
+	msg := NewMessageWithPriority(key, value, PriorityHigh)
+	if !bytes.Equal(msg.Key, key) {
+		t.Error("Key not set correctly")
+	}
+	if !bytes.Equal(msg.Value, value) {
+		t.Error("Value not set correctly")
+	}
+	if msg.Priority != PriorityHigh {
+		t.Errorf("Priority = %v, want PriorityHigh", msg.Priority)
+	}
+	if msg.Offset != 0 {
+		t.Error("Offset should be 0 initially")
+	}
+	if msg.Timestamp == 0 {
+		t.Error("Timestamp should be set")
+	}
+
+	// Test with invalid priority (should fallback to Normal)
+	invalidMsg := NewMessageWithPriority(key, value, Priority(255))
+	if invalidMsg.Priority != PriorityNormal {
+		t.Errorf("Invalid priority should fallback to Normal, got %v", invalidMsg.Priority)
+	}
+}
+
 func BenchmarkCRC32_64KB(b *testing.B) {
 	data := make([]byte, 64*1024)
 

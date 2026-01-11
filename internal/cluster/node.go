@@ -21,6 +21,8 @@ package cluster
 import (
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -307,26 +309,37 @@ func parseAddressWithDefaults(addr string, defaultHost string, defaultPort int) 
 		return NodeAddress{Host: defaultHost, Port: defaultPort}, nil
 	}
 
-	// Try to parse as "host:port"
-	var host string
-	var port int
+	// Handle formats:
+	//   - ":8080"         (default host)
+	//   - "host:8080"     (explicit host + port)
+	//   - "host"          (default port)
+	//
+	// NOTE:
+	//   We avoid fmt.Sscanf here because Go does not support C-style scansets
+	//   like %[^:], which would silently mis-parse "host:port".
+	if strings.HasPrefix(addr, ":") {
+		port, err := strconv.Atoi(strings.TrimPrefix(addr, ":"))
+		if err != nil {
+			return NodeAddress{}, fmt.Errorf("invalid port in address: %s", addr)
+		}
+		return NodeAddress{Host: defaultHost, Port: port}, nil
+	}
 
-	// Handle formats: ":8080", "host:8080", "host"
-	n, _ := fmt.Sscanf(addr, "%[^:]:%d", &host, &port)
-	if n == 2 {
+	// Split on the last colon (matches ParseNodeAddress behavior and is IPv6-friendly-ish).
+	if idx := strings.LastIndex(addr, ":"); idx != -1 {
+		host := addr[:idx]
+		portStr := addr[idx+1:]
 		if host == "" {
 			host = defaultHost
+		}
+		port, err := strconv.Atoi(portStr)
+		if err != nil {
+			return NodeAddress{}, fmt.Errorf("invalid port in address: %s", addr)
 		}
 		return NodeAddress{Host: host, Port: port}, nil
 	}
 
-	// Try just port ":8080"
-	n, _ = fmt.Sscanf(addr, ":%d", &port)
-	if n == 1 {
-		return NodeAddress{Host: defaultHost, Port: port}, nil
-	}
-
-	// Try as just host
+	// Host only.
 	return NodeAddress{Host: addr, Port: defaultPort}, nil
 }
 

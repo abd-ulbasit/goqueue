@@ -388,8 +388,20 @@ func (ps *PartitionScaler) AddPartitions(request *PartitionScaleRequest) (*Parti
 	// STEP 4: CREATE PARTITION DIRECTORIES (LOCAL BROKER)
 	// =========================================================================
 
-	// On this node, create partitions we're responsible for
-	for partitionID, assignment := range assignments {
+	// On this node, create partitions we're responsible for.
+	//
+	// IMPORTANT: Create partitions in deterministic, increasing partitionID order.
+	//
+	// WHY: Broker/topic partition creation enforces sequential IDs (0,1,2,...).
+	// If we iterate over the `assignments` map, Go's randomized map iteration
+	// order can attempt to create partition 2 before partition 1.
+	// That sporadically fails with:
+	//   "invalid partition ID 2: expected 1 (partitions must be sequential)"
+	//
+	// In production, this would manifest as flaky / non-deterministic admin
+	// scaling behavior depending on runtime map iteration order.
+	for _, partitionID := range newPartitionIDs {
+		assignment := assignments[partitionID]
 		isReplica := false
 		for _, nodeID := range assignment.Replicas {
 			if nodeID == ps.localNodeID {
@@ -570,6 +582,9 @@ func (ps *PartitionScaler) UpdateNodeList(nodeIDs []cluster.NodeID) {
 
 // isInternalTopic checks if a topic is an internal system topic.
 // Internal topics like __consumer_offsets have fixed partition counts.
+//
+// NOTE: Internal topics start with double underscore (e.g., "__consumer_offsets").
+// We check len > 1 to avoid panic when accessing topicName[1].
 func isInternalTopic(topicName string) bool {
-	return len(topicName) > 0 && topicName[0] == '_' && topicName[1] == '_'
+	return len(topicName) > 1 && topicName[0] == '_' && topicName[1] == '_'
 }

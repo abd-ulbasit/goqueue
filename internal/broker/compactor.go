@@ -415,7 +415,12 @@ func CompactPartition(p *Partition, tombstoneRetention time.Duration) (*Compacti
 	// Calculate final stats
 	result.Stats.TotalRecordsAfter = recordsWritten
 	result.Stats.RecordsRemoved = totalRecords - recordsWritten
-	result.Stats.DirtyRatio = float64(result.Stats.RecordsRemoved) / float64(totalRecords)
+	// Avoid division by zero if partition was empty
+	if totalRecords > 0 {
+		result.Stats.DirtyRatio = float64(result.Stats.RecordsRemoved) / float64(totalRecords)
+	} else {
+		result.Stats.DirtyRatio = 0.0
+	}
 	result.Stats.DurationMS = time.Since(startTime).Milliseconds()
 	result.Stats.CompactedAt = time.Now()
 

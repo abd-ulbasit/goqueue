@@ -931,9 +931,24 @@ func (tc *TransactionCoordinator) writeControlRecords(transactionalId string, pi
 //   - 3 attempts with exponential backoff (100ms, 200ms, 400ms)
 //   - Logs each failure but doesn't block indefinitely
 //   - On total failure, relies on timeout checker for eventual cleanup
+//
+// GOROUTINE LEAK FIX:
+// Uses time.NewTimer instead of time.After to avoid goroutine leaks when
+// context is cancelled during backoff wait.
 func (tc *TransactionCoordinator) abortTransactionWithRetry(transactionalId, txnId string, pid ProducerIdAndEpoch) error {
 	const maxRetries = 3
 	baseDelay := 100 * time.Millisecond
+
+	// Create reusable timer to avoid goroutine leaks
+	timer := time.NewTimer(0)
+	if !timer.Stop() {
+		// Drain the channel if it already fired
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+	defer timer.Stop()
 
 	var lastErr error
 
@@ -941,10 +956,11 @@ func (tc *TransactionCoordinator) abortTransactionWithRetry(transactionalId, txn
 		if attempt > 0 {
 			// Exponential backoff
 			delay := baseDelay * time.Duration(1<<uint(attempt-1))
+			timer.Reset(delay)
 			select {
 			case <-tc.ctx.Done():
 				return tc.ctx.Err()
-			case <-time.After(delay):
+			case <-timer.C:
 			}
 		}
 

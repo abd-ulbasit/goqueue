@@ -231,3 +231,33 @@ func TestIndex_TruncateTo(t *testing.T) {
 		t.Errorf("Expected last offset 100, got %d", idx.LastOffset())
 	}
 }
+
+func TestIndex_ErrorPaths(t *testing.T) {
+	// Test loading index with non-existent directory
+	_, err := LoadIndex("/non/existent/path/index", 0)
+	if err == nil {
+		t.Error("LoadIndex should fail for non-existent path")
+	}
+
+	// Test operations on closed index
+	dir := t.TempDir()
+	idx, err := NewIndex(filepath.Join(dir, "test.index"), 0)
+	if err != nil {
+		t.Fatalf("NewIndex failed: %v", err)
+	}
+
+	idx.Close()
+
+	// These operations should fail on closed index
+	if err := idx.ForceAppend(0, 0); err == nil {
+		t.Error("ForceAppend should fail on closed index")
+	}
+	// Note: Lookup doesn't check for closed file - it only checks if entries slice is empty
+	// So we can't test for failure on closed index here
+	if err := idx.Sync(); err == nil {
+		t.Error("Sync should fail on closed index")
+	}
+	if err := idx.TruncateTo(0); err == nil {
+		t.Error("TruncateTo should fail on closed index")
+	}
+}

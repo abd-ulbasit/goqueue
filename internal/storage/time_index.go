@@ -308,9 +308,28 @@ func (ti *TimeIndex) MaybeAppend(timestamp int64, offset int64, currentLogPositi
 	ti.mu.Lock()
 	defer ti.mu.Unlock()
 
-	// Check if we've written enough log data since last entry
-	if currentLogPosition-ti.lastLogPosition < TimeIndexGranularity {
-		return false, nil
+	// ============================================================================
+	// FIRST-ENTRY GUARANTEE
+	// ============================================================================
+	//
+	// WHY:
+	// Segment-level helpers like Segment.GetFirstTimestamp()/GetLastTimestamp()
+	// rely on the time index having at least one entry.
+	//
+	// With pure "every 4KB" granularity, the first message in a segment would
+	// never be indexed because its start position is 0 (0 - 0 < 4KB).
+	// That makes time-based APIs much less useful on small segments and breaks
+	// corruption recovery rebuilds (first timestamp can't be reconstructed).
+	//
+	// FIX:
+	// Always write the first time index entry, then apply the granularity rule.
+	// This mirrors our offset index behavior (first message is always indexed).
+	// ============================================================================
+	if len(ti.entries) > 0 {
+		// Check if we've written enough log data since last entry.
+		if currentLogPosition-ti.lastLogPosition < TimeIndexGranularity {
+			return false, nil
+		}
 	}
 
 	// Create new entry
@@ -552,45 +571,48 @@ func RebuildTimeIndex(logPath, indexPath string, baseOffset int64) (*TimeIndex, 
 	}
 	defer logFile.Close()
 
-	// Scan log file and extract timestamps
+	// Scan log file and extract timestamps.
+	//
+	// IMPORTANT:
+	// Our on-disk message header is HeaderSize (34 bytes), not 32.
+	// Rebuild must parse the *full* header and include HeadersLen when advancing,
+	// otherwise we desync and read garbage offsets/timestamps.
 	var position int64 = 0
-	headerBuf := make([]byte, 32) // Current header size
+	headerBuf := make([]byte, HeaderSize)
 
 	for {
-		// Read header
-		n, err := logFile.Read(headerBuf)
-		if err == io.EOF {
+		// Seek to the current message start.
+		if _, err := logFile.Seek(position, io.SeekStart); err != nil {
+			break
+		}
+
+		// Read full header.
+		_, err := io.ReadFull(logFile, headerBuf)
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
 			break
 		}
 		if err != nil {
 			ti.Close()
 			return nil, fmt.Errorf("failed to read log header: %w", err)
 		}
-		if n < 32 {
-			break // Incomplete header, stop
-		}
 
 		// Parse header to get offset and timestamp
-		// Header format: Magic(2) + Version(1) + Flags(1) + CRC(4) + Offset(8) + Timestamp(8) + ...
+		// Header format:
+		//   Magic(2) + Version(1) + Flags(1) + CRC(4) + Offset(8) + Timestamp(8)
+		//   + Priority(1) + Reserved(1) + KeyLen(2) + ValueLen(4) + HeadersLen(2)
 		offset := int64(binary.BigEndian.Uint64(headerBuf[8:16]))
 		timestamp := int64(binary.BigEndian.Uint64(headerBuf[16:24]))
 
-		// Get key and value lengths to calculate message size
 		keyLen := int(binary.BigEndian.Uint16(headerBuf[26:28]))
 		valueLen := int(binary.BigEndian.Uint32(headerBuf[28:32]))
+		headersLen := int(binary.BigEndian.Uint16(headerBuf[32:34]))
 
 		// Maybe add time index entry
 		_, _ = ti.MaybeAppend(timestamp, offset, position)
 
-		// Skip to next message
-		messageSize := 32 + keyLen + valueLen
+		// Advance to next message.
+		messageSize := HeaderSize + keyLen + valueLen + headersLen
 		position += int64(messageSize)
-
-		// Seek to next message
-		_, err = logFile.Seek(position, io.SeekStart)
-		if err != nil {
-			break
-		}
 	}
 
 	return ti, nil

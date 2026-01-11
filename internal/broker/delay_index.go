@@ -54,6 +54,40 @@
 //   3. Rebuild timer wheel from pending entries
 //
 // =============================================================================
+// PERFORMANCE OPTIMIZATIONS (M15)
+// =============================================================================
+//
+// TIME-BUCKETED INDEX (P1):
+//   Problem: GetReadyEntries() was O(n) scanning all pending entries.
+//   Solution: Time-bucketed map with 1-second granularity.
+//
+//   ┌─────────────────────────────────────────────────────────────────────────┐
+//   │ timeBuckets: map[int64][]*DelayEntry                                    │
+//   │                                                                         │
+//   │   bucket[1704067200] → [entry1, entry2, entry3]  (all due at same sec)  │
+//   │   bucket[1704067201] → [entry4, entry5]                                 │
+//   │   bucket[1704067205] → [entry6]                                         │
+//   │                                                                         │
+//   │ GetReadyEntries():                                                      │
+//   │   1. Get current timestamp in seconds                                   │
+//   │   2. Iterate buckets from earliest to current second                    │
+//   │   3. Return all entries in those buckets                                │
+//   │                                                                         │
+//   │ Complexity: O(k) where k = number of due buckets, typically O(1)        │
+//   └─────────────────────────────────────────────────────────────────────────┘
+//
+// REVERSE INDEX FOR O(1) STATE UPDATES (P2):
+//   Problem: updateState() was O(n) scanning file to find entry position.
+//   Solution: Track file position in DelayEntry during Add().
+//
+//   ┌─────────────────────────────────────────────────────────────────────────┐
+//   │ When Add() writes entry to file:                                        │
+//   │   1. Calculate file position: header + (entryCount * entrySize)         │
+//   │   2. Store position in entry.FilePosition                               │
+//   │   3. On updateState(), use entry.FilePosition directly → O(1)           │
+//   └─────────────────────────────────────────────────────────────────────────┘
+//
+// =============================================================================
 
 package broker
 
@@ -64,6 +98,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 )
@@ -123,6 +158,11 @@ type DelayEntry struct {
 
 	// Topic is stored in memory only (derived from index file path)
 	Topic string
+
+	// FilePosition is the byte offset in the index file where this entry is stored.
+	// Used for O(1) state updates instead of O(n) file scan.
+	// This field is memory-only (not persisted, reconstructed on load).
+	FilePosition int64
 }
 
 // IsReady returns true if the message should be delivered now.
@@ -165,6 +205,16 @@ type DelayIndex struct {
 
 	// entries maps offset to entry for fast lookup
 	entries map[int64]*DelayEntry
+
+	// timeBuckets maps Unix seconds to entries due at that time.
+	// This provides O(1) lookup for GetReadyEntries() instead of O(n) scan.
+	// Key: Unix timestamp in seconds (nanoseconds / 1e9)
+	// Value: Slice of entries due in that second
+	timeBuckets map[int64][]*DelayEntry
+
+	// sortedBucketKeys maintains sorted bucket timestamps for efficient iteration.
+	// Updated when buckets are added/removed.
+	sortedBucketKeys []int64
 
 	// entryCount tracks total entries (including expired/cancelled)
 	entryCount int64
@@ -215,10 +265,12 @@ func NewDelayIndex(config DelayIndexConfig) (*DelayIndex, error) {
 	path := filepath.Join(dir, "delay.index")
 
 	idx := &DelayIndex{
-		topic:      config.Topic,
-		path:       path,
-		entries:    make(map[int64]*DelayEntry),
-		maxEntries: config.MaxEntries,
+		topic:            config.Topic,
+		path:             path,
+		entries:          make(map[int64]*DelayEntry),
+		timeBuckets:      make(map[int64][]*DelayEntry),
+		sortedBucketKeys: make([]int64, 0),
+		maxEntries:       config.MaxEntries,
 	}
 
 	// Open or create the index file
@@ -309,8 +361,8 @@ func (idx *DelayIndex) loadExisting() error {
 	// Load all entries
 	entryBuf := make([]byte, delayEntrySize)
 	for i := int64(0); i < idx.entryCount; i++ {
-		offset := delayIndexHeader + (i * delayEntrySize)
-		if _, err := idx.file.ReadAt(entryBuf, offset); err != nil {
+		filePos := delayIndexHeader + (i * delayEntrySize)
+		if _, err := idx.file.ReadAt(entryBuf, filePos); err != nil {
 			if err == io.EOF {
 				break
 			}
@@ -319,11 +371,15 @@ func (idx *DelayIndex) loadExisting() error {
 
 		entry := idx.decodeEntry(entryBuf)
 		entry.Topic = idx.topic
+		entry.FilePosition = filePos // Store file position for O(1) updates
 
 		// Only track pending entries in memory
 		if entry.State == delayStatePending {
 			idx.entries[entry.Offset] = entry
 			idx.pendingCount++
+
+			// Add to time bucket for O(1) ready lookups
+			idx.addToTimeBucketLocked(entry)
 		}
 	}
 
@@ -378,17 +434,20 @@ func (idx *DelayIndex) Add(offset int64, partition int, deliverAt time.Time) err
 		return ErrDelayIndexFull
 	}
 
+	// Calculate file position BEFORE incrementing entryCount
+	filePos := delayIndexHeader + (idx.entryCount * delayEntrySize)
+
 	entry := &DelayEntry{
-		Offset:    offset,
-		DeliverAt: deliverAt.UnixNano(),
-		Partition: int32(partition),
-		State:     delayStatePending,
-		Topic:     idx.topic,
+		Offset:       offset,
+		DeliverAt:    deliverAt.UnixNano(),
+		Partition:    int32(partition),
+		State:        delayStatePending,
+		Topic:        idx.topic,
+		FilePosition: filePos, // Store for O(1) state updates
 	}
 
 	// Write entry to file
-	entryOffset := delayIndexHeader + (idx.entryCount * delayEntrySize)
-	if _, err := idx.file.WriteAt(idx.encodeEntry(entry), entryOffset); err != nil {
+	if _, err := idx.file.WriteAt(idx.encodeEntry(entry), filePos); err != nil {
 		return fmt.Errorf("failed to write entry: %w", err)
 	}
 
@@ -397,6 +456,9 @@ func (idx *DelayIndex) Add(offset int64, partition int, deliverAt time.Time) err
 	idx.pendingCount++
 	idx.entries[offset] = entry
 	idx.dirty = true
+
+	// Add to time bucket for O(1) ready lookups
+	idx.addToTimeBucketLocked(entry)
 
 	// Update count in header
 	countBuf := make([]byte, 8)
@@ -420,11 +482,12 @@ func (idx *DelayIndex) Get(offset int64) (*DelayEntry, error) {
 
 	// Return a copy
 	return &DelayEntry{
-		Offset:    entry.Offset,
-		DeliverAt: entry.DeliverAt,
-		Partition: entry.Partition,
-		State:     entry.State,
-		Topic:     entry.Topic,
+		Offset:       entry.Offset,
+		DeliverAt:    entry.DeliverAt,
+		Partition:    entry.Partition,
+		State:        entry.State,
+		Topic:        entry.Topic,
+		FilePosition: entry.FilePosition,
 	}, nil
 }
 
@@ -444,6 +507,7 @@ func (idx *DelayIndex) MarkExpired(offset int64) error {
 }
 
 // updateState changes an entry's state.
+// Uses FilePosition for O(1) file updates instead of O(n) scan.
 func (idx *DelayIndex) updateState(offset int64, newState int32) error {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
@@ -453,10 +517,43 @@ func (idx *DelayIndex) updateState(offset int64, newState int32) error {
 		return ErrDelayEntryNotFound
 	}
 
-	// Find entry position in file and update state
-	// This is O(n) but state updates are infrequent
-	// For production, we'd want a position index
-	// TODO : this is production. we need a better way .. maybe a btree in memory mapping offsets to file positions ? may be a new sparse index files like the main log index ?
+	// Use the stored file position for O(1) update
+	// Read current entry from file
+	entryBuf := make([]byte, delayEntrySize)
+	if _, err := idx.file.ReadAt(entryBuf, entry.FilePosition); err != nil {
+		return fmt.Errorf("failed to read entry: %w", err)
+	}
+
+	// Verify we're updating the correct entry (sanity check)
+	storedOffset := int64(binary.BigEndian.Uint64(entryBuf[0:8]))
+	if storedOffset != offset {
+		// Fallback to linear scan if position is stale (shouldn't happen)
+		return idx.updateStateLinearScan(offset, newState)
+	}
+
+	// Update state in buffer and write back
+	binary.BigEndian.PutUint32(entryBuf[20:24], uint32(newState))
+	if _, err := idx.file.WriteAt(entryBuf, entry.FilePosition); err != nil {
+		return fmt.Errorf("failed to update entry state: %w", err)
+	}
+
+	// Update in-memory entry
+	oldDeliverAt := entry.DeliverAt
+	entry.State = newState
+
+	// Remove from pending tracking and time bucket if no longer pending
+	if newState != delayStatePending {
+		delete(idx.entries, offset)
+		idx.pendingCount--
+		idx.removeFromTimeBucketLocked(oldDeliverAt, offset)
+	}
+
+	return nil
+}
+
+// updateStateLinearScan is a fallback for when FilePosition is invalid.
+// This should rarely happen but provides safety.
+func (idx *DelayIndex) updateStateLinearScan(offset int64, newState int32) error {
 	entryBuf := make([]byte, delayEntrySize)
 	for i := int64(0); i < idx.entryCount; i++ {
 		pos := delayIndexHeader + (i * delayEntrySize)
@@ -471,20 +568,23 @@ func (idx *DelayIndex) updateState(offset int64, newState int32) error {
 			if _, err := idx.file.WriteAt(entryBuf, pos); err != nil {
 				return fmt.Errorf("failed to update entry state: %w", err)
 			}
-			break
+
+			// Update in-memory entry
+			if entry, exists := idx.entries[offset]; exists {
+				oldDeliverAt := entry.DeliverAt
+				entry.State = newState
+				entry.FilePosition = pos // Update file position
+
+				if newState != delayStatePending {
+					delete(idx.entries, offset)
+					idx.pendingCount--
+					idx.removeFromTimeBucketLocked(oldDeliverAt, offset)
+				}
+			}
+			return nil
 		}
 	}
-
-	// Update in-memory entry
-	entry.State = newState
-
-	// Remove from pending tracking if no longer pending
-	if newState != delayStatePending {
-		delete(idx.entries, offset)
-		idx.pendingCount--
-	}
-
-	return nil
+	return ErrDelayEntryNotFound
 }
 
 // GetPendingEntries returns all entries waiting for delivery.
@@ -495,57 +595,205 @@ func (idx *DelayIndex) GetPendingEntries() []*DelayEntry {
 	entries := make([]*DelayEntry, 0, len(idx.entries))
 	for _, entry := range idx.entries {
 		entries = append(entries, &DelayEntry{
-			Offset:    entry.Offset,
-			DeliverAt: entry.DeliverAt,
-			Partition: entry.Partition,
-			State:     entry.State,
-			Topic:     entry.Topic,
+			Offset:       entry.Offset,
+			DeliverAt:    entry.DeliverAt,
+			Partition:    entry.Partition,
+			State:        entry.State,
+			Topic:        entry.Topic,
+			FilePosition: entry.FilePosition,
 		})
 	}
 
 	return entries
 }
 
+// GetPendingEntriesPaginated returns a paginated slice of pending entries.
+// This avoids loading all entries into memory at once for large indexes.
+//
+// PARAMETERS:
+//   - limit: Maximum number of entries to return (0 = no limit)
+//   - skip: Number of entries to skip
+//
+// RETURNS:
+//   - Slice of entries (up to limit), total pending count
+func (idx *DelayIndex) GetPendingEntriesPaginated(limit, skip int) ([]*DelayEntry, int64) {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+
+	total := idx.pendingCount
+
+	// Collect all entries first (needed for consistent pagination)
+	allEntries := make([]*DelayEntry, 0, len(idx.entries))
+	for _, entry := range idx.entries {
+		allEntries = append(allEntries, entry)
+	}
+
+	// Apply skip
+	if skip >= len(allEntries) {
+		return []*DelayEntry{}, total
+	}
+	allEntries = allEntries[skip:]
+
+	// Apply limit
+	if limit > 0 && limit < len(allEntries) {
+		allEntries = allEntries[:limit]
+	}
+
+	// Return copies
+	result := make([]*DelayEntry, len(allEntries))
+	for i, entry := range allEntries {
+		result[i] = &DelayEntry{
+			Offset:       entry.Offset,
+			DeliverAt:    entry.DeliverAt,
+			Partition:    entry.Partition,
+			State:        entry.State,
+			Topic:        entry.Topic,
+			FilePosition: entry.FilePosition,
+		}
+	}
+
+	return result, total
+}
+
 // GetReadyEntries returns entries that are ready for delivery.
+// Uses time-bucketed index for O(k) lookup where k = number of due buckets.
+// This is a significant improvement over the previous O(n) scan.
 func (idx *DelayIndex) GetReadyEntries() []*DelayEntry {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 
 	now := time.Now().UnixNano()
+	nowSec := now / int64(time.Second) // Current time in seconds
+
 	entries := make([]*DelayEntry, 0)
 
-	for _, entry := range idx.entries {
-		if entry.DeliverAt <= now {
-			entries = append(entries, &DelayEntry{
-				Offset:    entry.Offset,
-				DeliverAt: entry.DeliverAt,
-				Partition: entry.Partition,
-				State:     entry.State,
-				Topic:     entry.Topic,
-			})
+	// Iterate through sorted bucket keys up to current time
+	for _, bucketKey := range idx.sortedBucketKeys {
+		if bucketKey > nowSec {
+			// All remaining buckets are in the future
+			break
+		}
+
+		// Get all entries in this bucket
+		bucket := idx.timeBuckets[bucketKey]
+		for _, entry := range bucket {
+			// Double-check the entry is actually ready (handles sub-second precision)
+			if entry.DeliverAt <= now && entry.State == delayStatePending {
+				entries = append(entries, &DelayEntry{
+					Offset:       entry.Offset,
+					DeliverAt:    entry.DeliverAt,
+					Partition:    entry.Partition,
+					State:        entry.State,
+					Topic:        entry.Topic,
+					FilePosition: entry.FilePosition,
+				})
+			}
 		}
 	}
 
 	return entries
 }
 
+// =============================================================================
+// TIME BUCKET MANAGEMENT
+// =============================================================================
+//
+// TIME BUCKETS PROVIDE O(1) READY LOOKUPS:
+//   Instead of scanning all N pending entries to find ready ones,
+//   we group entries by their delivery second. GetReadyEntries() only
+//   needs to check buckets <= current time.
+//
+// BUCKET KEY: Unix timestamp in seconds (DeliverAt / 1e9)
+//
+// EXAMPLE:
+//   Entry with DeliverAt = 1704067200_500000000 (ns) → bucket 1704067200
+//   Entry with DeliverAt = 1704067200_900000000 (ns) → bucket 1704067200 (same)
+//   Entry with DeliverAt = 1704067201_100000000 (ns) → bucket 1704067201
+//
+// =============================================================================
+
+// addToTimeBucketLocked adds an entry to its time bucket.
+// Must be called with idx.mu held.
+func (idx *DelayIndex) addToTimeBucketLocked(entry *DelayEntry) {
+	bucketKey := entry.DeliverAt / int64(time.Second)
+
+	// Add to bucket
+	if idx.timeBuckets[bucketKey] == nil {
+		idx.timeBuckets[bucketKey] = make([]*DelayEntry, 0, 8)
+		// Add to sorted keys and re-sort
+		idx.sortedBucketKeys = append(idx.sortedBucketKeys, bucketKey)
+		sort.Slice(idx.sortedBucketKeys, func(i, j int) bool {
+			return idx.sortedBucketKeys[i] < idx.sortedBucketKeys[j]
+		})
+	}
+	idx.timeBuckets[bucketKey] = append(idx.timeBuckets[bucketKey], entry)
+}
+
+// removeFromTimeBucketLocked removes an entry from its time bucket.
+// Must be called with idx.mu held.
+func (idx *DelayIndex) removeFromTimeBucketLocked(deliverAt int64, offset int64) {
+	bucketKey := deliverAt / int64(time.Second)
+
+	bucket := idx.timeBuckets[bucketKey]
+	if bucket == nil {
+		return
+	}
+
+	// Find and remove the entry
+	for i, entry := range bucket {
+		if entry.Offset == offset {
+			// Remove by swapping with last element
+			bucket[i] = bucket[len(bucket)-1]
+			bucket = bucket[:len(bucket)-1]
+			idx.timeBuckets[bucketKey] = bucket
+			break
+		}
+	}
+
+	// If bucket is empty, remove it from the map and sorted keys
+	if len(idx.timeBuckets[bucketKey]) == 0 {
+		delete(idx.timeBuckets, bucketKey)
+		idx.removeBucketKeyLocked(bucketKey)
+	}
+}
+
+// removeBucketKeyLocked removes a key from sortedBucketKeys.
+// Must be called with idx.mu held.
+func (idx *DelayIndex) removeBucketKeyLocked(key int64) {
+	for i, k := range idx.sortedBucketKeys {
+		if k == key {
+			idx.sortedBucketKeys = append(idx.sortedBucketKeys[:i], idx.sortedBucketKeys[i+1:]...)
+			return
+		}
+	}
+}
+
 // Stats returns delay index statistics.
 type DelayIndexStats struct {
-	Topic        string
-	TotalEntries int64
-	PendingCount int64
-	FilePath     string
+	Topic           string
+	TotalEntries    int64
+	PendingCount    int64
+	FilePath        string
+	TimeBucketCount int   // Number of time buckets (for debugging)
+	EarliestDueTime int64 // Unix seconds of earliest bucket (0 if none)
 }
 
 func (idx *DelayIndex) Stats() DelayIndexStats {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 
+	var earliestDue int64
+	if len(idx.sortedBucketKeys) > 0 {
+		earliestDue = idx.sortedBucketKeys[0]
+	}
+
 	return DelayIndexStats{
-		Topic:        idx.topic,
-		TotalEntries: idx.entryCount,
-		PendingCount: idx.pendingCount,
-		FilePath:     idx.path,
+		Topic:           idx.topic,
+		TotalEntries:    idx.entryCount,
+		PendingCount:    idx.pendingCount,
+		FilePath:        idx.path,
+		TimeBucketCount: len(idx.timeBuckets),
+		EarliestDueTime: earliestDue,
 	}
 }
 
