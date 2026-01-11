@@ -334,9 +334,17 @@ func (rm *ReassignmentManager) StartReassignment(request *ReassignmentRequest) (
 		request.TimeoutPerPartition = rm.defaultTimeout
 	}
 
-	// Validate each partition
-	for _, pr := range request.Partitions {
-		if err := rm.validatePartitionReassignment(&pr); err != nil {
+	// Validate each partition.
+	//
+	// IMPORTANT: Iterate by index, not by value.
+	//
+	// WHY: validatePartitionReassignment() computes derived fields
+	// (AddingReplicas / RemovingReplicas) that Phase 2 (catch-up) depends on.
+	// If we iterate with "for _, pr := range ...", we validate a *copy* of each
+	// struct and silently discard those derived fields, causing reassignment to
+	// incorrectly skip catch-up.
+	for i := range request.Partitions {
+		if err := rm.validatePartitionReassignment(&request.Partitions[i]); err != nil {
 			return "", err
 		}
 	}
@@ -526,6 +534,11 @@ func (rm *ReassignmentManager) reassignPartition(
 // A replica is "caught up" when its high watermark >= leader's high watermark
 // at the time we check. Since messages keep arriving, we use a threshold
 // (within 100 messages) rather than exact equality.
+//
+// GOROUTINE LEAK FIX:
+// Previously used time.After() which creates a new timer goroutine on each
+// iteration. If context is cancelled, those timer goroutines leak until they
+// fire. Now uses time.NewTimer with proper cleanup via timer.Stop().
 func (rm *ReassignmentManager) waitForCatchup(
 	ctx context.Context,
 	status *ReassignmentStatus,
@@ -533,6 +546,10 @@ func (rm *ReassignmentManager) waitForCatchup(
 ) error {
 	key := fmt.Sprintf("%s-%d", pr.Topic, pr.Partition)
 	pollInterval := 5 * time.Second
+
+	// Create reusable timer to avoid goroutine leaks
+	timer := time.NewTimer(pollInterval)
+	defer timer.Stop()
 
 	for {
 		select {
@@ -556,14 +573,15 @@ func (rm *ReassignmentManager) waitForCatchup(
 			return nil
 		}
 
-		// Wait before next poll
+		// Wait before next poll - reset timer for reuse
+		timer.Reset(pollInterval)
 		select {
 		case <-ctx.Done():
 			if ctx.Err() == context.DeadlineExceeded {
 				return ErrReplicaCatchupTimeout
 			}
 			return ctx.Err()
-		case <-time.After(pollInterval):
+		case <-timer.C:
 		}
 	}
 }
@@ -694,7 +712,15 @@ func (rm *ReassignmentManager) completeReassignment(reassignmentID string, err e
 	status.CompletedAt = &now
 
 	if err != nil {
-		status.State = ReassignmentStateFailed
+		// Cancellation is semantically different from failure.
+		//
+		// WHY: Callers need to distinguish "operator/user cancelled" from
+		// "reassignment failed due to an error".
+		if errors.Is(err, ErrReassignmentCancelled) || errors.Is(err, context.Canceled) {
+			status.State = ReassignmentStateCancelled
+		} else {
+			status.State = ReassignmentStateFailed
+		}
 		status.Error = err.Error()
 	} else {
 		status.State = ReassignmentStateCompleted
@@ -765,6 +791,9 @@ func (rm *ReassignmentManager) CancelReassignment(reassignmentID string) error {
 // =============================================================================
 
 // validatePartitionReassignment validates a single partition reassignment.
+//
+// CRITICAL: Validates both OldReplicas and NewReplicas are non-empty to prevent
+// panic from array index access (e.g., OldReplicas[0]) during reassignment.
 func (rm *ReassignmentManager) validatePartitionReassignment(pr *PartitionReassignment) error {
 	// Check topic exists
 	topicMeta := rm.metadataStore.GetTopic(pr.Topic)
@@ -776,6 +805,15 @@ func (rm *ReassignmentManager) validatePartitionReassignment(pr *PartitionReassi
 	if pr.Partition < 0 || pr.Partition >= topicMeta.PartitionCount {
 		return fmt.Errorf("%w: partition %d out of range for topic %s",
 			ErrInvalidReassignment, pr.Partition, pr.Topic)
+	}
+
+	// =========================================================================
+	// BUG FIX: Validate OldReplicas is not empty
+	// =========================================================================
+	// WHY: OldReplicas[0] is accessed in reassignPartition() without bounds check.
+	// Without this validation, an empty OldReplicas slice would cause a panic.
+	if len(pr.OldReplicas) == 0 {
+		return fmt.Errorf("%w: old replicas cannot be empty", ErrInvalidReassignment)
 	}
 
 	// Check new replicas not empty

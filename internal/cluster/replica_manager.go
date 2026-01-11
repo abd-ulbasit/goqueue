@@ -488,6 +488,20 @@ func (rm *ReplicaManager) startFetcherLocked(topic string, partition int, leader
 
 	fetcher := NewFollowerFetcher(fetcherConfig, rm, rm.clusterClient, rm.logger)
 
+	// IMPORTANT:
+	//   Seed the fetch offset from the local replica state while we already have
+	//   access to it (and while we're holding rm.mu in the caller).
+	//
+	// WHY:
+	//   Having FollowerFetcher.Start() call back into ReplicaManager to fetch this
+	//   value can deadlock if Start() is invoked while rm.mu is held.
+	if replica, ok := rm.replicas[key]; ok {
+		replica.mu.RLock()
+		initialOffset := replica.State.LogEndOffset
+		replica.mu.RUnlock()
+		fetcher.SetFetchOffset(initialOffset)
+	}
+
 	rm.fetchersMu.Lock()
 	rm.fetchers[key] = fetcher
 	rm.fetchersMu.Unlock()
@@ -642,12 +656,16 @@ func (rm *ReplicaManager) WaitForAcks(ctx context.Context, topic string, partiti
 	replica.mu.Unlock()
 
 	// Wait for acks or timeout.
+	// GOROUTINE LEAK FIX: Use NewTimer instead of time.After
+	timer := time.NewTimer(time.Duration(rm.config.AckTimeoutMs) * time.Millisecond)
 	select {
 	case <-waitCh:
+		timer.Stop()
 		return nil
 	case <-ctx.Done():
+		timer.Stop()
 		return ctx.Err()
-	case <-time.After(time.Duration(rm.config.AckTimeoutMs) * time.Millisecond):
+	case <-timer.C:
 		// Clean up pending ack.
 		replica.pendingAcksMu.Lock()
 		delete(replica.pendingAcks, offset)

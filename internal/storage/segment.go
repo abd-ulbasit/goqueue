@@ -290,8 +290,24 @@ func LoadSegment(dir string, baseOffset int64) (*Segment, error) {
 		return rebuildSegment(dir, baseOffset)
 	}
 
+	// =========================================================================
+	// BUG FIX: Handle file.Stat() error
+	// =========================================================================
+	// WHY: Previously the error was ignored with `stat, _ := file.Stat()`.
+	// If Stat() fails (disk error, file deleted, etc.), stat would be nil
+	// and stat.Size() would panic with nil pointer dereference.
+	//
+	// FIX: Handle the error explicitly. If Stat fails, try to rebuild the segment.
+	stat, err := file.Stat()
+	if err != nil {
+		file.Close()
+		index.Close()
+		timeIndex.Close()
+		// Try rebuild if stat fails
+		return rebuildSegment(dir, baseOffset)
+	}
+
 	// Truncate any garbage at end
-	stat, _ := file.Stat()
 	if currentPosition < stat.Size() {
 		if err := file.Truncate(currentPosition); err != nil {
 			file.Close()

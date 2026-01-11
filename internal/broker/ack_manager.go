@@ -663,7 +663,9 @@ func (am *AckManager) Nack(receiptHandle string, reason string) (*AckResult, err
 	inflight.State = StateScheduledRetry
 
 	// Queue for retry
-	// TODO: why are we sending in the DQL only when the queue is full?
+	// NOTE: Non-blocking send - if queue is full, we route to DLQ with BACKPRESSURE reason.
+	// This prevents unbounded memory growth when system is overloaded.
+	// Operators should monitor DLQ for BACKPRESSURE messages and scale accordingly.
 	select {
 	case am.retryQueue <- inflight:
 		am.mu.Lock()
@@ -671,12 +673,14 @@ func (am *AckManager) Nack(receiptHandle string, reason string) (*AckResult, err
 		am.stats.CurrentQueued++
 		am.mu.Unlock()
 	default:
-		// Queue full, route to DLQ
-		am.logger.Warn("retry queue full, routing to DLQ",
+		// Queue full, route to DLQ with BACKPRESSURE reason (not max retries!)
+		// This is a capacity issue, not a message processing failure.
+		am.logger.Warn("retry queue full, routing to DLQ due to backpressure",
 			"topic", inflight.Topic,
 			"partition", inflight.Partition,
-			"offset", inflight.Offset)
-		return am.routeToDLQ(inflight, DLQReasonMaxRetries)
+			"offset", inflight.Offset,
+			"queue_capacity", cap(am.retryQueue))
+		return am.routeToDLQ(inflight, DLQReasonBackpressure)
 	}
 
 	am.logger.Info("message NACKed, scheduled for retry",
@@ -886,14 +890,20 @@ func (am *AckManager) retryProcessor() {
 }
 
 // processRetry handles a single retry message.
+//
+// GOROUTINE LEAK FIX:
+// Uses time.NewTimer instead of time.After to avoid goroutine leaks when
+// context is cancelled while waiting for retry time.
 func (am *AckManager) processRetry(inflight *InFlightMessage) {
 	// Wait until retry time
 	waitDuration := time.Until(inflight.NextRetryTime)
 	if waitDuration > 0 {
+		timer := time.NewTimer(waitDuration)
 		select {
 		case <-am.ctx.Done():
+			timer.Stop()
 			return
-		case <-time.After(waitDuration):
+		case <-timer.C:
 		}
 	}
 

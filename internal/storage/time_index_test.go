@@ -328,9 +328,82 @@ func TestTimeIndexGetFirstLastTimestamp(t *testing.T) {
 
 	ti, err := NewTimeIndex(path, 0)
 	if err != nil {
-		t.Fatalf("failed to create time index: %v", err)
+		t.Fatalf("NewTimeIndex failed: %v", err)
 	}
 	defer ti.Close()
+
+	// Test empty index
+	_, err = ti.GetFirstTimestamp()
+	if err != ErrTimestampNotFound {
+		t.Errorf("expected ErrTimestampNotFound for empty index, got %v", err)
+	}
+
+	_, err = ti.GetLastTimestamp()
+	if err != ErrTimestampNotFound {
+		t.Errorf("expected ErrTimestampNotFound for empty index, got %v", err)
+	}
+
+	// Add entries
+	ti.MaybeAppend(1000, 0, TimeIndexGranularity)
+	ti.MaybeAppend(2000, 100, 2*TimeIndexGranularity)
+	ti.MaybeAppend(3000, 200, 3*TimeIndexGranularity)
+
+	// Test first timestamp
+	first, err := ti.GetFirstTimestamp()
+	if err != nil {
+		t.Errorf("failed to get first timestamp: %v", err)
+	}
+	if first != 1000 {
+		t.Errorf("expected first timestamp 1000, got %d", first)
+	}
+
+	// Test last timestamp
+	last, err := ti.GetLastTimestamp()
+	if err != nil {
+		t.Errorf("failed to get last timestamp: %v", err)
+	}
+	if last != 3000 {
+		t.Errorf("expected last timestamp 3000, got %d", last)
+	}
+}
+
+func TestTimeIndex_Close_ErrorHandling(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, TimeIndexFileName(0))
+
+	ti, err := NewTimeIndex(path, 0)
+	if err != nil {
+		t.Fatalf("NewTimeIndex failed: %v", err)
+	}
+	defer ti.Close()
+
+	// Add some data
+	ti.MaybeAppend(1000, 0, TimeIndexGranularity)
+
+	// Close should succeed
+	if err := ti.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	// Note: Close is not idempotent for TimeIndex because it closes the underlying file
+	// The defer will handle cleanup
+}
+
+func TestTimeIndex_GetLastTimestamp_Empty(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, TimeIndexFileName(0))
+
+	ti, err := NewTimeIndex(path, 0)
+	if err != nil {
+		t.Fatalf("NewTimeIndex failed: %v", err)
+	}
+	defer ti.Close()
+
+	// Test empty index
+	_, err = ti.GetLastTimestamp()
+	if err != ErrTimestampNotFound {
+		t.Errorf("expected ErrTimestampNotFound for empty index, got %v", err)
+	}
 
 	// Test empty index
 	_, err = ti.GetFirstTimestamp()
@@ -381,7 +454,123 @@ func TestLoadCorruptedTimeIndex(t *testing.T) {
 	}
 }
 
+func TestRebuildTimeIndex_ScansLogFile(t *testing.T) {
+	// =============================================================================
+	// TIME INDEX REBUILD (CORRUPTION / MISSING FILE RECOVERY)
+	// =============================================================================
+	//
+	// WHY: If the .timeindex is missing/corrupted, we must be able to recover by
+	// scanning the segment log and rebuilding the timestamp→offset mapping.
+	//
+	// This test intentionally:
+	//   1) Writes a real segment log (using Segment.Append)
+	//   2) Deletes the generated .timeindex
+	//   3) Calls RebuildTimeIndex(logPath, indexPath)
+	//   4) Validates first/last timestamps and lookup behavior
+	// =============================================================================
+
+	dir := t.TempDir()
+
+	seg, err := NewSegment(dir, 0)
+	if err != nil {
+		t.Fatalf("NewSegment failed: %v", err)
+	}
+
+	baseTS := time.Now().UnixNano()
+	step := int64(time.Second)
+
+	// Write messages large enough to ensure time-index granularity thresholds are crossed.
+	for i := 0; i < 5; i++ {
+		value := make([]byte, TimeIndexGranularity)
+		value[0] = byte(i)
+
+		msg := NewMessage([]byte{byte(i)}, value)
+		msg.Timestamp = baseTS + int64(i)*step
+		if _, err := seg.Append(msg); err != nil {
+			_ = seg.Close()
+			t.Fatalf("Append %d failed: %v", i, err)
+		}
+	}
+
+	if err := seg.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	logPath := filepath.Join(dir, SegmentFileName(0))
+	indexPath := filepath.Join(dir, TimeIndexFileName(0))
+
+	// Simulate corruption/missing index.
+	_ = os.Remove(indexPath)
+
+	ti, err := RebuildTimeIndex(logPath, indexPath, 0)
+	if err != nil {
+		t.Fatalf("RebuildTimeIndex failed: %v", err)
+	}
+	defer ti.Close()
+
+	// Ensure the rebuilt file exists.
+	if _, err := os.Stat(indexPath); err != nil {
+		t.Fatalf("rebuilt time index file not found: %v", err)
+	}
+
+	first, err := ti.GetFirstTimestamp()
+	if err != nil {
+		t.Fatalf("GetFirstTimestamp failed: %v", err)
+	}
+	if first != baseTS {
+		t.Fatalf("first timestamp=%d, want %d", first, baseTS)
+	}
+
+	last, err := ti.GetLastTimestamp()
+	if err != nil {
+		t.Fatalf("GetLastTimestamp failed: %v", err)
+	}
+	expectedLast := baseTS + 4*step
+	if last != expectedLast {
+		t.Fatalf("last timestamp=%d, want %d", last, expectedLast)
+	}
+
+	// Lookup should return the offset at or before the target timestamp.
+	off, err := ti.Lookup(baseTS + 2*step)
+	if err != nil {
+		t.Fatalf("Lookup failed: %v", err)
+	}
+	if off != 2 {
+		t.Fatalf("Lookup returned offset=%d, want 2", off)
+	}
+}
+
 // BenchmarkTimeIndexLookup benchmarks lookup performance.
+func TestTimeIndex_ErrorPaths(t *testing.T) {
+	// Test loading time index with non-existent directory
+	_, err := LoadTimeIndex("/non/existent/path/timeindex", 0)
+	if err == nil {
+		t.Error("LoadTimeIndex should fail for non-existent path")
+	}
+
+	// Test operations on closed time index
+	dir := t.TempDir()
+	ti, err := NewTimeIndex(filepath.Join(dir, TimeIndexFileName(0)), 0)
+	if err != nil {
+		t.Fatalf("NewTimeIndex failed: %v", err)
+	}
+
+	ti.Close()
+
+	// These operations should fail on closed time index
+	if _, err := ti.MaybeAppend(1000, 0, TimeIndexGranularity); err == nil {
+		t.Error("MaybeAppend should fail on closed time index")
+	}
+	if _, err := ti.Lookup(1000); err == nil {
+		t.Error("Lookup should fail on closed time index")
+	}
+	if _, _, err := ti.LookupRange(1000, 2000); err == nil {
+		t.Error("LookupRange should fail on closed time index")
+	}
+	// Note: Truncate on TimeIndex doesn't check for closed file
+	// So we can't test for failure here
+}
+
 func BenchmarkTimeIndexLookup(b *testing.B) {
 	dir := b.TempDir()
 	path := filepath.Join(dir, TimeIndexFileName(0))
