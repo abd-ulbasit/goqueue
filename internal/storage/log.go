@@ -585,6 +585,56 @@ func (l *Log) LatestOffset() int64 {
 	return l.nextOffset - 1
 }
 
+// GetOffsetByTimestamp returns the first offset with a timestamp >= the given timestamp.
+//
+// TIME-BASED OFFSET LOOKUP:
+//
+// USE CASES:
+//   - "Replay from 2 hours ago"
+//   - "Get all messages since yesterday midnight"
+//   - Admin reset: "Reset consumer group to specific point in time"
+//
+// ALGORITHM:
+//  1. Search each segment's time index for candidate offset
+//  2. Return earliest offset that has timestamp >= target
+//  3. If timestamp is before all messages, return earliest offset
+//  4. If timestamp is after all messages, return next offset (nothing to read)
+//
+// COMPARISON:
+//   - Kafka: offsetsForTimes API (ListOffsetsRequest)
+//   - SQS: No equivalent (no offset concept)
+//   - RabbitMQ: x-message-ttl for time-based filtering
+//
+// RETURNS:
+//   - Offset of first message with timestamp >= given timestamp
+//   - Error if log is closed or has no segments
+func (l *Log) GetOffsetByTimestamp(timestamp int64) (int64, error) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	if l.closed {
+		return 0, ErrLogClosed
+	}
+
+	if len(l.segments) == 0 {
+		return 0, nil // Empty log, return base offset
+	}
+
+	// Search through segments to find the one containing the timestamp
+	for _, segment := range l.segments {
+		// Check if timestamp could be in this segment
+		// Try to look up in segment's time index
+		offset, err := segment.LookupByTimestamp(timestamp)
+		if err == nil {
+			return offset, nil
+		}
+		// Continue to next segment if not found
+	}
+
+	// Timestamp is after all messages - return next offset (nothing to read)
+	return l.nextOffset, nil
+}
+
 // Size returns total size of the log in bytes (across all segments).
 func (l *Log) Size() int64 {
 	l.mu.RLock()

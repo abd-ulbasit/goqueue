@@ -1,0 +1,45 @@
+# =============================================================================
+# BUF CONFIGURATION
+# =============================================================================
+#
+# WHAT IS BUF?
+# Buf is a modern tool for working with Protocol Buffers. It replaces the
+# traditional protoc workflow with a simpler, more reliable approach.
+#
+# WHY BUF INSTEAD OF PROTOC?
+#
+#   ┌─────────────────────────────────────────────────────────────────────────┐
+#   │ protoc (traditional)              │ buf (modern)                        │
+#   ├───────────────────────────────────┼─────────────────────────────────────┤
+#   │ Manual plugin installation        │ Automatic dependency management     │
+#   │ Complex command-line args         │ Simple YAML config                  │
+#   │ No dependency management          │ BSR (Buf Schema Registry)           │
+#   │ No linting                        │ Built-in linting & breaking checks  │
+#   │ No formatting                     │ Built-in formatting                 │
+#   └───────────────────────────────────┴─────────────────────────────────────┘
+#
+# USAGE:
+#   buf generate       # Generate Go code
+#   buf lint           # Check for style issues
+#   buf breaking       # Check for breaking changes
+#   buf format         # Auto-format .proto files
+#
+# =============================================================================
+
+version: v2
+
+# Module name - identifies this proto package
+name: buf.build/goqueue/api
+
+# Linting configuration
+lint:
+  use:
+    - DEFAULT
+  except:
+    # We use UNSPECIFIED as first enum value (protobuf best practice)
+    - ENUM_ZERO_VALUE_SUFFIX
+
+# Breaking change detection
+breaking:
+  use:
+    - FILE

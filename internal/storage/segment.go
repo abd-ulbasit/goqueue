@@ -1115,3 +1115,13 @@ func (s *Segment) GetFirstTimestamp() (int64, error) {
 func (s *Segment) GetLastTimestamp() (int64, error) {
 	return s.timeIndex.GetLastTimestamp()
 }
+
+// LookupByTimestamp returns the first offset with timestamp >= the given timestamp.
+// This uses the time index for efficient lookup.
+//
+// RETURNS:
+//   - Offset of first message with timestamp >= given timestamp
+//   - ErrTimestampNotFound if no such offset exists in this segment
+func (s *Segment) LookupByTimestamp(timestamp int64) (int64, error) {
+	return s.timeIndex.Lookup(timestamp)
+}

@@ -32,6 +32,7 @@ import (
 
 	"goqueue/internal/api"
 	"goqueue/internal/broker"
+	"goqueue/internal/grpc"
 )
 
 func main() {
@@ -284,15 +285,56 @@ func main() {
 
 	fmt.Printf("   ✓ HTTP API listening on http://%s\n", serverConfig.Addr)
 	fmt.Println()
+
+	// -------------------------------------------------------------------------
+	// STEP 6b: Start gRPC Server (M15)
+	// -------------------------------------------------------------------------
+	// ┌─────────────────────────────────────────────────────────────────────────┐
+	// │ gRPC API - High-Performance Binary Protocol                             │
+	// │                                                                         │
+	// │ WHY gRPC alongside HTTP:                                                │
+	// │   - HTTP: Easy debugging, curl-friendly, wide compatibility             │
+	// │   - gRPC: High performance, streaming, type-safe (for hot path)         │
+	// │                                                                         │
+	// │ gRPC Services:                                                          │
+	// │   PublishService  - Message publishing (unary + streaming)              │
+	// │   ConsumeService  - Message consuming (streaming)                       │
+	// │   AckService      - Message acknowledgment                              │
+	// │   OffsetService   - Consumer offset management                          │
+	// │   HealthService   - Health checking (gRPC standard)                     │
+	// │                                                                         │
+	// │ COMPARISON:                                                             │
+	// │   - Kafka: Custom binary protocol over TCP                              │
+	// │   - RabbitMQ: AMQP protocol (binary)                                    │
+	// │   - NATS: Custom binary protocol                                        │
+	// │   - goqueue: gRPC/HTTP2 with Protocol Buffers                           │
+	// └─────────────────────────────────────────────────────────────────────────┘
+	fmt.Println("🔌 Starting gRPC server...")
+
+	grpcConfig := grpc.DefaultServerConfig()
+	grpcConfig.Address = "127.0.0.1:9000"
+	grpcConfig.EnableReflection = true // Enable for debugging with grpcurl
+
+	grpcServer := grpc.NewServer(b, grpcConfig)
+	if err := grpcServer.Start(); err != nil {
+		log.Fatalf("Failed to start gRPC server: %v", err)
+	}
+
+	fmt.Printf("   ✓ gRPC API listening on %s\n", grpcConfig.Address)
+	fmt.Println()
+
 	fmt.Println("   Try these commands:")
 	fmt.Println("   ┌────────────────────────────────────────────────────────────────────────┐")
-	fmt.Println("   │ curl http://localhost:8080/health                                      │")
-	fmt.Println("   │ curl http://localhost:8080/stats                                       │")
-	fmt.Println("   │ curl http://localhost:8080/topics                                      │")
-	fmt.Println("   │ curl -X POST -d '{\"name\":\"test\"}' http://localhost:8080/topics      │")
-	fmt.Println("   │ curl -X POST -d '{\"messages\":[{\"key\":\"k\",\"value\":\"v\"}]}'       │")
-	fmt.Println("   │      http://localhost:8080/topics/test/messages                        │")
-	fmt.Println("   │ curl 'http://localhost:8080/topics/test/partitions/0/messages'         │")
+	fmt.Println("   │ HTTP API (debugging):                                                  │")
+	fmt.Println("   │   curl http://localhost:8080/health                                    │")
+	fmt.Println("   │   curl http://localhost:8080/stats                                     │")
+	fmt.Println("   │   curl http://localhost:8080/topics                                    │")
+	fmt.Println("   │   curl -X POST -d '{\"name\":\"test\"}' http://localhost:8080/topics    │")
+	fmt.Println("   │                                                                        │")
+	fmt.Println("   │ gRPC API (high performance):                                           │")
+	fmt.Println("   │   Use the goqueue Go client for gRPC operations                        │")
+	fmt.Println("   │   grpcurl -plaintext localhost:9000 list                               │")
+	fmt.Println("   │   grpcurl -plaintext localhost:9000 goqueue.v1.HealthService/Check     │")
 	fmt.Println("   └────────────────────────────────────────────────────────────────────────┘")
 	fmt.Println()
 
@@ -329,9 +371,15 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	// Stop gRPC server first (handles in-flight RPCs)
+	grpcServer.Stop()
+	fmt.Println("   ✓ gRPC server stopped")
+
+	// Stop HTTP server
 	if err := server.Stop(ctx); err != nil {
 		log.Printf("HTTP server shutdown error: %v", err)
 	}
+	fmt.Println("   ✓ HTTP server stopped")
 
 	fmt.Println("   ✓ Shutdown complete")
 }
