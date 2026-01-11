@@ -1,0 +1,43 @@
+# =============================================================================
+# BUF GENERATION CONFIGURATION
+# =============================================================================
+#
+# This file tells buf how to generate code from .proto files.
+#
+# WHAT GETS GENERATED:
+#   1. Go structs for all messages (protobuf)
+#   2. gRPC client/server interfaces (grpc)
+#
+# OUTPUT STRUCTURE:
+#   api/proto/gen/go/goqueue/v1/
+#     ├── goqueue.pb.go        # Message types (from protobuf plugin)
+#     └── goqueue_grpc.pb.go   # Service interfaces (from grpc plugin)
+#
+# =============================================================================
+
+version: v2
+
+# Managed mode - automatically manages go_package options
+managed:
+  enabled: true
+  override:
+    - file_option: go_package_prefix
+      value: goqueue/api/proto/gen/go
+
+# Plugins to use for code generation
+plugins:
+  # protoc-gen-go: Generates message types
+  - remote: buf.build/protocolbuffers/go
+    out: gen/go
+    opt:
+      - paths=source_relative
+  
+  # protoc-gen-go-grpc: Generates gRPC service interfaces
+  - remote: buf.build/grpc/go
+    out: gen/go
+    opt:
+      - paths=source_relative
+
+# Input directories
+inputs:
+  - directory: .

@@ -838,6 +838,13 @@ func (b *Broker) Close() error {
 	return nil
 }
 
+// IsClosed returns true if the broker has been closed.
+func (b *Broker) IsClosed() bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.closed
+}
+
 // =============================================================================
 // TOPIC MANAGEMENT
 // =============================================================================
@@ -1529,6 +1536,26 @@ func (b *Broker) PublishTransactional(
 // Used by HTTP handlers to expose transaction APIs.
 func (b *Broker) GetTransactionCoordinator() *TransactionCoordinator {
 	return b.transactionCoordinator
+}
+
+// GetAckManager returns the acknowledgment manager for external access.
+// Used by gRPC handlers to process ACK/NACK/REJECT operations.
+//
+// RETURNS:
+//   - *AckManager if acknowledgment is enabled (M4)
+//   - nil if not configured
+func (b *Broker) GetAckManager() *AckManager {
+	return b.ackManager
+}
+
+// GetGroupCoordinator returns the consumer group coordinator for external access.
+// Used by gRPC handlers to manage consumer group membership and offset commits.
+//
+// RETURNS:
+//   - *GroupCoordinator if consumer groups are enabled (M3)
+//   - nil if not configured
+func (b *Broker) GetGroupCoordinator() *GroupCoordinator {
+	return b.groupCoordinator
 }
 
 // =============================================================================
@@ -3011,8 +3038,70 @@ func (b *Broker) SchemaRegistry() *SchemaRegistry {
 
 // SchemaStats returns statistics about the schema registry.
 func (b *Broker) SchemaStats() SchemaRegistryStats {
-	if b.schemaRegistry == nil {
-		return SchemaRegistryStats{}
-	}
 	return b.schemaRegistry.Stats()
+}
+
+// =============================================================================
+// TIME-BASED OFFSET LOOKUP (M14)
+// =============================================================================
+//
+// GetOffsetByTimestamp finds the offset for a message at or after a given timestamp.
+//
+// This is used by the offset reset service to implement timestamp-based resets:
+//   - "Reset to messages from 2 hours ago"
+//   - "Reprocess from 9am this morning"
+//
+// DESIGN PATTERN:
+// Instead of having the gRPC service layer handle topic/partition lookups,
+// we encapsulate all orchestration in the broker. This follows the same
+// pattern as PublishMessage():
+//
+//	gRPC Service              Broker                    Topic/Partition
+//	─────────────────────────────────────────────────────────────────
+//	Publish(topic, msg) ──► ProduceMessage()
+//	                          └─► GetTopic()
+//	                          └─► Partition()
+//	                          └─► ProduceMessage()
+//
+//	GetOffsetByTimestamp() ──► GetOffsetByTimestamp()
+//	(topic, partition,         └─► GetTopic()
+//	 timestamp)                └─► Partition()
+//	                           └─► GetOffsetByTimestamp()
+//
+// BENEFITS:
+//   - Single point of call from gRPC layer
+//   - Consistent error handling
+//   - Easier to test
+//   - Reduces coupling between layers
+//
+// RETURNS:
+//   - The offset of the first message with timestamp >= given timestamp
+//   - Error if topic/partition not found or timestamp lookup fails
+func (b *Broker) GetOffsetByTimestamp(topic string, partition int, timestamp int64) (int64, error) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	if b.closed {
+		return 0, ErrBrokerClosed
+	}
+
+	// Get topic
+	t, ok := b.topics[topic]
+	if !ok {
+		return 0, fmt.Errorf("topic not found: %s", topic)
+	}
+
+	// Get partition
+	p, err := t.Partition(partition)
+	if err != nil {
+		return 0, fmt.Errorf("partition not found: %w", err)
+	}
+
+	// Get offset by timestamp
+	offset, err := p.GetOffsetByTimestamp(timestamp)
+	if err != nil {
+		return 0, fmt.Errorf("timestamp lookup failed: %w", err)
+	}
+
+	return offset, nil
 }
