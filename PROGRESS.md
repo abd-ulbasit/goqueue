@@ -1,10 +1,10 @@
 # GoQueue Development Progress
 
-## Status: Phase 3.5 - In Progress
+## Status: Phase 4 - Operations
 
-**Target Milestones**: 18
-**Completed**: 13
-**Current**: Milestone 14 (Time Index, Snapshots & Log Compaction) - Partial Complete
+**Target Milestones**: 19
+**Completed**: 16
+**Current**: Milestone 17 (Prometheus Metrics & Grafana)
 
 ---
 
@@ -771,36 +771,130 @@ STICKY ASSIGNMENT:
 
 ## Phase 4: Operations (Milestones 15-18)
 
-### Milestone 15: gRPC API & Go Client
+### Milestone 15: gRPC API & Go Client ✅ COMPLETE
 
 **Goal:** High-performance gRPC API and idiomatic Go client.
 
 **Deliverables:**
-- [ ] Protocol buffer definitions
-- [ ] gRPC server implementation
-- [ ] Streaming produce/consume
-- [ ] Go client library
-- [ ] Connection pooling
-- [ ] Retry with backoff
+- [x] Protocol buffer definitions
+- [x] gRPC server implementation
+- [x] Streaming produce/consume
+- [x] Go client library
+- [x] Connection pooling
+- [x] Retry with backoff
 
 ---
 
-### Milestone 15: CLI Tool
+### Milestone 16: CLI Tool ✅ COMPLETE
 
-**Goal:** Full-featured command-line tool.
+**Goal:** Full-featured command-line tool for goqueue administration.
+
+**Learning Focus:**
+- CLI architecture patterns (cobra framework)
+- Configuration management (kubectl-style contexts)
+- Output formatting (table, JSON, YAML)
+- HTTP client design for CLI tools
 
 **Deliverables:**
-- [ ] Topic CRUD commands
-- [ ] Produce/consume commands
-- [ ] Consumer group management
-- [ ] Offset reset commands
-- [ ] Message trace lookup
-- [ ] Cluster info commands
-- [ ] Output formats (table, JSON, YAML)
+- [x] Topic CRUD commands (`goqueue topic list/create/describe/delete`)
+- [x] Produce/consume commands (`goqueue produce`, `goqueue consume --follow`)
+- [x] Consumer group management (`goqueue group list/describe/delete`)
+- [x] Offset reset commands (`goqueue group reset-offsets`)
+- [x] Message trace lookup (`goqueue trace list/get/search/stats`)
+- [x] Cluster info commands (`goqueue cluster info/health/nodes`)
+- [x] Output formats (table, JSON, YAML via `-o` flag)
+- [x] Configuration contexts (`goqueue config use-context/set-context`)
+
+**Key Files:**
+- `cmd/goqueue-cli/main.go` - CLI entry point
+- `cmd/goqueue-cli/cmd/root.go` - Root command with global flags
+- `cmd/goqueue-cli/cmd/topic.go` - Topic management commands
+- `cmd/goqueue-cli/cmd/produce.go` - Message publishing
+- `cmd/goqueue-cli/cmd/consume.go` - Message consumption with follow mode
+- `cmd/goqueue-cli/cmd/group.go` - Consumer group management
+- `cmd/goqueue-cli/cmd/trace.go` - Trace query commands
+- `cmd/goqueue-cli/cmd/cluster.go` - Cluster operations
+- `cmd/goqueue-cli/cmd/config.go` - Configuration management
+- `internal/cli/client.go` - HTTP client for CLI operations
+- `internal/cli/config.go` - Configuration file management
+- `internal/cli/formatter.go` - Output formatting (table/JSON/YAML)
+
+**Architecture:**
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                          goqueue CLI                                │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│   cmd/goqueue-cli/                                                  │
+│   ├── main.go              Entry point                              │
+│   └── cmd/                                                          │
+│       ├── root.go          Global flags, client init                │
+│       ├── topic.go         topic list/create/describe/delete        │
+│       ├── produce.go       publish messages                         │
+│       ├── consume.go       read messages (--follow for streaming)   │
+│       ├── group.go         group list/describe/delete/offsets       │
+│       ├── trace.go         trace list/get/search/stats              │
+│       ├── cluster.go       cluster info/health/nodes                │
+│       ├── config.go        config view/use-context/set-context      │
+│       └── version.go       version info                             │
+│                                                                     │
+│   internal/cli/                                                     │
+│   ├── client.go            HTTP client (REST API)                   │
+│   ├── config.go            ~/.goqueue/config.yaml management        │
+│   └── formatter.go         table/JSON/YAML output                   │
+│                                                                     │
+├─────────────────────────────────────────────────────────────────────┤
+│                    Configuration                                    │
+├─────────────────────────────────────────────────────────────────────┤
+│   Config file: ~/.goqueue/config.yaml                               │
+│   Contexts: kubectl-style multi-cluster support                     │
+│   Precedence: CLI flags > ENV vars > config file > defaults         │
+│                                                                     │
+│   Environment Variables:                                            │
+│     GOQUEUE_SERVER   - Server URL                                   │
+│     GOQUEUE_CONTEXT  - Active context name                          │
+│     GOQUEUE_API_KEY  - API key for authentication                   │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**Usage Examples:**
+```bash
+# Topic management
+goqueue topic list
+goqueue topic create orders -p 6 -r 168h
+goqueue topic describe orders -o json
+
+# Message operations
+goqueue produce orders -m '{"orderId": "123"}'
+goqueue consume orders -p 0 --from-beginning
+goqueue consume orders --follow  # Stream like tail -f
+
+# Consumer groups
+goqueue group list
+goqueue group describe order-processors
+goqueue group reset-offsets order-processors --topic orders --to-earliest
+
+# Tracing
+goqueue trace list -n 50
+goqueue trace get abc123-def456
+goqueue trace search --topic orders --status error
+
+# Cluster operations
+goqueue cluster info
+goqueue cluster health
+
+# Configuration
+goqueue config view
+goqueue config set-context production --server https://prod.example.com
+goqueue config use-context production
+```
+
+**Why This Matters:**
+> "A good CLI is essential for operations. It enables scripting, debugging, and quick access to cluster state without building custom tools."
 
 ---
 
-### Milestone 16: Prometheus Metrics & Grafana
+### Milestone 17: Prometheus Metrics & Grafana
 
 **Goal:** Full observability stack.
 
@@ -815,7 +909,7 @@ STICKY ASSIGNMENT:
 
 ---
 
-### Milestone 17: Multi-Tenancy & Quotas
+### Milestone 18: Multi-Tenancy & Quotas
 
 **Goal:** Resource isolation for multi-tenant deployments.
 
@@ -834,7 +928,7 @@ STICKY ASSIGNMENT:
 
 ---
 
-### Milestone 18: Kubernetes & Chaos Testing
+### Milestone 19: Kubernetes & Chaos Testing
 
 **Goal:** Production-ready K8s deployment with chaos resilience.
 
@@ -848,7 +942,7 @@ STICKY ASSIGNMENT:
 - [ ] Load test with k6
 - [ ] Runbook documentation
 
-### Milestone 19: Final Review & Documentation with Examples and Comparison to Alternatives
+### Milestone 20: Final Review & Documentation with Examples and Comparison to Alternatives
 
 **Goal:** Comprehensive documentation and comparison to existing solutions.
 **Deliverables:**
