@@ -2,9 +2,9 @@
 
 ## Status: Phase 4 - Operations
 
-**Target Milestones**: 19
-**Completed**: 16
-**Current**: Milestone 17 (Prometheus Metrics & Grafana)
+**Target Milestones**: 20
+**Completed**: 17
+**Current**: Milestone 18 (Multi-Tenancy & Quotas)
 
 ---
 
@@ -894,18 +894,84 @@ goqueue config use-context production
 
 ---
 
-### Milestone 17: Prometheus Metrics & Grafana
+### Milestone 17: Prometheus Metrics & Grafana ✅ COMPLETE
 
 **Goal:** Full observability stack.
 
 **Deliverables:**
-- [ ] Prometheus metrics exporter
-- [ ] Topic metrics (messages, bytes, partitions)
-- [ ] Producer metrics (rate, latency, errors)
-- [ ] Consumer metrics (lag, rate, rebalances)
-- [ ] Cluster metrics (leaders, replicas, health)
-- [ ] Grafana dashboard
-- [ ] Alerting rules
+- [x] Prometheus metrics exporter (`internal/metrics/metrics.go`)
+- [x] Topic metrics (messages, bytes, partitions) (`internal/metrics/broker_metrics.go`)
+- [x] Producer metrics (rate, latency, errors) (`internal/metrics/broker_metrics.go`)
+- [x] Consumer metrics (lag, rate, rebalances) (`internal/metrics/consumer_metrics.go`)
+- [x] Cluster metrics (leaders, replicas, health) (`internal/metrics/cluster_metrics.go`)
+- [x] Grafana dashboard (`deploy/grafana/dashboards/*.json` - 3 dashboards)
+- [x] Alerting rules (`deploy/prometheus/alerts/goqueue-alerts.yaml`)
+
+**Implementation Notes:**
+```
+Architecture: Pull-based Prometheus model with /metrics HTTP endpoint
+
+Metrics Structure:
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        internal/metrics/                                │
+├─────────────────────────────────────────────────────────────────────────┤
+│  metrics.go         │ Core registry, config, HTTP handler, helpers      │
+│  broker_metrics.go  │ Publish/consume counters, latency histograms      │
+│  storage_metrics.go │ Bytes written/read, fsync latency, segment stats  │
+│  consumer_metrics.go│ Group members, committed offsets, rebalances      │
+│  cluster_metrics.go │ Node counts, leader elections, ISR changes        │
+│  metrics_test.go    │ Unit tests (9 tests, all passing)                 │
+└─────────────────────────────────────────────────────────────────────────┘
+
+Naming Convention: goqueue_{subsystem}_{name}_{unit}
+  - goqueue_broker_messages_published_total
+  - goqueue_broker_publish_latency_seconds
+  - goqueue_storage_bytes_written_total
+  - goqueue_consumer_group_members
+
+Label Strategy (cardinality-conscious):
+  - Always: topic, consumer_group, node_id
+  - Optional: partition (disabled by default, configurable)
+
+Histogram Buckets (optimized for SLA targets):
+  [0.0005, 0.001, 0.002, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5]
+  (Enables p50/p95/p99 for targets: p99 publish < 10ms, p99 consume < 5ms)
+
+Grafana Dashboards:
+┌────────────────────────────────────────┐
+│ goqueue-overview.json                  │ ← Cluster health, throughput, latency
+│ goqueue-consumer-groups.json           │ ← Group state, lag, rebalancing
+│ goqueue-cluster.json                   │ ← Node status, ISR, elections
+└────────────────────────────────────────┘
+
+Prometheus Alerts:
+  - GoQueueHighConsumerLag (warning: >10k, critical: >100k)
+  - GoQueueHighPublishLatency (warning: p99 > 50ms, critical: > 100ms)
+  - GoQueueConsumerGroupUnstable (>5 rebalances in 5 min)
+  - GoQueueNodeUnhealthy (node down > 30s)
+  - GoQueueHighErrorRate (>1% error rate)
+  - GoQueueStorageWriteErrors (>0 in 5 min)
+```
+
+**Key Design Decisions:**
+1. **Both Prometheus + OpenTelemetry**: prometheus/client_golang for metrics,
+   existing OTLP tracer for traces. Future: OTEL metrics bridge for dual export.
+2. **Kafka-style Lag Calculation**: Expose LEO + committed offset, Grafana
+   calculates lag via PromQL for accuracy and flexibility.
+3. **Custom Histogram Buckets**: Sub-millisecond granularity for latency SLAs.
+4. **Nil-safe Integration**: metrics_integration.go provides safe bridge that
+   gracefully handles uninitialized metrics registry.
+
+**Tests:**
+- [x] TestNewRegistry - Registry initialization
+- [x] TestBrokerMetrics_RecordPublish - Publish counters and latency
+- [x] TestBrokerMetrics_RecordConsume - Consume counters
+- [x] TestStorageMetrics_RecordWrite - Storage byte counters
+- [x] TestConsumerMetrics_SetGroupMembers - Group member gauges
+- [x] TestClusterMetrics_SetNodeCounts - Node count gauges
+- [x] TestHandler_ProducesPrometheusOutput - HTTP handler format
+- [x] TestDefaultConfig - Configuration defaults
+- [x] TestDefaultLatencyBuckets - Bucket configuration
 
 ---
 

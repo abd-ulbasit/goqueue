@@ -77,6 +77,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"goqueue/internal/broker"
+	"goqueue/internal/metrics"
 	"goqueue/internal/storage"
 )
 
@@ -150,6 +151,27 @@ func (s *Server) registerRoutes() {
 	// Health & Stats
 	s.router.Get("/health", s.handleHealth)
 	s.router.Get("/stats", s.handleStats)
+
+	// ==========================================================================
+	// PROMETHEUS METRICS ENDPOINT
+	// ==========================================================================
+	//
+	// WHY /metrics?
+	// This is the standard endpoint that Prometheus scrapes to collect metrics.
+	// All Prometheus-compatible systems expect metrics at this path.
+	//
+	// HOW IT WORKS:
+	//   1. Prometheus server scrapes GET /metrics every N seconds (default 15s)
+	//   2. Handler returns all registered metrics in Prometheus text format
+	//   3. Prometheus stores time-series data for querying
+	//
+	// FORMAT EXAMPLE:
+	//   # HELP goqueue_broker_messages_published_total Total messages published
+	//   # TYPE goqueue_broker_messages_published_total counter
+	//   goqueue_broker_messages_published_total{topic="orders"} 12345
+	//
+	// ==========================================================================
+	s.router.Get("/metrics", s.handleMetrics)
 
 	// Topics
 	s.router.Route("/topics", func(r chi.Router) {
@@ -562,6 +584,50 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"status":    "ok",
 		"timestamp": time.Now().UTC().Format(time.RFC3339),
 	})
+}
+
+// handleMetrics serves Prometheus metrics.
+//
+// =============================================================================
+// PROMETHEUS METRICS HANDLER
+// =============================================================================
+//
+// WHY THIS ENDPOINT?
+// Prometheus is a pull-based monitoring system. It periodically scrapes this
+// endpoint to collect metrics. This is how goqueue exposes its operational
+// metrics to monitoring systems.
+//
+// WHAT'S EXPOSED:
+//   - Broker metrics (messages published/consumed, latencies, errors)
+//   - Storage metrics (bytes written/read, fsync latency)
+//   - Consumer metrics (group members, lag, rebalances)
+//   - Cluster metrics (node health, leader elections, ISR changes)
+//   - Go runtime metrics (goroutines, memory, GC)
+//   - Process metrics (CPU, file descriptors)
+//
+// FORMAT: Prometheus text exposition format
+//
+//	# HELP goqueue_broker_messages_published_total Total messages published
+//	# TYPE goqueue_broker_messages_published_total counter
+//	goqueue_broker_messages_published_total{topic="orders"} 12345
+//
+// SCRAPE CONFIGURATION (prometheus.yaml):
+//
+//	scrape_configs:
+//	  - job_name: 'goqueue'
+//	    static_configs:
+//	      - targets: ['localhost:8080']
+//
+// =============================================================================
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	// Get the metrics handler from the registry
+	// If metrics are not initialized, return 503
+	handler := metrics.Handler()
+	if handler == nil {
+		s.errorResponse(w, http.StatusServiceUnavailable, "metrics not initialized")
+		return
+	}
+	handler.ServeHTTP(w, r)
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {

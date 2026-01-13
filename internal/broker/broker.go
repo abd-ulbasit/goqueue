@@ -988,6 +988,11 @@ func (b *Broker) Publish(topic string, key, value []byte) (partition int, offset
 // If traceCtx is empty (zero TraceID), a new trace is started.
 // This enables end-to-end tracing across services.
 func (b *Broker) PublishWithTrace(topic string, key, value []byte, traceCtx TraceContext) (partition int, offset int64, err error) {
+	// =========================================================================
+	// METRICS: Start timing for latency measurement
+	// =========================================================================
+	publishStart := time.Now()
+
 	// Start or continue trace
 	var ctx TraceContext
 	if traceCtx.TraceID.IsZero() {
@@ -1026,6 +1031,7 @@ func (b *Broker) PublishWithTrace(topic string, key, value []byte, traceCtx Trac
 	// the log, preventing downstream consumer failures.
 	//
 	// =========================================================================
+	schemaStart := time.Now()
 	if err := b.schemaRegistry.ValidateMessage(topic, value); err != nil {
 		// Record validation failure span
 		if !ctx.TraceID.IsZero() {
@@ -1034,8 +1040,13 @@ func (b *Broker) PublishWithTrace(topic string, key, value []byte, traceCtx Trac
 			span.WithAttribute("error_type", "schema_validation")
 			b.tracer.RecordSpan(span)
 		}
+		// METRICS: Record schema validation failure
+		InstrumentSchemaValidation(topic, false, schemaStart)
+		InstrumentPublishError(topic, "validation")
 		return 0, 0, fmt.Errorf("schema validation failed: %w", err)
 	}
+	// METRICS: Record schema validation success (if validation was performed)
+	InstrumentSchemaValidation(topic, true, schemaStart)
 
 	// Record publish.received span
 	if !ctx.TraceID.IsZero() {
@@ -1054,6 +1065,8 @@ func (b *Broker) PublishWithTrace(topic string, key, value []byte, traceCtx Trac
 			span.WithError(err)
 			b.tracer.RecordSpan(span)
 		}
+		// METRICS: Record publish error
+		InstrumentPublishError(topic, "storage")
 		return 0, 0, err
 	}
 
@@ -1062,6 +1075,11 @@ func (b *Broker) PublishWithTrace(topic string, key, value []byte, traceCtx Trac
 		span := NewSpan(ctx.TraceID, SpanEventPublishPersisted, topic, partition, offset)
 		b.tracer.RecordSpan(span)
 	}
+
+	// =========================================================================
+	// METRICS: Record successful publish
+	// =========================================================================
+	InstrumentPublish(topic, len(value), publishStart)
 
 	return partition, offset, nil
 }
@@ -1470,6 +1488,8 @@ func (b *Broker) PublishTransactional(
 			"partition", actualPartition,
 			"sequence", sequence,
 			"existing_offset", existingOffset)
+		// METRICS: Record duplicate rejection for observability
+		InstrumentDuplicateRejected()
 		return actualPartition, existingOffset, true, nil
 	}
 
@@ -1595,6 +1615,11 @@ func (b *Broker) GetGroupCoordinator() *GroupCoordinator {
 // committed transactions. The uncommittedTracker maintains offsets belonging
 // to active transactions and filters them during consume.
 func (b *Broker) Consume(topic string, partition int, fromOffset int64, maxMessages int) ([]Message, error) {
+	// =========================================================================
+	// METRICS: Start timing for latency measurement
+	// =========================================================================
+	consumeStart := time.Now()
+
 	b.mu.RLock()
 	if b.closed {
 		b.mu.RUnlock()
@@ -1718,6 +1743,18 @@ func (b *Broker) Consume(topic string, partition int, fromOffset int64, maxMessa
 			b.tracer.RecordSpan(span)
 		}
 	}
+
+	// =========================================================================
+	// METRICS: Record successful consume operation
+	// =========================================================================
+	// Calculate total bytes consumed for metrics
+	totalBytes := 0
+	for _, msg := range messages {
+		totalBytes += len(msg.Value)
+	}
+	// consumerGroup is empty here since this is direct partition consumption
+	// Consumer group consumption goes through ConsumerGroup.Consume() which has group context
+	InstrumentConsume("", topic, len(messages), totalBytes, consumeStart)
 
 	return messages, nil
 }
@@ -2438,6 +2475,7 @@ type MessageWithReceipt struct {
 //   - Will not be redelivered
 //   - Committed offset may advance (if contiguous)
 func (b *Broker) Ack(receiptHandle string) (*AckResult, error) {
+	ackStart := time.Now()
 	result, err := b.ackManager.Ack(receiptHandle)
 	if err != nil {
 		return nil, err
@@ -2451,6 +2489,10 @@ func (b *Broker) Ack(receiptHandle string) (*AckResult, error) {
 		span.WithAttribute("offset_advanced", fmt.Sprintf("%t", result.OffsetAdvanced))
 		b.tracer.RecordSpan(span)
 	}
+
+	// METRICS: Record acknowledgment
+	// consumerGroup is empty here - group context comes from ConsumerGroup
+	InstrumentAck(result.Topic, "", ackStart)
 
 	return result, nil
 }
@@ -2466,6 +2508,7 @@ func (b *Broker) Ack(receiptHandle string) (*AckResult, error) {
 //   - Each NACK increments delivery count
 //   - After MaxRetries, message goes to DLQ
 func (b *Broker) Nack(receiptHandle, reason string) (*AckResult, error) {
+	nackStart := time.Now()
 	result, err := b.ackManager.Nack(receiptHandle, reason)
 	if err != nil {
 		return nil, err
@@ -2482,6 +2525,9 @@ func (b *Broker) Nack(receiptHandle, reason string) (*AckResult, error) {
 		}
 		b.tracer.RecordSpan(span)
 	}
+
+	// METRICS: Record negative acknowledgment
+	InstrumentNack(result.Topic, "", nackStart)
 
 	return result, nil
 }
@@ -2500,6 +2546,7 @@ func (b *Broker) Nack(receiptHandle, reason string) (*AckResult, error) {
 //   - Message format is invalid
 //   - Business logic determines message is unprocessable
 func (b *Broker) Reject(receiptHandle, reason string) (*AckResult, error) {
+	rejectStart := time.Now()
 	result, err := b.ackManager.Reject(receiptHandle, reason)
 	if err != nil {
 		return nil, err
@@ -2515,6 +2562,9 @@ func (b *Broker) Reject(receiptHandle, reason string) (*AckResult, error) {
 		}
 		b.tracer.RecordSpan(span)
 	}
+
+	// METRICS: Record message rejection (sent to DLQ)
+	InstrumentReject(result.Topic, "", rejectStart)
 
 	return result, nil
 }
