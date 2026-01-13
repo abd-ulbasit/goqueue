@@ -1,0 +1,252 @@
+# ============================================================================
+# PROMETHEUS CONFIGURATION FOR GOQUEUE
+# ============================================================================
+#
+# WHAT THIS FILE DOES:
+# This is the main Prometheus configuration file. It tells Prometheus:
+#   1. How often to scrape metrics (scrape_interval)
+#   2. What endpoints to scrape (scrape_configs)
+#   3. Where to find alert rules (rule_files)
+#   4. How to connect to Alertmanager (alerting)
+#
+# HOW PROMETHEUS WORKS:
+#
+#   ┌─────────────────────────────────────────────────────────────────┐
+#   │                        PROMETHEUS SERVER                        │
+#   │                                                                 │
+#   │  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐       │
+#   │  │   Scraper    │    │  TSDB        │    │  Query       │       │
+#   │  │  (pull model)│───►│  (storage)   │◄───│  Engine      │       │
+#   │  └──────────────┘    └──────────────┘    └──────────────┘       │
+#   │         ▲                                       │               │
+#   │         │                                       ▼               │
+#   └─────────┼───────────────────────────────────────┼───────────────┘
+#             │                                       │
+#        HTTP GET /metrics                     PromQL queries
+#             │                                       │
+#   ┌─────────▼─────────┐                   ┌─────────▼───────┐
+#   │  GoQueue Broker   │                   │  Grafana        │
+#   │  :8080/metrics    │                   │  (dashboards)   │
+#   └───────────────────┘                   └─────────────────┘
+#
+# PULL VS PUSH MODEL:
+#   - Prometheus: PULL (scrapes targets)
+#     + Easier to debug (just curl /metrics)
+#     + Natural service discovery
+#     + No agent needed on targets
+#     - Harder for short-lived jobs (use pushgateway)
+#
+#   - StatsD/InfluxDB: PUSH (targets send metrics)
+#     + Works for short-lived processes
+#     - Harder to debug (where are metrics going?)
+#     - Need to configure every target
+#
+# COMPARISON WITH OTHER SYSTEMS:
+#   - Datadog: Agent-based push model, SaaS storage
+#   - New Relic: Agent-based push model, SaaS storage
+#   - CloudWatch: Push via AWS SDK, AWS storage
+#   - InfluxDB: Push via Telegraf or direct write
+#   - Prometheus: Pull-based, local TSDB (this file)
+#
+# ============================================================================
+
+# -----------------------------------------------------------------------------
+# GLOBAL CONFIGURATION
+# -----------------------------------------------------------------------------
+# These settings apply to all scrape jobs unless overridden.
+# -----------------------------------------------------------------------------
+
+global:
+  # How often to scrape targets
+  # Default: 1m, but 15s gives better resolution for debugging
+  # TRADEOFF:
+  #   - Lower interval: Better resolution, more storage, more CPU
+  #   - Higher interval: Less detail, less storage, less CPU
+  # RECOMMENDATION: 15s for dev/staging, 30s-60s for large production
+  scrape_interval: 15s
+  
+  # Timeout for each scrape attempt
+  # Should be < scrape_interval to avoid overlapping scrapes
+  scrape_timeout: 10s
+  
+  # How often to evaluate alerting rules
+  # Usually same as scrape_interval
+  evaluation_interval: 15s
+  
+  # Labels added to all metrics and alerts
+  # Useful for identifying which environment/cluster metrics came from
+  external_labels:
+    cluster: 'goqueue-dev'
+    environment: 'development'
+
+# -----------------------------------------------------------------------------
+# ALERTMANAGER CONFIGURATION
+# -----------------------------------------------------------------------------
+# Tell Prometheus where to send alerts when rules fire.
+# Alertmanager handles routing, grouping, silencing, and notification.
+# -----------------------------------------------------------------------------
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+          # Alertmanager default port
+          # For multiple Alertmanagers (HA), list all:
+          #   - alertmanager-1:9093
+          #   - alertmanager-2:9093
+          - alertmanager:9093
+
+# -----------------------------------------------------------------------------
+# RULE FILES
+# -----------------------------------------------------------------------------
+# Paths to files containing recording rules and alerting rules.
+# Recording rules: Pre-compute expensive queries, store as new metrics.
+# Alerting rules: Fire alerts when conditions are met.
+# -----------------------------------------------------------------------------
+
+rule_files:
+  - /etc/prometheus/alerts/*.yaml
+  # You can also add recording rules:
+  # - /etc/prometheus/rules/*.yaml
+
+# -----------------------------------------------------------------------------
+# SCRAPE CONFIGURATIONS
+# -----------------------------------------------------------------------------
+# Define what to scrape and how.
+# Each job_name creates a separate scrape configuration.
+# -----------------------------------------------------------------------------
+
+scrape_configs:
+  # ---------------------------------------------------------------------------
+  # PROMETHEUS SELF-MONITORING
+  # ---------------------------------------------------------------------------
+  # Prometheus scrapes itself for meta-metrics:
+  #   - prometheus_tsdb_* (storage health)
+  #   - prometheus_engine_* (query performance)
+  #   - prometheus_target_* (scrape health)
+  #
+  # Essential for monitoring your monitoring!
+  # ---------------------------------------------------------------------------
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+    # Relabel configs can transform labels during scrape
+    # Here we add a descriptive label
+    relabel_configs:
+      - target_label: service
+        replacement: 'prometheus'
+
+  # ---------------------------------------------------------------------------
+  # GOQUEUE BROKER METRICS
+  # ---------------------------------------------------------------------------
+  # Scrape metrics from GoQueue broker instances.
+  # 
+  # STATIC VS DYNAMIC DISCOVERY:
+  #   - static_configs: Manual list (shown here, good for dev)
+  #   - file_sd_configs: Read targets from file (updated by orchestrator)
+  #   - kubernetes_sd_configs: Auto-discover pods in K8s
+  #   - consul_sd_configs: Service discovery via Consul
+  #   - ec2_sd_configs: AWS EC2 instance discovery
+  #
+  # For production, use service discovery to avoid manual config updates.
+  # ---------------------------------------------------------------------------
+  - job_name: 'goqueue'
+    # How often to scrape this job (overrides global)
+    scrape_interval: 10s
+    
+    # Metrics endpoint path (default: /metrics)
+    metrics_path: /metrics
+    
+    # HTTP scheme (http or https)
+    scheme: http
+    
+    # Static targets (for development)
+    static_configs:
+      - targets:
+        # Single broker
+        - 'goqueue:8080'
+        # For multi-node cluster, list all:
+        # - 'goqueue-1:8080'
+        # - 'goqueue-2:8080'
+        # - 'goqueue-3:8080'
+        labels:
+          # Add custom labels to all metrics from this target
+          service: 'goqueue'
+          role: 'broker'
+    
+    # Example: File-based service discovery (for dynamic environments)
+    # file_sd_configs:
+    #   - files:
+    #     - /etc/prometheus/targets/goqueue/*.json
+    #     refresh_interval: 30s
+    
+    # Example: Kubernetes service discovery
+    # kubernetes_sd_configs:
+    #   - role: pod
+    #     selectors:
+    #       - role: pod
+    #         label: "app=goqueue"
+    
+    # Relabel configs for transforming labels
+    relabel_configs:
+      # Extract node_id from target address for identification
+      - source_labels: [__address__]
+        regex: '([^:]+):\d+'
+        target_label: node
+        replacement: '${1}'
+
+  # ---------------------------------------------------------------------------
+  # NODE EXPORTER (OPTIONAL)
+  # ---------------------------------------------------------------------------
+  # Node Exporter provides host-level metrics:
+  #   - CPU, memory, disk, network
+  #   - Filesystem usage
+  #   - System load
+  #
+  # Highly recommended for correlating application issues with infra.
+  # "Slow publishes" might be caused by disk I/O saturation visible here.
+  # ---------------------------------------------------------------------------
+  - job_name: 'node-exporter'
+    static_configs:
+      - targets:
+        - 'node-exporter:9100'
+    relabel_configs:
+      - target_label: service
+        replacement: 'node-exporter'
+
+# -----------------------------------------------------------------------------
+# STORAGE CONFIGURATION (OPTIONAL)
+# -----------------------------------------------------------------------------
+# Control how Prometheus stores metrics.
+# These flags are typically set via command line, not config file.
+#
+# Key flags:
+#   --storage.tsdb.path=/prometheus          # Data directory
+#   --storage.tsdb.retention.time=15d        # How long to keep data
+#   --storage.tsdb.retention.size=50GB       # Max storage size
+#   --storage.tsdb.wal-compression           # Compress WAL (recommended)
+#
+# RETENTION TRADEOFFS:
+#   - Longer retention: More history, more disk, slower queries
+#   - Shorter retention: Less history, less disk, faster queries
+#   - Use remote_write for long-term storage (Thanos, Cortex, Mimir)
+# -----------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
+# REMOTE WRITE (OPTIONAL)
+# -----------------------------------------------------------------------------
+# Send metrics to external long-term storage.
+# Prometheus's local TSDB is not designed for months/years of retention.
+#
+# Options:
+#   - Thanos: Multi-cluster, S3 backend, global view
+#   - Cortex: Multi-tenant, horizontally scalable
+#   - Mimir: Grafana's fork of Cortex, simplified
+#   - Victoria Metrics: Resource-efficient, Prometheus-compatible
+#
+# remote_write:
+#   - url: "http://thanos-receive:19291/api/v1/receive"
+#     queue_config:
+#       max_samples_per_send: 10000
+#       batch_send_deadline: 5s
+# -----------------------------------------------------------------------------

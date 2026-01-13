@@ -33,6 +33,7 @@ import (
 	"goqueue/internal/api"
 	"goqueue/internal/broker"
 	"goqueue/internal/grpc"
+	"goqueue/internal/metrics"
 )
 
 func main() {
@@ -68,6 +69,43 @@ func main() {
 
 	fmt.Printf("   ✓ Broker started (NodeID: %s)\n", b.NodeID())
 	fmt.Printf("   ✓ Data directory: %s\n\n", b.DataDir())
+
+	// -------------------------------------------------------------------------
+	// STEP 1b: Initialize Prometheus Metrics (M17)
+	// -------------------------------------------------------------------------
+	// ┌─────────────────────────────────────────────────────────────────────────┐
+	// │ PROMETHEUS METRICS - Observability for Production                       │
+	// │                                                                         │
+	// │ WHY METRICS MATTER:                                                     │
+	// │   - Monitor message throughput (messages/sec)                           │
+	// │   - Track latencies (p50, p95, p99)                                     │
+	// │   - Alert on errors and anomalies                                       │
+	// │   - Debug performance issues                                            │
+	// │   - Capacity planning                                                   │
+	// │                                                                         │
+	// │ EXPOSED AT: http://localhost:8080/metrics                               │
+	// │                                                                         │
+	// │ METRICS CATEGORIES:                                                     │
+	// │   - Broker: messages published/consumed, latencies, errors              │
+	// │   - Storage: bytes written/read, fsync latency                          │
+	// │   - Consumer: group members, lag, rebalances                            │
+	// │   - Cluster: node health, leader elections, ISR changes                 │
+	// │   - Go runtime: goroutines, memory, GC (optional)                       │
+	// │                                                                         │
+	// │ COMPARISON:                                                             │
+	// │   - Kafka: JMX metrics, Confluent metrics reporter                      │
+	// │   - RabbitMQ: Prometheus plugin                                         │
+	// │   - SQS: CloudWatch metrics (AWS managed)                               │
+	// │   - goqueue: Prometheus client_golang                                   │
+	// └─────────────────────────────────────────────────────────────────────────┘
+	fmt.Println("📊 Initializing Prometheus metrics...")
+	metricsConfig := metrics.DefaultConfig()
+	metricsConfig.Enabled = true
+	metricsConfig.IncludeGoCollector = true      // Include Go runtime metrics
+	metricsConfig.IncludeProcessCollector = true // Include process metrics
+	metrics.Init(metricsConfig)
+	fmt.Println("   ✓ Metrics initialized (endpoint: /metrics)")
+	fmt.Println()
 
 	// -------------------------------------------------------------------------
 	// STEP 2: Create a multi-partition topic
