@@ -1,0 +1,508 @@
+# ============================================================================
+# GOQUEUE PROMETHEUS ALERT RULES
+# ============================================================================
+#
+# WHAT THIS FILE DOES:
+# Defines alerting rules that Prometheus evaluates against your metrics.
+# When a rule's condition is true for the specified duration, Prometheus
+# fires an alert to Alertmanager, which then routes it to your notification
+# channels (Slack, PagerDuty, email, etc.).
+#
+# HOW PROMETHEUS ALERTING WORKS:
+#
+#   ┌─────────────┐  scrape   ┌────────────────┐
+#   │  GoQueue    │──────────►│  Prometheus    │
+#   │  /metrics   │           │                │
+#   └─────────────┘           └───────┬────────┘
+#                                     │
+#                                     │ evaluate rules
+#                                     ▼
+#                             ┌────────────────┐
+#                             │  Alert Rules   │◄── This file
+#                             │  (this file)   │
+#                             └───────┬────────┘
+#                                     │
+#                                     │ fire alerts
+#                                     ▼
+#                             ┌────────────────┐
+#                             │ Alertmanager   │
+#                             │                │
+#                             └───────┬────────┘
+#                                     │
+#                        ┌────────────┼────────────┐
+#                        ▼            ▼            ▼
+#                    ┌───────┐  ┌───────────┐  ┌───────┐
+#                    │ Slack │  │ PagerDuty │  │ Email │
+#                    └───────┘  └───────────┘  └───────┘
+#
+# ALERT STATES:
+#   - inactive: Condition is false (healthy)
+#   - pending: Condition is true, but `for` duration hasn't elapsed
+#   - firing: Condition true for >= `for` duration, alert sent
+#
+# WHY `for` DURATION MATTERS:
+# Prevents alert flapping (brief spikes firing alerts). A 5m duration means
+# the condition must be continuously true for 5 minutes before firing.
+#
+# COMPARISON WITH OTHER SYSTEMS:
+#   - Datadog: Monitors with evaluation window
+#   - PagerDuty: Events API with deduplication
+#   - CloudWatch: Alarms with periods and datapoints
+#   - Prometheus: Rules with `for` duration (this)
+#
+# ALERT DESIGN PRINCIPLES:
+#   1. Alert on symptoms, not causes (high latency, not high CPU)
+#   2. Each alert should be actionable (can someone fix it at 3am?)
+#   3. Include runbook links in annotations
+#   4. Use severity labels for routing (critical → PagerDuty, warning → Slack)
+#   5. Prefer rate() over instant values for stability
+#
+# ============================================================================
+
+groups:
+  # ===========================================================================
+  # CONSUMER LAG ALERTS
+  # ===========================================================================
+  # Consumer lag = how many messages consumers are behind producers.
+  # High lag means:
+  #   1. Consumers can't keep up with production rate
+  #   2. Processing will be delayed
+  #   3. May need more consumer instances
+  #
+  # KAFKA COMPARISON:
+  # Kafka has similar alerts via Burrow or kafka-consumer-lag-exporter.
+  # Our approach matches Kafka's: expose LEO + committed offset, calculate lag.
+  # ===========================================================================
+  
+  - name: goqueue.consumer
+    rules:
+      # -----------------------------------------------------------------------
+      # HIGH CONSUMER LAG (WARNING)
+      # -----------------------------------------------------------------------
+      # Fires when any consumer group is > 10,000 messages behind for 5 min.
+      # This is an early warning - consumers are falling behind but not critical.
+      #
+      # THRESHOLD RATIONALE:
+      #   - 10,000 messages at 1KB avg = 10MB of backlog
+      #   - At 1000 msg/sec consumption, that's 10 seconds of lag
+      #   - Enough to notice but not emergency
+      #
+      # WHAT TO DO WHEN THIS FIRES:
+      #   1. Check consumer CPU/memory - may be overloaded
+      #   2. Check network latency between consumers and broker
+      #   3. Check if consumers are rebalancing frequently
+      #   4. Consider adding more consumer instances
+      # -----------------------------------------------------------------------
+      - alert: GoQueueHighConsumerLag
+        # PromQL expression: calculate lag by subtracting committed from LEO
+        # sum by (consumer_group, topic) aggregates across partitions
+        expr: |
+          sum by (consumer_group, topic) (
+            goqueue_storage_log_end_offset - on(topic) group_left(consumer_group)
+            goqueue_consumer_committed_offset
+          ) > 10000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High consumer lag for {{ $labels.consumer_group }}"
+          description: |
+            Consumer group {{ $labels.consumer_group }} is {{ $value | printf "%.0f" }} 
+            messages behind on topic {{ $labels.topic }}.
+            This indicates consumers cannot keep up with production rate.
+          runbook_url: "https://goqueue.dev/runbooks/high-consumer-lag"
+          
+      # -----------------------------------------------------------------------
+      # CRITICAL CONSUMER LAG
+      # -----------------------------------------------------------------------
+      # Fires when lag exceeds 100,000 messages for 2 min.
+      # This is urgent - significant processing delay, may impact business.
+      #
+      # THRESHOLD RATIONALE:
+      #   - 100,000 messages = significant backlog
+      #   - 2 min `for` duration = confirmed issue, not spike
+      #   - At 1000 msg/sec, that's 100 seconds of delay
+      #
+      # WHAT TO DO WHEN THIS FIRES:
+      #   1. Page on-call engineer
+      #   2. Immediate scale-up of consumers
+      #   3. Check for stuck/crashed consumers
+      #   4. Consider temporarily reducing producer rate
+      # -----------------------------------------------------------------------
+      - alert: GoQueueCriticalConsumerLag
+        expr: |
+          sum by (consumer_group, topic) (
+            goqueue_storage_log_end_offset - on(topic) group_left(consumer_group)
+            goqueue_consumer_committed_offset
+          ) > 100000
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "CRITICAL: Consumer lag for {{ $labels.consumer_group }}"
+          description: |
+            Consumer group {{ $labels.consumer_group }} is {{ $value | printf "%.0f" }} 
+            messages behind on topic {{ $labels.topic }}.
+            IMMEDIATE ACTION REQUIRED - significant processing delay.
+          runbook_url: "https://goqueue.dev/runbooks/critical-consumer-lag"
+          
+      # -----------------------------------------------------------------------
+      # NO OFFSET COMMITS
+      # -----------------------------------------------------------------------
+      # Fires when a consumer group stops committing offsets entirely.
+      # This usually means:
+      #   1. All consumers in the group have crashed
+      #   2. Consumers are stuck in processing (deadlock, infinite loop)
+      #   3. Network partition between consumers and broker
+      #
+      # We use `increase` to check if there have been ANY commits in 10 min.
+      # -----------------------------------------------------------------------
+      - alert: GoQueueNoOffsetCommits
+        expr: |
+          sum by (consumer_group) (
+            increase(goqueue_consumer_offset_commits_total[10m])
+          ) == 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No offset commits from {{ $labels.consumer_group }}"
+          description: |
+            Consumer group {{ $labels.consumer_group }} has not committed any 
+            offsets in the last 10 minutes. Consumers may be dead or stuck.
+          runbook_url: "https://goqueue.dev/runbooks/no-offset-commits"
+
+  # ===========================================================================
+  # CLUSTER HEALTH ALERTS
+  # ===========================================================================
+  # Monitor the distributed system aspects: nodes, partitions, replication.
+  # These are typically the most urgent alerts as they affect availability.
+  # ===========================================================================
+  
+  - name: goqueue.cluster
+    rules:
+      # -----------------------------------------------------------------------
+      # NODE DOWN
+      # -----------------------------------------------------------------------
+      # Fires when total nodes < healthy nodes for > 30 seconds.
+      # A node going down means:
+      #   1. Partitions on that node become unavailable (if it was leader)
+      #   2. Replication is impacted (if it was a follower)
+      #   3. Load redistributes to remaining nodes
+      #
+      # 30s `for` duration avoids alerting on brief network blips.
+      # -----------------------------------------------------------------------
+      - alert: GoQueueNodeDown
+        expr: goqueue_cluster_nodes_total - goqueue_cluster_nodes_healthy > 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "GoQueue node(s) down"
+          description: |
+            {{ $value | printf "%.0f" }} node(s) are currently unhealthy.
+            Total nodes: {{ printf "goqueue_cluster_nodes_total" | query | first | value }}
+            Healthy nodes: {{ printf "goqueue_cluster_nodes_healthy" | query | first | value }}
+          runbook_url: "https://goqueue.dev/runbooks/node-down"
+          
+      # -----------------------------------------------------------------------
+      # OFFLINE PARTITIONS
+      # -----------------------------------------------------------------------
+      # Fires when ANY partition has no leader (offline).
+      # This is the most critical alert - data unavailable!
+      #
+      # WHAT CAUSES OFFLINE PARTITIONS:
+      #   1. Leader node crashed and no ISR replica can take over
+      #   2. All replicas for a partition are down
+      #   3. Unclean leader election disabled and leader failed
+      #
+      # KAFKA COMPARISON:
+      # This is equivalent to Kafka's `OfflinePartitionsCount` JMX metric.
+      # Kafka also alerts when this is > 0.
+      # -----------------------------------------------------------------------
+      - alert: GoQueueOfflinePartitions
+        expr: goqueue_cluster_offline_partitions > 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "GoQueue has {{ $value }} offline partition(s)"
+          description: |
+            {{ $value | printf "%.0f" }} partition(s) have no leader and are 
+            unavailable for reads and writes.
+            IMMEDIATE ACTION REQUIRED - data unavailable!
+          runbook_url: "https://goqueue.dev/runbooks/offline-partitions"
+          
+      # -----------------------------------------------------------------------
+      # UNDER-REPLICATED PARTITIONS
+      # -----------------------------------------------------------------------
+      # Fires when ISR size < configured replication factor.
+      # Not immediately critical (leader still works) but durability at risk.
+      #
+      # WHAT CAUSES UNDER-REPLICATION:
+      #   1. Follower node is down
+      #   2. Follower can't keep up with leader (slow disk, network)
+      #   3. Follower was just added and is catching up
+      #
+      # 5m `for` duration allows time for followers to catch up after restarts.
+      # -----------------------------------------------------------------------
+      - alert: GoQueueUnderReplicatedPartitions
+        expr: goqueue_cluster_under_replicated_partitions > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "GoQueue has {{ $value }} under-replicated partition(s)"
+          description: |
+            {{ $value | printf "%.0f" }} partition(s) have fewer in-sync replicas 
+            than the configured replication factor.
+            Data durability is at risk if the leader fails.
+          runbook_url: "https://goqueue.dev/runbooks/under-replicated"
+          
+      # -----------------------------------------------------------------------
+      # ISR SHRINKS
+      # -----------------------------------------------------------------------
+      # Fires when ISR is shrinking frequently (replicas falling behind).
+      # Frequent shrinks indicate:
+      #   1. Disk I/O bottleneck on followers
+      #   2. Network issues between nodes
+      #   3. Followers are overloaded
+      #
+      # 10 shrinks in 5 min is abnormal - occasional shrinks are okay.
+      # -----------------------------------------------------------------------
+      - alert: GoQueueISRShrinking
+        expr: |
+          sum(increase(goqueue_cluster_isr_shrinks_total[5m])) > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Frequent ISR shrinks detected"
+          description: |
+            {{ $value | printf "%.0f" }} ISR shrink events in the last 5 minutes.
+            Replicas are having trouble keeping up with leaders.
+          runbook_url: "https://goqueue.dev/runbooks/isr-shrinking"
+          
+      # -----------------------------------------------------------------------
+      # FREQUENT LEADER ELECTIONS
+      # -----------------------------------------------------------------------
+      # Fires when there are too many leader elections in a short period.
+      # Frequent elections indicate cluster instability:
+      #   1. Nodes flapping (repeatedly joining/leaving)
+      #   2. Network partitions
+      #   3. ZooKeeper (if used) connectivity issues
+      #
+      # Elections are expensive - each one causes brief unavailability.
+      # -----------------------------------------------------------------------
+      - alert: GoQueueFrequentLeaderElections
+        expr: |
+          sum(increase(goqueue_cluster_leader_elections_total[15m])) > 20
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Frequent leader elections detected"
+          description: |
+            {{ $value | printf "%.0f" }} leader elections in the last 15 minutes.
+            This indicates cluster instability.
+          runbook_url: "https://goqueue.dev/runbooks/frequent-elections"
+
+  # ===========================================================================
+  # LATENCY ALERTS
+  # ===========================================================================
+  # Monitor operation latencies to catch performance degradation.
+  # High latency = slow experience for producers/consumers.
+  # ===========================================================================
+  
+  - name: goqueue.latency
+    rules:
+      # -----------------------------------------------------------------------
+      # HIGH PUBLISH LATENCY
+      # -----------------------------------------------------------------------
+      # Fires when p99 publish latency exceeds 100ms for 5 min.
+      # Target is p99 < 10ms, so 100ms is a 10x degradation.
+      #
+      # WHAT CAUSES HIGH PUBLISH LATENCY:
+      #   1. Disk I/O saturation (fsync bottleneck)
+      #   2. Network congestion to broker
+      #   3. Replication taking too long (acks=all)
+      #   4. Memory pressure (GC pauses)
+      #
+      # histogram_quantile calculates percentiles from histogram buckets.
+      # -----------------------------------------------------------------------
+      - alert: GoQueueHighPublishLatency
+        expr: |
+          histogram_quantile(0.99, 
+            sum(rate(goqueue_broker_publish_latency_seconds_bucket[5m])) by (le, topic)
+          ) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High publish latency on topic {{ $labels.topic }}"
+          description: |
+            p99 publish latency is {{ $value | printf "%.3f" }}s 
+            (target < 0.01s) on topic {{ $labels.topic }}.
+          runbook_url: "https://goqueue.dev/runbooks/high-publish-latency"
+          
+      # -----------------------------------------------------------------------
+      # HIGH FETCH LATENCY
+      # -----------------------------------------------------------------------
+      # Fires when p99 fetch (consume) latency exceeds 50ms for 5 min.
+      # Fetch should be even faster than publish (no fsync needed).
+      #
+      # WHAT CAUSES HIGH FETCH LATENCY:
+      #   1. Not enough data cached in memory (reading from disk)
+      #   2. Large batch sizes causing serialization overhead
+      #   3. Network congestion
+      #   4. Index corruption (slow offset lookups)
+      # -----------------------------------------------------------------------
+      - alert: GoQueueHighFetchLatency
+        expr: |
+          histogram_quantile(0.99, 
+            sum(rate(goqueue_broker_fetch_latency_seconds_bucket[5m])) by (le, consumer_group)
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High fetch latency for {{ $labels.consumer_group }}"
+          description: |
+            p99 fetch latency is {{ $value | printf "%.3f" }}s 
+            (target < 0.005s) for consumer group {{ $labels.consumer_group }}.
+          runbook_url: "https://goqueue.dev/runbooks/high-fetch-latency"
+
+  # ===========================================================================
+  # STORAGE ALERTS
+  # ===========================================================================
+  # Monitor disk I/O and storage health.
+  # Storage issues can cause data loss or unavailability.
+  # ===========================================================================
+  
+  - name: goqueue.storage
+    rules:
+      # -----------------------------------------------------------------------
+      # FSYNC ERRORS
+      # -----------------------------------------------------------------------
+      # Fires when fsync operations are failing.
+      # fsync errors mean data may not be durably persisted!
+      #
+      # WHAT CAUSES FSYNC ERRORS:
+      #   1. Disk full
+      #   2. Disk hardware failure
+      #   3. Filesystem corruption
+      #   4. I/O errors from storage backend
+      #
+      # ANY fsync error is serious - data loss possible.
+      # -----------------------------------------------------------------------
+      - alert: GoQueueFsyncErrors
+        expr: |
+          increase(goqueue_storage_fsync_errors_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "fsync errors on GoQueue storage"
+          description: |
+            {{ $value | printf "%.0f" }} fsync errors in the last 5 minutes 
+            on topic {{ $labels.topic }}.
+            DATA DURABILITY AT RISK - check disk health immediately!
+          runbook_url: "https://goqueue.dev/runbooks/fsync-errors"
+          
+      # -----------------------------------------------------------------------
+      # HIGH FSYNC LATENCY
+      # -----------------------------------------------------------------------
+      # Fires when fsync is taking too long.
+      # Slow fsync means disk is bottlenecked - publish latency will suffer.
+      #
+      # p99 fsync > 100ms indicates serious disk contention.
+      # Consider:
+      #   1. Faster disks (NVMe vs SSD vs HDD)
+      #   2. Battery-backed write cache
+      #   3. Reducing fsync frequency (trade durability for speed)
+      # -----------------------------------------------------------------------
+      - alert: GoQueueHighFsyncLatency
+        expr: |
+          histogram_quantile(0.99, 
+            sum(rate(goqueue_storage_fsync_latency_seconds_bucket[5m])) by (le, topic)
+          ) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High fsync latency on topic {{ $labels.topic }}"
+          description: |
+            p99 fsync latency is {{ $value | printf "%.3f" }}s 
+            on topic {{ $labels.topic }}.
+            Disk I/O may be saturated.
+          runbook_url: "https://goqueue.dev/runbooks/high-fsync-latency"
+
+  # ===========================================================================
+  # BROKER ERRORS
+  # ===========================================================================
+  # Monitor error rates for publish/consume operations.
+  # Errors indicate problems that clients are experiencing.
+  # ===========================================================================
+  
+  - name: goqueue.errors
+    rules:
+      # -----------------------------------------------------------------------
+      # HIGH ERROR RATE
+      # -----------------------------------------------------------------------
+      # Fires when error rate exceeds 1% of publish attempts.
+      # Some errors are expected (validation, rate limiting), but 1% is high.
+      #
+      # WHAT CAUSES HIGH ERROR RATE:
+      #   1. Schema validation failures (bad producer code)
+      #   2. Topic not found (misconfiguration)
+      #   3. Rate limiting (producer sending too fast)
+      #   4. Broker overloaded
+      #
+      # `rate` on a counter gives events per second.
+      # We compare error rate to total publish rate.
+      # -----------------------------------------------------------------------
+      - alert: GoQueueHighErrorRate
+        expr: |
+          sum(rate(goqueue_broker_messages_failed_total[5m])) 
+          / 
+          sum(rate(goqueue_broker_messages_published_total[5m])) 
+          > 0.01
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High message failure rate"
+          description: |
+            {{ $value | printf "%.2f" | mul 100 }}% of publish attempts are failing.
+            Check error types for root cause.
+          runbook_url: "https://goqueue.dev/runbooks/high-error-rate"
+          
+      # -----------------------------------------------------------------------
+      # FREQUENT REBALANCES
+      # -----------------------------------------------------------------------
+      # Fires when consumer groups are rebalancing too often.
+      # Each rebalance causes processing pause - frequent rebalances hurt throughput.
+      #
+      # WHAT CAUSES FREQUENT REBALANCES:
+      #   1. Consumers crashing/restarting
+      #   2. Session timeout too short
+      #   3. max.poll.interval.ms exceeded (slow processing)
+      #   4. Network instability
+      #
+      # 5 rebalances in 5 min is abnormal for a stable consumer group.
+      # -----------------------------------------------------------------------
+      - alert: GoQueueFrequentRebalances
+        expr: |
+          sum by (consumer_group) (
+            increase(goqueue_consumer_rebalances_total[5m])
+          ) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Frequent rebalances in {{ $labels.consumer_group }}"
+          description: |
+            Consumer group {{ $labels.consumer_group }} has rebalanced 
+            {{ $value | printf "%.0f" }} times in the last 5 minutes.
+            This indicates consumer instability.
+          runbook_url: "https://goqueue.dev/runbooks/frequent-rebalances"

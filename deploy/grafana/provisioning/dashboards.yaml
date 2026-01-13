@@ -1,0 +1,95 @@
+# ============================================================================
+# GRAFANA DASHBOARD PROVISIONING
+# ============================================================================
+#
+# WHAT THIS FILE DOES:
+# This YAML file tells Grafana where to automatically find and load dashboards.
+# Instead of manually importing dashboards through the UI, Grafana reads this
+# config and loads all JSON files from the specified folder on startup.
+#
+# WHY PROVISIONING MATTERS:
+# 1. Infrastructure as Code - Dashboards are version-controlled with your app
+# 2. Reproducible deployments - Same dashboards in dev, staging, prod
+# 3. No manual steps - Spin up Grafana and dashboards are already there
+# 4. Team collaboration - PR reviews for dashboard changes
+#
+# HOW IT WORKS:
+#   1. Place this file in: /etc/grafana/provisioning/dashboards/
+#   2. Place dashboard JSONs in the path specified below
+#   3. Grafana scans the folder on startup and creates/updates dashboards
+#   4. Set updateIntervalSeconds for live-reload during development
+#
+# COMPARISON WITH OTHER SYSTEMS:
+#   - Datadog: Terraform provider or API for dashboard-as-code
+#   - New Relic: NerdGraph API or Terraform
+#   - Kibana: Saved objects API, no native file-based provisioning
+#   - Grafana: Native file-based provisioning (this) or Terraform
+#
+# FLOW:
+#   ┌─────────────────────┐    Scan    ┌──────────────────────┐
+#   │ dashboards.yaml     │───────────►│ Grafana Provisioner  │
+#   │ (this file)         │            │                      │
+#   └─────────────────────┘            └──────────┬───────────┘
+#                                                 │
+#                                                 │ Load JSONs
+#                                                 ▼
+#                                      ┌──────────────────────┐
+#                                      │ /dashboards/*.json   │
+#                                      │ - goqueue-overview   │
+#                                      │ - goqueue-consumers  │
+#                                      │ - goqueue-cluster    │
+#                                      └──────────────────────┘
+#
+# ============================================================================
+
+apiVersion: 1
+
+# -----------------------------------------------------------------------------
+# DASHBOARD PROVIDERS
+# -----------------------------------------------------------------------------
+# Each provider points to a folder containing dashboard JSON files.
+# You can have multiple providers for different dashboard categories.
+# -----------------------------------------------------------------------------
+
+providers:
+  - name: 'goqueue'
+    # Unique identifier for this provider
+    orgId: 1
+    # Default organization (Grafana supports multi-tenancy)
+    
+    folder: 'GoQueue'
+    # Dashboard folder in Grafana UI. Creates if doesn't exist.
+    # Helps organize dashboards: GoQueue, Infrastructure, App, etc.
+    
+    folderUid: 'goqueue-folder'
+    # Stable identifier for the folder (survives renames)
+    
+    type: file
+    # Provider type. Options:
+    #   - file: Load from local filesystem (most common)
+    #   - (Grafana Enterprise has additional options like git)
+    
+    disableDeletion: false
+    # If true, prevents deleting dashboards through UI
+    # Set to true in production to prevent accidental deletion
+    
+    updateIntervalSeconds: 30
+    # How often to check for changes (seconds)
+    # Lower = faster updates during development
+    # Higher = less I/O in production (300+ recommended)
+    
+    allowUiUpdates: true
+    # If true, changes made in UI are saved
+    # If false, UI changes are lost on next reload (enforces IaC)
+    # RECOMMENDATION:
+    #   - Development: true (experiment freely)
+    #   - Production: false (enforce GitOps workflow)
+    
+    options:
+      path: /var/lib/grafana/dashboards/goqueue
+      # Path to dashboard JSON files (inside container)
+      # For Docker, mount your local dashboards folder here:
+      #   -v ./deploy/grafana/dashboards:/var/lib/grafana/dashboards/goqueue
+      #
+      # For local development without Docker:
+      #   path: ./deploy/grafana/dashboards

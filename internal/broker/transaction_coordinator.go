@@ -567,6 +567,9 @@ func (tc *TransactionCoordinator) Heartbeat(transactionalId string, pid Producer
 //   - ErrTransactionAlreadyExists: Transaction already in progress
 //   - ErrUnknownProducerId: Producer not initialized
 func (tc *TransactionCoordinator) BeginTransaction(transactionalId string, pid ProducerIdAndEpoch) (string, error) {
+	// METRICS: Track transaction start time for latency measurement
+	txnStartTime := InstrumentTransactionStarted()
+
 	tc.closeMu.RLock()
 	if tc.closed {
 		tc.closeMu.RUnlock()
@@ -604,6 +607,9 @@ func (tc *TransactionCoordinator) BeginTransaction(transactionalId string, pid P
 
 	// Create transaction metadata
 	txnMeta := NewTransactionMetadata(txnId, transactionalId, pid.ProducerId, pid.Epoch, state.TransactionTimeoutMs)
+
+	// Store transaction start time for latency tracking on commit/abort
+	txnMeta.StartTime = txnStartTime
 
 	tc.txnMu.Lock()
 	tc.transactions[txnId] = txnMeta
@@ -791,6 +797,13 @@ func (tc *TransactionCoordinator) CommitTransaction(transactionalId string, pid 
 			"transactionalId", transactionalId)
 	}
 
+	// METRICS: Record successful transaction commit with latency
+	tc.txnMu.RLock()
+	if txn != nil && !txn.StartTime.IsZero() {
+		InstrumentTransactionCommitted(txn.StartTime)
+	}
+	tc.txnMu.RUnlock()
+
 	tc.logger.Info("transaction committed",
 		"transactionalId", transactionalId,
 		"transactionId", txnId)
@@ -891,6 +904,9 @@ func (tc *TransactionCoordinator) abortTransactionInternal(transactionalId, txnI
 			"error", err,
 			"transactionalId", transactionalId)
 	}
+
+	// METRICS: Record transaction abort
+	InstrumentTransactionAborted()
 
 	tc.logger.Info("transaction aborted",
 		"transactionalId", transactionalId,
