@@ -101,6 +101,12 @@ func NewClient(config ClientConfig) *Client {
 // HTTP HELPERS
 // =============================================================================
 
+// DoRequest is the exported wrapper for making HTTP requests.
+// Used by the admin CLI for tenant management operations.
+func (c *Client) DoRequest(ctx context.Context, method, path string, body interface{}, result interface{}) error {
+	return c.doRequest(ctx, method, path, body, result)
+}
+
 // doRequest executes an HTTP request and decodes the JSON response.
 func (c *Client) doRequest(ctx context.Context, method, path string, body interface{}, result interface{}) error {
 	// Build URL
