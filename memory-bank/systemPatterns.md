@@ -634,6 +634,92 @@ Timeout Hierarchy:
 └─────────────────────────────────────────────────────────────────┘
 ```
 
+## Multi-Tenancy Patterns
+
+### QuotaEnforcer Strategy Pattern
+
+**Problem**: Multi-tenancy is optional. Without an interface, we'd have scattered nil checks:
+```go
+// Bad: 14 places with this pattern
+if b.tenantManager != nil {
+    if err := b.quotaManager.CheckPublishQuota(...); err != nil {
+        return err
+    }
+}
+```
+
+**Solution**: Strategy pattern with QuotaEnforcer interface
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│                      QuotaEnforcer Interface                       │
+├────────────────────────────────────────────────────────────────────┤
+│  CheckPublish(tenantID, msgSize) error                             │
+│  CheckPublishBatch(tenantID, count, totalSize) error               │
+│  CheckConsume(tenantID, count) error                               │
+│  CheckTopicCreation(tenantID) error                                │
+│  CheckConsumerGroup(tenantID) error                                │
+│  CheckDelay(tenantID) error                                        │
+│  TrackUsage(tenantID, msgs, bytes, msgsConsumed, bytesConsumed)    │
+│  IsEnabled() bool                                                  │
+└────────────────────────────────────────────────────────────────────┘
+               ▲                              ▲
+               │                              │
+    ┌──────────┴──────────┐      ┌───────────┴───────────┐
+    │    NoOpEnforcer     │      │  TenantQuotaEnforcer  │
+    │  (single-tenant)    │      │   (multi-tenant)      │
+    ├─────────────────────┤      ├───────────────────────┤
+    │ All methods return  │      │ Delegates to:         │
+    │ nil (no-op)         │      │ - TenantManager       │
+    │ Zero overhead       │      │ - QuotaManager        │
+    │ IsEnabled() → false │      │ IsEnabled() → true    │
+    └─────────────────────┘      └───────────────────────┘
+```
+
+**Why this works**:
+- Clean broker code: `b.quotaEnforcer.CheckPublish(...)` - no conditionals
+- Zero overhead in single-tenant: NoOpEnforcer methods are inlined
+- Testable: Can inject mock enforcers
+- Single responsibility: Quota logic isolated from broker
+
+**Broker initialization**:
+```go
+if cfg.EnableMultiTenancy {
+    b.quotaEnforcer = NewTenantQuotaEnforcer(b.tenantManager, b.quotaManager)
+} else {
+    b.quotaEnforcer = &NoOpEnforcer{}
+}
+```
+
+### Token Bucket Rate Limiting
+
+Per-tenant rate limits using the token bucket algorithm:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      Token Bucket (per tenant)                  │
+├─────────────────────────────────────────────────────────────────┤
+│  capacity: 1000 tokens (max burst)                              │
+│  tokens: 850 (current available)                                │
+│  refillRate: 100 tokens/second                                  │
+│  lastRefill: time.Now()                                         │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   [●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●○○○○○○○○○]  85% full        │
+│                                                                 │
+│   Request 10 tokens → consume → 840 remaining                   │
+│   Request 900 tokens → DENIED (insufficient)                    │
+│   Wait 1.5s → 840 + 150 = 990 tokens                            │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Why token bucket?**
+- Allows bursts up to capacity
+- Smooths traffic over time
+- O(1) check operations
+- Industry standard (used by AWS, GCP)
+
 ## Concurrency Patterns
 
 ### Per-Partition Locking

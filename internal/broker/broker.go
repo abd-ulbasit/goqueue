@@ -101,6 +101,40 @@ type BrokerConfig struct {
 
 	// ClusterConfig contains cluster configuration (only used if ClusterEnabled)
 	ClusterConfig *ClusterModeConfig
+
+	// ==========================================================================
+	// MULTI-TENANCY CONFIGURATION
+	// ==========================================================================
+	//
+	// WHY OPTIONAL?
+	// Multi-tenancy adds overhead (quota checks, namespace resolution) that's
+	// unnecessary in single-customer deployments. GoQueue supports two modes:
+	//
+	// SINGLE-TENANT MODE (Default):
+	//   - No namespace prefixing (topics are "orders", not "tenant1.orders")
+	//   - No quota enforcement
+	//   - No tenant isolation
+	//   - Zero overhead from multi-tenancy features
+	//   - Ideal for: Kubernetes deployments where each customer gets their own cluster
+	//
+	// MULTI-TENANT MODE (EnableMultiTenancy=true):
+	//   - Topic prefixing: {tenantID}.{topicName}
+	//   - Per-tenant quotas (rate limits, storage, message count)
+	//   - Tenant isolation (one tenant can't see another's topics)
+	//   - Usage tracking and statistics
+	//   - Ideal for: Managed service / SaaS deployments
+	//
+	// COMPARISON TO OTHER SYSTEMS:
+	//   - Kafka: Multi-tenancy via topic prefixes (manual) or separate clusters
+	//   - RabbitMQ: Virtual hosts (vhosts) for tenant isolation
+	//   - SQS: AWS accounts provide tenant isolation
+	//
+	// ==========================================================================
+
+	// EnableMultiTenancy activates tenant isolation and quota enforcement.
+	// When false (default), the broker runs in single-tenant mode with no
+	// namespace prefixing or quota checks.
+	EnableMultiTenancy bool
 }
 
 // ClusterModeConfig contains cluster-specific configuration.
@@ -404,6 +438,36 @@ type Broker struct {
 	// ==========================================================================
 	cooperativeGroupCoordinator *CooperativeGroupCoordinator
 
+	// ==========================================================================
+	// MILESTONE 18: MULTI-TENANCY AND QUOTAS
+	// ==========================================================================
+	//
+	// The tenant manager provides multi-tenant isolation and resource control:
+	//   - Namespace isolation: Topics prefixed with tenant ID (e.g., "acme.orders")
+	//   - Quota enforcement: Rate limits, storage limits, topic count limits
+	//   - Usage tracking: Messages published/consumed, bytes transferred
+	//   - Lifecycle management: Suspend, disable, delete tenants
+	//
+	// COMPARISON:
+	//   - Kafka: Client quotas + topic prefixes (convention-based)
+	//   - RabbitMQ: Virtual hosts for isolation
+	//   - SQS: AWS account-level isolation
+	//   - goqueue: Namespace isolation + token bucket rate limiting
+	//
+	// QUOTA TYPES:
+	//   - Rate limits: Token bucket algorithm (publish rate, consume rate)
+	//   - Storage limits: Max bytes, max topics, max partitions
+	//   - Size limits: Max message size, max retention
+	//
+	// ==========================================================================
+	tenantManager *TenantManager
+
+	// quotaEnforcer handles quota checks - strategy pattern:
+	//   - NoOpEnforcer: Single-tenant mode (always allows, zero overhead)
+	//   - TenantQuotaEnforcer: Multi-tenant mode (actual quota checks)
+	// This eliminates scattered `if tenantManager != nil` checks.
+	quotaEnforcer QuotaEnforcer
+
 	// mu protects topics map
 	mu sync.RWMutex
 
@@ -663,6 +727,54 @@ func NewBroker(config BrokerConfig) (*Broker, error) {
 	cooperativeGroupCoordinator := NewCooperativeGroupCoordinator(groupCoordinator, coopConfig)
 	broker.cooperativeGroupCoordinator = cooperativeGroupCoordinator
 
+	// ==========================================================================
+	// MILESTONE 18: INITIALIZE TENANT MANAGER (OPTIONAL)
+	// ==========================================================================
+	//
+	// Multi-tenancy is OPTIONAL and disabled by default. When disabled:
+	//   - No TenantManager is created
+	//   - NoOpEnforcer is used (zero overhead quota checks)
+	//   - No namespace prefixing
+	//   - Topics are accessed directly by name
+	//
+	// When enabled (config.EnableMultiTenancy = true):
+	//   - TenantManager handles tenant CRUD and quota enforcement
+	//   - TenantQuotaEnforcer provides actual quota checks
+	//   - Topics are prefixed with tenant ID: {tenantID}.{topicName}
+	//   - Usage tracking and statistics are maintained
+	//
+	// QUOTA ENFORCER STRATEGY:
+	//   - NoOpEnforcer: All checks return nil (single-tenant, zero cost)
+	//   - TenantQuotaEnforcer: Actual quota checks via QuotaManager
+	//   This eliminates scattered `if tenantManager != nil` checks.
+	//
+	// USE CASES:
+	//   - Single-tenant (default): K8s deployments where each customer gets own cluster
+	//   - Multi-tenant: Managed service / SaaS deployments
+	//
+	// ==========================================================================
+	if config.EnableMultiTenancy {
+		tenantManagerConfig := DefaultTenantManagerConfig(config.DataDir)
+		tenantManager, err := NewTenantManager(tenantManagerConfig)
+		if err != nil {
+			if broker.clusterCoordinator != nil {
+				broker.clusterCoordinator.Stop(context.Background())
+			}
+			transactionCoordinator.Close()
+			schemaRegistry.Close()
+			tracer.Shutdown()
+			scheduler.Close()
+			groupCoordinator.Close()
+			return nil, fmt.Errorf("failed to create tenant manager: %w", err)
+		}
+		broker.tenantManager = tenantManager
+		broker.quotaEnforcer = NewTenantQuotaEnforcer(tenantManager)
+		logger.Info("multi-tenancy enabled")
+	} else {
+		// Single-tenant mode: use no-op enforcer (zero overhead)
+		broker.quotaEnforcer = NewNoOpEnforcer()
+	}
+
 	// Discover and load existing topics
 	if err := broker.loadExistingTopics(); err != nil {
 		if broker.clusterCoordinator != nil {
@@ -682,6 +794,12 @@ func NewBroker(config BrokerConfig) (*Broker, error) {
 		clusterMode = "cluster"
 	}
 
+	// Build multi-tenancy status
+	multiTenancyStatus := "disabled"
+	if config.EnableMultiTenancy {
+		multiTenancyStatus = "enabled"
+	}
+
 	logger.Info("broker started",
 		"mode", clusterMode,
 		"nodeID", config.NodeID,
@@ -696,7 +814,8 @@ func NewBroker(config BrokerConfig) (*Broker, error) {
 		"schema_registry", "enabled",
 		"transactions", "enabled",
 		"txn_timeout_ms", txnCoordinatorConfig.TransactionTimeoutMs,
-		"heartbeat_interval_ms", txnCoordinatorConfig.HeartbeatIntervalMs)
+		"heartbeat_interval_ms", txnCoordinatorConfig.HeartbeatIntervalMs,
+		"multi_tenancy", multiTenancyStatus)
 
 	return broker, nil
 }
@@ -820,6 +939,13 @@ func (b *Broker) Close() error {
 	if b.groupCoordinator != nil {
 		if err := b.groupCoordinator.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("group coordinator: %w", err))
+		}
+	}
+
+	// Close tenant manager (flushes tenant configs and usage data)
+	if b.tenantManager != nil {
+		if err := b.tenantManager.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("tenant manager: %w", err))
 		}
 	}
 
