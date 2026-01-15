@@ -521,6 +521,31 @@ func (s *Server) registerRoutes() {
 	//
 	// ==========================================================================
 	s.RegisterAdminRoutes(s.router)
+
+	// ==========================================================================
+	// TENANT MANAGEMENT API (M18)
+	// ==========================================================================
+	//
+	// Administrative endpoints for multi-tenancy:
+	//   - Tenant CRUD (create, read, update, delete)
+	//   - Quota management (view and update per-tenant quotas)
+	//   - Usage tracking (view tenant resource usage)
+	//   - Lifecycle management (suspend, activate, disable)
+	//
+	// ENDPOINTS:
+	//   POST   /admin/tenants                        Create tenant
+	//   GET    /admin/tenants                        List tenants
+	//   GET    /admin/tenants/{id}                   Get tenant
+	//   PATCH  /admin/tenants/{id}                   Update tenant
+	//   DELETE /admin/tenants/{id}                   Delete tenant
+	//   POST   /admin/tenants/{id}/suspend           Suspend tenant
+	//   POST   /admin/tenants/{id}/activate          Activate tenant
+	//   GET    /admin/tenants/{id}/quotas            Get quotas
+	//   PUT    /admin/tenants/{id}/quotas            Update quotas
+	//   GET    /admin/tenants/{id}/usage             Get usage stats
+	//
+	// ==========================================================================
+	s.RegisterTenantRoutes(s.router)
 }
 
 // loggingMiddleware logs all HTTP requests.

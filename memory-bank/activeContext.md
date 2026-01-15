@@ -3,59 +3,131 @@
 ## Current Focus
 
 **Phase**: 4 - Operations
-**Milestone**: 15 - gRPC API & Go Client ✅ COMPLETE
-**Status**: Milestone 15 fully implemented with tests
+**Milestone**: 18 - Multi-Tenancy & Quotas ✅ COMPLETE (with optional mode + QuotaEnforcer refactoring)
+**Status**: Milestone 18 fully implemented with tests - multi-tenancy is OPTIONAL
+
+## Deployment Model
+
+GoQueue supports two deployment modes:
+
+**Single-Tenant (Default)** - `EnableMultiTenancy: false`
+- No namespace prefixing (topics accessed directly by name)
+- No quota enforcement
+- No TenantManager overhead
+- Uses `NoOpEnforcer` - zero overhead, all checks pass
+- Ideal for: Kubernetes deployments where each customer gets their own cluster
+
+**Multi-Tenant** - `EnableMultiTenancy: true`
+- Topic prefixing: `{tenantID}.{topicName}`
+- Per-tenant quotas (rate limits, storage limits)
+- Usage tracking and statistics
+- Uses `TenantQuotaEnforcer` - actual quota enforcement
+- Ideal for: Managed service / SaaS deployments
 
 ## What I Just Completed
 
-### Milestone 15 - gRPC API & Go Client ⭐
+### QuotaEnforcer Interface Refactoring ⭐
 
-**gRPC Server Implementation** (`internal/grpc/`):
-- ✅ Protocol Buffers v3 definitions (`api/proto/goqueue.proto`)
-- ✅ Code generation with buf tool
-- ✅ `PublishService` - Single message and streaming publish
-- ✅ `ConsumeService` - Server streaming for continuous delivery
-- ✅ `AckService` - Ack, Nack, Reject, ExtendVisibility
-- ✅ `OffsetService` - CommitOffsets, FetchOffsets, ResetOffsets
-- ✅ `HealthService` - Standard gRPC health checking
-- ✅ Request logging interceptor
-- ✅ Graceful shutdown handling
+**Problem**: 14 scattered `if b.tenantManager != nil` checks in tenant_broker.go
 
-**Go Client Library** (`pkg/client/`):
-- ✅ Low-level `Client` - Direct gRPC wrapper (~900 lines)
-- ✅ High-level `Producer` - Async sending, batching, key partitioning
-- ✅ High-level `Consumer` - Consumer groups, auto-ack, channels
-- ✅ Connection management with keepalives
-- ✅ Retry logic with exponential backoff
-- ✅ Comprehensive educational comments
+**Solution**: Strategy pattern with QuotaEnforcer interface (`internal/broker/quota_enforcer.go`)
 
-**Integration**:
-- ✅ gRPC server in main.go (port 9000)
-- ✅ Runs alongside HTTP server (port 8080)
-- ✅ Graceful shutdown sequence
+```go
+type QuotaEnforcer interface {
+    CheckPublish(tenantID string, messageSize int) error
+    CheckPublishBatch(tenantID string, messageCount, totalSize int) error
+    CheckConsume(tenantID string, messageCount int) error
+    CheckTopicCreation(tenantID string) error
+    CheckConsumerGroup(tenantID string) error
+    CheckDelay(tenantID string) error
+    TrackUsage(tenantID string, messages int, bytes int64, messagesConsumed int, bytesConsumed int64)
+    IsEnabled() bool
+}
+```
 
-**Tests**:
-- ✅ `internal/grpc/server_test.go` - 13 tests
-- ✅ `pkg/client/client_test.go` - 14 tests
-- ✅ All tests passing
+**Implementations**:
+- `NoOpEnforcer` - Single-tenant mode, all methods return nil (zero overhead)
+- `TenantQuotaEnforcer` - Multi-tenant mode, delegates to QuotaManager
 
-### Architecture Decisions Made (M15)
+**Benefits**:
+- Eliminated 14 nil checks with clean interface calls
+- Zero runtime overhead in single-tenant mode
+- Testable in isolation
+- Clear separation of concerns
+
+### CLI Consistency Refactoring ⭐
+
+**Problem**: goqueue-admin used raw `return err` while goqueue-cli used `handleError(err)`
+
+**Solution**: Unified error handling across both CLIs
+- Added `handleError()` to goqueue-admin (matches goqueue-cli pattern)
+- Updated all 15 API error handlers in tenant.go, quota.go, usage.go
+- Consistent user-facing error output using `cli.PrintError()`
+
+### Milestone 18 - Multi-Tenancy & Quotas ⭐
+
+**Optional Multi-Tenancy** (`internal/broker/broker.go`):
+- ✅ `EnableMultiTenancy bool` config flag (default: false)
+- ✅ TenantManager initialized only when enabled
+- ✅ Startup log includes multi-tenancy status
+
+**Tenant Management** (`internal/broker/tenant.go`):
+- ✅ Tenant entity with ID, name, status, quotas, metadata
+- ✅ TenantManager CRUD with file-based persistence
+- ✅ Namespace isolation via topic prefix (`{tenantID}.{topicName}`)
+- ✅ System tenant (`__system`) for internal topics
+- ✅ Tenant lifecycle: active → suspended → active → disabled
+- ✅ Usage tracking: messages, bytes, topics, partitions
+
+**Token Bucket Rate Limiting** (`internal/broker/quota.go`):
+- ✅ Industry-standard token bucket algorithm
+- ✅ Per-tenant rate limiting for publish/consume
+- ✅ Configurable capacity and refill rate
+- ✅ Thread-safe with atomic operations
+
+**Quota Manager** (`internal/broker/quota_manager.go`):
+- ✅ Centralized quota enforcement
+- ✅ Rate checks (msg/sec, bytes/sec)
+- ✅ Storage checks (total bytes, topic count)
+- ✅ Connection checks (consumer groups)
+- ✅ Violation tracking per tenant
+
+**Broker Integration** (`internal/broker/tenant_broker.go`):
+- ✅ `IsMultiTenantEnabled()` method
+- ✅ `PublishForTenant`, `ConsumeForTenant`
+- ✅ `CreateTopicForTenant`, `ListTopicsForTenant`
+- ✅ `PublishWithDelayForTenant`, `PublishWithPriorityForTenant`
+- ✅ `JoinGroupForTenant`
+- ✅ Quota enforcement at broker layer (bypassed when disabled)
+
+**HTTP API** (`internal/api/tenant_api.go`):
+- ✅ REST endpoints at `/admin/tenants/*`
+- ✅ Returns 503 "multi-tenancy not enabled" when disabled
+- ✅ CRUD, lifecycle, quotas, usage endpoints
+- ✅ Chi router integration
+
+**Admin CLI** (`cmd/goqueue-admin/`):
+- ✅ Tenant commands: create, list, get, delete, suspend, activate, disable
+- ✅ Quota commands: get, update, reset
+- ✅ Usage commands: get
+- ✅ Table/JSON/YAML output formats
+- ✅ Uses shared `internal/cli` package (same as goqueue-cli)
+
+### Architecture Decisions Made (M18)
 | Decision | Choice | Why |
 |----------|--------|-----|
-| Protocol | gRPC + HTTP/2 | Binary, streaming, multiplexed |
-| Consume | Server streaming | Push-based, efficient |
-| Errors | gRPC status codes | Standard, well-defined |
-| Client | Low-level + High-level | Flexibility + convenience |
-| Health | Standard protocol | K8s/LB compatible |
+| Default mode | Single-tenant | K8s per-customer clusters need no overhead |
+| Namespace | Topic prefix | Simple, no major refactoring |
+| Rate limiting | Token bucket | O(1), allows bursts, industry standard |
+| Enforcement | Broker layer | Catches all paths, not just API |
+| Persistence | File-based JSON | Simple, matches existing patterns |
+| When disabled | Skip all checks | Zero overhead, direct topic access |
 
-## What's Next
+## Previous Milestone
 
-### Milestone 16 - CLI Tool
-- `goqueue topic create/list/delete/describe`
-- `goqueue consumer-group list/describe/reset`
-- `goqueue publish <topic> <message>`
-- `goqueue consume <topic> [--group]`
-- `goqueue cluster status/nodes`
+### Milestone 15 - gRPC API & Go Client ⭐ (COMPLETE)
+### Milestone 16 - CLI Tool ⭐ (COMPLETE)
+### Milestone 17 - Prometheus/Grafana ⭐ (COMPLETE)
 
 ## Previous Work (M14)
 - **Documentation**:
