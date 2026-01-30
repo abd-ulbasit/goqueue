@@ -1,0 +1,1175 @@
+{
+  "info": {
+    "_postman_id": "goqueue-api-collection",
+    "name": "GoQueue API",
+    "description": "GoQueue - Distributed Message Queue API\n\nA high-performance, distributed message queue combining features from Kafka, SQS, and RabbitMQ.\n\n## Features\n- Topics & Partitions\n- Consumer Groups\n- Message Reliability (ACK/NACK/DLQ)\n- Priority Queues\n- Delayed Messages\n- Schema Registry\n- Transactions\n\n## Quick Start\n1. Set the `baseUrl` variable to your GoQueue server\n2. Create a topic\n3. Publish messages\n4. Consume via consumer groups",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8080",
+      "type": "string"
+    },
+    {
+      "key": "topicName",
+      "value": "orders",
+      "type": "string"
+    },
+    {
+      "key": "groupId",
+      "value": "order-processors",
+      "type": "string"
+    },
+    {
+      "key": "memberId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "generation",
+      "value": "1",
+      "type": "string"
+    },
+    {
+      "key": "producerId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "epoch",
+      "value": "1",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Health & Status",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/health",
+              "host": ["{{baseUrl}}"],
+              "path": ["health"]
+            },
+            "description": "Basic health check endpoint"
+          }
+        },
+        {
+          "name": "Liveness Probe (K8s)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/healthz",
+              "host": ["{{baseUrl}}"],
+              "path": ["healthz"]
+            },
+            "description": "Kubernetes liveness probe - returns 200 if process is alive"
+          }
+        },
+        {
+          "name": "Readiness Probe (K8s)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/readyz?verbose=true",
+              "host": ["{{baseUrl}}"],
+              "path": ["readyz"],
+              "query": [
+                {
+                  "key": "verbose",
+                  "value": "true",
+                  "description": "Include detailed health checks"
+                }
+              ]
+            },
+            "description": "Kubernetes readiness probe - returns 200 if ready for traffic"
+          }
+        },
+        {
+          "name": "Startup Probe (K8s)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/livez",
+              "host": ["{{baseUrl}}"],
+              "path": ["livez"]
+            },
+            "description": "Kubernetes startup probe - returns 200 when initialization complete"
+          }
+        },
+        {
+          "name": "Version Info",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/version",
+              "host": ["{{baseUrl}}"],
+              "path": ["version"]
+            },
+            "description": "Returns build and version information"
+          }
+        },
+        {
+          "name": "Broker Stats",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/stats",
+              "host": ["{{baseUrl}}"],
+              "path": ["stats"]
+            },
+            "description": "Returns broker operational statistics"
+          }
+        },
+        {
+          "name": "Prometheus Metrics",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/metrics",
+              "host": ["{{baseUrl}}"],
+              "path": ["metrics"]
+            },
+            "description": "Returns Prometheus metrics in text exposition format"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Topics",
+      "item": [
+        {
+          "name": "List Topics",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/topics",
+              "host": ["{{baseUrl}}"],
+              "path": ["topics"]
+            },
+            "description": "Returns list of all topic names"
+          }
+        },
+        {
+          "name": "Create Topic",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "    var jsonData = pm.response.json();",
+                  "    pm.collectionVariables.set('topicName', jsonData.name);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"name\": \"orders\",\n    \"num_partitions\": 6,\n    \"retention_hours\": 168\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/topics",
+              "host": ["{{baseUrl}}"],
+              "path": ["topics"]
+            },
+            "description": "Creates a new topic with specified partitions and retention"
+          }
+        },
+        {
+          "name": "Get Topic Details",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/topics/{{topicName}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["topics", "{{topicName}}"]
+            },
+            "description": "Returns detailed information about a topic"
+          }
+        },
+        {
+          "name": "Delete Topic",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/topics/{{topicName}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["topics", "{{topicName}}"]
+            },
+            "description": "Permanently deletes a topic (irreversible)"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Messages",
+      "item": [
+        {
+          "name": "Publish Simple Message",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"messages\": [\n        {\n            \"value\": \"{\\\"orderId\\\": \\\"12345\\\", \\\"amount\\\": 99.99}\"\n        }\n    ]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/topics/{{topicName}}/messages",
+              "host": ["{{baseUrl}}"],
+              "path": ["topics", "{{topicName}}", "messages"]
+            },
+            "description": "Publish a simple message (round-robin partitioning)"
+          }
+        },
+        {
+          "name": "Publish with Key (Ordering)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"messages\": [\n        {\n            \"key\": \"user-123\",\n            \"value\": \"{\\\"orderId\\\": \\\"12345\\\", \\\"userId\\\": \\\"user-123\\\"}\"\n        }\n    ]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/topics/{{topicName}}/messages",
+              "host": ["{{baseUrl}}"],
+              "path": ["topics", "{{topicName}}", "messages"]
+            },
+            "description": "Publish with key for partition routing (all messages with same key go to same partition)"
+          }
+        },
+        {
+          "name": "Publish High Priority",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"messages\": [\n        {\n            \"value\": \"{\\\"alert\\\": \\\"critical system event\\\"}\",\n            \"priority\": \"critical\"\n        }\n    ]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/topics/{{topicName}}/messages",
+              "host": ["{{baseUrl}}"],
+              "path": ["topics", "{{topicName}}", "messages"]
+            },
+            "description": "Publish with priority (critical > high > normal > low > background)"
+          }
+        },
+        {
+          "name": "Publish Delayed Message",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"messages\": [\n        {\n            \"value\": \"{\\\"reminder\\\": \\\"follow up with customer\\\"}\",\n            \"delay\": \"1h\"\n        }\n    ]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/topics/{{topicName}}/messages",
+              "host": ["{{baseUrl}}"],
+              "path": ["topics", "{{topicName}}", "messages"]
+            },
+            "description": "Publish message for future delivery (delay: 30s, 1h, 24h, etc.)"
+          }
+        },
+        {
+          "name": "Publish Scheduled Message",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"messages\": [\n        {\n            \"value\": \"{\\\"event\\\": \\\"scheduled notification\\\"}\",\n            \"deliverAt\": \"2025-02-01T09:00:00Z\"\n        }\n    ]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/topics/{{topicName}}/messages",
+              "host": ["{{baseUrl}}"],
+              "path": ["topics", "{{topicName}}", "messages"]
+            },
+            "description": "Publish message for delivery at specific time (RFC3339)"
+          }
+        },
+        {
+          "name": "Publish Batch",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"messages\": [\n        {\n            \"key\": \"user-1\",\n            \"value\": \"{\\\"action\\\": \\\"login\\\"}\"\n        },\n        {\n            \"key\": \"user-2\",\n            \"value\": \"{\\\"action\\\": \\\"purchase\\\"}\",\n            \"priority\": \"high\"\n        },\n        {\n            \"key\": \"user-3\",\n            \"value\": \"{\\\"action\\\": \\\"logout\\\"}\"\n        }\n    ]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/topics/{{topicName}}/messages",
+              "host": ["{{baseUrl}}"],
+              "path": ["topics", "{{topicName}}", "messages"]
+            },
+            "description": "Publish multiple messages in a single request (batch)"
+          }
+        },
+        {
+          "name": "Consume Messages (Simple)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/topics/{{topicName}}/partitions/0/messages?offset=0&limit=100",
+              "host": ["{{baseUrl}}"],
+              "path": ["topics", "{{topicName}}", "partitions", "0", "messages"],
+              "query": [
+                {
+                  "key": "offset",
+                  "value": "0",
+                  "description": "Starting offset"
+                },
+                {
+                  "key": "limit",
+                  "value": "100",
+                  "description": "Max messages to return"
+                }
+              ]
+            },
+            "description": "Simple message consumption without consumer groups"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Delayed Messages",
+      "item": [
+        {
+          "name": "List Delayed Messages",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/topics/{{topicName}}/delayed?limit=100",
+              "host": ["{{baseUrl}}"],
+              "path": ["topics", "{{topicName}}", "delayed"],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "100"
+                }
+              ]
+            },
+            "description": "List pending delayed messages for topic"
+          }
+        },
+        {
+          "name": "Get Delayed Message",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/topics/{{topicName}}/delayed/0",
+              "host": ["{{baseUrl}}"],
+              "path": ["topics", "{{topicName}}", "delayed", "0"]
+            },
+            "description": "Get details about a specific delayed message"
+          }
+        },
+        {
+          "name": "Cancel Delayed Message",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/topics/{{topicName}}/delayed/0/0",
+              "host": ["{{baseUrl}}"],
+              "path": ["topics", "{{topicName}}", "delayed", "0", "0"]
+            },
+            "description": "Cancel a pending delayed message"
+          }
+        },
+        {
+          "name": "Delay Stats",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/delay/stats",
+              "host": ["{{baseUrl}}"],
+              "path": ["delay", "stats"]
+            },
+            "description": "Get delay queue statistics"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Consumer Groups",
+      "item": [
+        {
+          "name": "List Groups",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/groups",
+              "host": ["{{baseUrl}}"],
+              "path": ["groups"]
+            },
+            "description": "List all consumer groups"
+          }
+        },
+        {
+          "name": "Join Group",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    var jsonData = pm.response.json();",
+                  "    pm.collectionVariables.set('memberId', jsonData.member_id);",
+                  "    pm.collectionVariables.set('generation', jsonData.generation.toString());",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"client_id\": \"consumer-1\",\n    \"topics\": [\"{{topicName}}\"],\n    \"session_timeout\": \"30s\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/groups/{{groupId}}/join",
+              "host": ["{{baseUrl}}"],
+              "path": ["groups", "{{groupId}}", "join"]
+            },
+            "description": "Join a consumer group - saves member_id and generation"
+          }
+        },
+        {
+          "name": "Send Heartbeat",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"member_id\": \"{{memberId}}\",\n    \"generation\": {{generation}}\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/groups/{{groupId}}/heartbeat",
+              "host": ["{{baseUrl}}"],
+              "path": ["groups", "{{groupId}}", "heartbeat"]
+            },
+            "description": "Send heartbeat to keep session alive"
+          }
+        },
+        {
+          "name": "Poll Messages",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/groups/{{groupId}}/poll?member_id={{memberId}}&max_messages=100&timeout=30s",
+              "host": ["{{baseUrl}}"],
+              "path": ["groups", "{{groupId}}", "poll"],
+              "query": [
+                {
+                  "key": "member_id",
+                  "value": "{{memberId}}"
+                },
+                {
+                  "key": "max_messages",
+                  "value": "100"
+                },
+                {
+                  "key": "timeout",
+                  "value": "30s",
+                  "description": "Long-poll timeout"
+                }
+              ]
+            },
+            "description": "Long-poll for messages from assigned partitions"
+          }
+        },
+        {
+          "name": "Get Group Details",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/groups/{{groupId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["groups", "{{groupId}}"]
+            },
+            "description": "Get details about a consumer group"
+          }
+        },
+        {
+          "name": "Leave Group",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"member_id\": \"{{memberId}}\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/groups/{{groupId}}/leave",
+              "host": ["{{baseUrl}}"],
+              "path": ["groups", "{{groupId}}", "leave"]
+            },
+            "description": "Gracefully leave the consumer group"
+          }
+        },
+        {
+          "name": "Delete Group",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/groups/{{groupId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["groups", "{{groupId}}"]
+            },
+            "description": "Delete a consumer group"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Offsets",
+      "item": [
+        {
+          "name": "Get Committed Offsets",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/groups/{{groupId}}/offsets?topic={{topicName}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["groups", "{{groupId}}", "offsets"],
+              "query": [
+                {
+                  "key": "topic",
+                  "value": "{{topicName}}",
+                  "description": "Filter by topic (optional)"
+                }
+              ]
+            },
+            "description": "Get committed offsets for consumer group"
+          }
+        },
+        {
+          "name": "Commit Offsets",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"member_id\": \"{{memberId}}\",\n    \"offsets\": {\n        \"{{topicName}}\": {\n            \"0\": 100,\n            \"1\": 50\n        }\n    }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/groups/{{groupId}}/offsets",
+              "host": ["{{baseUrl}}"],
+              "path": ["groups", "{{groupId}}", "offsets"]
+            },
+            "description": "Commit offsets for processed messages"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Reliability (ACK/NACK)",
+      "item": [
+        {
+          "name": "Acknowledge Message",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"receipt_handle\": \"RECEIPT_HANDLE_FROM_POLL\",\n    \"consumer_id\": \"consumer-1\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/messages/ack",
+              "host": ["{{baseUrl}}"],
+              "path": ["messages", "ack"]
+            },
+            "description": "Acknowledge successful message processing"
+          }
+        },
+        {
+          "name": "Negative Acknowledge",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"receipt_handle\": \"RECEIPT_HANDLE_FROM_POLL\",\n    \"delay\": \"30s\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/messages/nack",
+              "host": ["{{baseUrl}}"],
+              "path": ["messages", "nack"]
+            },
+            "description": "NACK message for redelivery (transient failure)"
+          }
+        },
+        {
+          "name": "Reject Message (DLQ)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"receipt_handle\": \"RECEIPT_HANDLE_FROM_POLL\",\n    \"reason\": \"Invalid message format\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/messages/reject",
+              "host": ["{{baseUrl}}"],
+              "path": ["messages", "reject"]
+            },
+            "description": "Reject message and send to Dead Letter Queue"
+          }
+        },
+        {
+          "name": "Extend Visibility Timeout",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"receipt_handle\": \"RECEIPT_HANDLE_FROM_POLL\",\n    \"timeout\": \"60s\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/messages/visibility",
+              "host": ["{{baseUrl}}"],
+              "path": ["messages", "visibility"]
+            },
+            "description": "Extend visibility timeout for long-running processing"
+          }
+        },
+        {
+          "name": "Reliability Stats",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/reliability/stats",
+              "host": ["{{baseUrl}}"],
+              "path": ["reliability", "stats"]
+            },
+            "description": "Get ACK/NACK/DLQ statistics"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Priority",
+      "item": [
+        {
+          "name": "Priority Stats",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/priority/stats",
+              "host": ["{{baseUrl}}"],
+              "path": ["priority", "stats"]
+            },
+            "description": "Get priority queue statistics"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Schema Registry",
+      "item": [
+        {
+          "name": "List Subjects",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/schemas/subjects",
+              "host": ["{{baseUrl}}"],
+              "path": ["schemas", "subjects"]
+            },
+            "description": "List all schema subjects"
+          }
+        },
+        {
+          "name": "Register Schema",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"schema\": \"{\\\"type\\\": \\\"object\\\", \\\"properties\\\": {\\\"orderId\\\": {\\\"type\\\": \\\"string\\\"}, \\\"amount\\\": {\\\"type\\\": \\\"number\\\"}}, \\\"required\\\": [\\\"orderId\\\"]}\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/schemas/subjects/{{topicName}}-value/versions",
+              "host": ["{{baseUrl}}"],
+              "path": ["schemas", "subjects", "{{topicName}}-value", "versions"]
+            },
+            "description": "Register a new schema version"
+          }
+        },
+        {
+          "name": "List Schema Versions",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/schemas/subjects/{{topicName}}-value/versions",
+              "host": ["{{baseUrl}}"],
+              "path": ["schemas", "subjects", "{{topicName}}-value", "versions"]
+            },
+            "description": "List all versions for a subject"
+          }
+        },
+        {
+          "name": "Get Latest Schema",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/schemas/subjects/{{topicName}}-value/versions/latest",
+              "host": ["{{baseUrl}}"],
+              "path": ["schemas", "subjects", "{{topicName}}-value", "versions", "latest"]
+            },
+            "description": "Get the latest schema version"
+          }
+        },
+        {
+          "name": "Get Global Compatibility",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/schemas/config",
+              "host": ["{{baseUrl}}"],
+              "path": ["schemas", "config"]
+            },
+            "description": "Get global compatibility mode"
+          }
+        },
+        {
+          "name": "Set Global Compatibility",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"compatibilityLevel\": \"BACKWARD\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/schemas/config",
+              "host": ["{{baseUrl}}"],
+              "path": ["schemas", "config"]
+            },
+            "description": "Set global compatibility mode"
+          }
+        },
+        {
+          "name": "Schema Stats",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/schemas/stats",
+              "host": ["{{baseUrl}}"],
+              "path": ["schemas", "stats"]
+            },
+            "description": "Get schema registry statistics"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Transactions",
+      "item": [
+        {
+          "name": "Initialize Producer",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    var jsonData = pm.response.json();",
+                  "    pm.collectionVariables.set('producerId', jsonData.producer_id.toString());",
+                  "    pm.collectionVariables.set('epoch', jsonData.epoch.toString());",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"transactional_id\": \"my-producer-1\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/producers/init",
+              "host": ["{{baseUrl}}"],
+              "path": ["producers", "init"]
+            },
+            "description": "Initialize transactional producer - saves producer_id and epoch"
+          }
+        },
+        {
+          "name": "Begin Transaction",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"producer_id\": {{producerId}},\n    \"epoch\": {{epoch}},\n    \"transactional_id\": \"my-producer-1\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/transactions/begin",
+              "host": ["{{baseUrl}}"],
+              "path": ["transactions", "begin"]
+            },
+            "description": "Begin a new transaction"
+          }
+        },
+        {
+          "name": "Publish Transactional",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"producer_id\": {{producerId}},\n    \"epoch\": {{epoch}},\n    \"topic\": \"{{topicName}}\",\n    \"key\": \"order-123\",\n    \"value\": \"{\\\"orderId\\\": \\\"123\\\", \\\"status\\\": \\\"created\\\"}\",\n    \"sequence\": 0\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/transactions/publish",
+              "host": ["{{baseUrl}}"],
+              "path": ["transactions", "publish"]
+            },
+            "description": "Publish message as part of transaction"
+          }
+        },
+        {
+          "name": "Commit Transaction",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"producer_id\": {{producerId}},\n    \"epoch\": {{epoch}},\n    \"transactional_id\": \"my-producer-1\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/transactions/commit",
+              "host": ["{{baseUrl}}"],
+              "path": ["transactions", "commit"]
+            },
+            "description": "Commit transaction (atomic)"
+          }
+        },
+        {
+          "name": "Abort Transaction",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"producer_id\": {{producerId}},\n    \"epoch\": {{epoch}},\n    \"transactional_id\": \"my-producer-1\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/transactions/abort",
+              "host": ["{{baseUrl}}"],
+              "path": ["transactions", "abort"]
+            },
+            "description": "Abort transaction (rollback)"
+          }
+        },
+        {
+          "name": "List Transactions",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/transactions",
+              "host": ["{{baseUrl}}"],
+              "path": ["transactions"]
+            },
+            "description": "List active transactions"
+          }
+        },
+        {
+          "name": "Transaction Stats",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/transactions/stats",
+              "host": ["{{baseUrl}}"],
+              "path": ["transactions", "stats"]
+            },
+            "description": "Get transaction statistics"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Tracing",
+      "item": [
+        {
+          "name": "List Traces",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/traces?limit=100",
+              "host": ["{{baseUrl}}"],
+              "path": ["traces"],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "100"
+                }
+              ]
+            },
+            "description": "List recent message traces"
+          }
+        },
+        {
+          "name": "Search Traces",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/traces/search?topic={{topicName}}&status=completed&limit=50",
+              "host": ["{{baseUrl}}"],
+              "path": ["traces", "search"],
+              "query": [
+                {
+                  "key": "topic",
+                  "value": "{{topicName}}"
+                },
+                {
+                  "key": "status",
+                  "value": "completed"
+                },
+                {
+                  "key": "limit",
+                  "value": "50"
+                }
+              ]
+            },
+            "description": "Search traces by criteria"
+          }
+        },
+        {
+          "name": "Tracer Stats",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/traces/stats",
+              "host": ["{{baseUrl}}"],
+              "path": ["traces", "stats"]
+            },
+            "description": "Get tracer statistics"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Admin",
+      "item": [
+        {
+          "name": "Add Partitions",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"count\": 12\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/admin/topics/{{topicName}}/partitions",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "topics", "{{topicName}}", "partitions"]
+            },
+            "description": "Add partitions to an existing topic"
+          }
+        },
+        {
+          "name": "List Tenants",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/admin/tenants",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "tenants"]
+            },
+            "description": "List all tenants (multi-tenant mode)"
+          }
+        },
+        {
+          "name": "Create Tenant",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"name\": \"acme-corp\",\n    \"display_name\": \"Acme Corporation\",\n    \"quotas\": {\n        \"max_topics\": 100,\n        \"max_partitions_per_topic\": 12,\n        \"max_message_size_bytes\": 1048576,\n        \"max_messages_per_second\": 10000\n    }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/admin/tenants",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "tenants"]
+            },
+            "description": "Create a new tenant"
+          }
+        }
+      ]
+    }
+  ]
+}
