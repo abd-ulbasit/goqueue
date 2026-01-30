@@ -1,15 +1,15 @@
 ---
 layout: default
 title: Configuration Reference
-parent: Configuration
-nav_order: 1
+
+
 ---
 
 # Configuration Reference
-{: .no_toc }
+
 
 Complete reference for all GoQueue configuration options.
-{: .fs-6 .fw-300 }
+
 
 ## Table of contents
 {: .no_toc .text-delta }

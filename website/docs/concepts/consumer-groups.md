@@ -1,15 +1,15 @@
 ---
 layout: default
 title: Consumer Groups
-parent: Concepts
-nav_order: 2
+
+
 ---
 
 # Consumer Groups
-{: .no_toc }
+
 
 Scale message processing across multiple consumers while maintaining ordering guarantees.
-{: .fs-6 .fw-300 }
+
 
 ## Table of contents
 {: .no_toc .text-delta }
