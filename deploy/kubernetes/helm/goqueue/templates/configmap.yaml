@@ -1,0 +1,72 @@
+# =============================================================================
+# GOQUEUE CONFIGMAP
+# =============================================================================
+#
+# ConfigMap holds non-sensitive configuration data.
+# Mounted as a file at /config/config.yaml
+#
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "goqueue.configMapName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "goqueue.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    # GoQueue Configuration
+    # Auto-generated from Helm values
+    
+    broker:
+      # Node ID is set via environment variable (POD_NAME)
+      dataDir: "/data"
+    
+    listeners:
+      http: ":{{ include "goqueue.httpPort" . }}"
+      grpc: ":{{ include "goqueue.grpcPort" . }}"
+      internal: ":{{ include "goqueue.internalPort" . }}"
+    
+    metrics:
+      enabled: {{ .Values.metrics.enabled }}
+      listen: ":{{ include "goqueue.httpPort" . }}"
+      path: "/metrics"
+    
+    logging:
+      level: {{ .Values.config.logging.level | quote }}
+      format: {{ .Values.config.logging.format | quote }}
+    
+    cluster:
+      enabled: {{ .Values.config.cluster.enabled }}
+      replicationFactor: {{ .Values.config.cluster.replicationFactor }}
+      minInSyncReplicas: {{ .Values.config.cluster.minInSyncReplicas }}
+      replicationTimeout: {{ .Values.config.cluster.replicationTimeout | quote }}
+    
+    storage:
+      segmentSize: {{ .Values.config.storage.segmentSize }}
+      indexInterval: {{ .Values.config.storage.indexInterval }}
+      syncOnWrite: {{ .Values.config.storage.syncOnWrite }}
+      syncInterval: {{ .Values.config.storage.syncInterval | quote }}
+    
+    defaults:
+      topic:
+        partitions: {{ .Values.config.defaults.topic.partitions }}
+        retention:
+          hours: {{ .Values.config.defaults.topic.retention.hours }}
+          bytes: {{ .Values.config.defaults.topic.retention.bytes }}
+        delivery:
+          visibilityTimeout: {{ .Values.config.defaults.topic.delivery.visibilityTimeout | quote }}
+          maxRetries: {{ .Values.config.defaults.topic.delivery.maxRetries }}
+    
+    consumer:
+      sessionTimeout: {{ .Values.config.consumer.sessionTimeout | quote }}
+      heartbeatInterval: {{ .Values.config.consumer.heartbeatInterval | quote }}
+      maxPollRecords: {{ .Values.config.consumer.maxPollRecords }}
+      maxPollTimeout: {{ .Values.config.consumer.maxPollTimeout | quote }}
+      autoCommitInterval: {{ .Values.config.consumer.autoCommitInterval | quote }}
+    
+    producer:
+      batchSize: {{ .Values.config.producer.batchSize }}
+      lingerMs: {{ .Values.config.producer.lingerMs }}
+      acks: {{ .Values.config.producer.acks | quote }}
+      retries: {{ .Values.config.producer.retries }}
+      retryBackoff: {{ .Values.config.producer.retryBackoff | quote }}

@@ -1,0 +1,450 @@
+# =============================================================================
+# GOQUEUE DOCKER COMPOSE - 3-NODE CLUSTER
+# =============================================================================
+#
+# WHY DOCKER COMPOSE?
+# ┌─────────────────────────────────────────────────────────────────────────────┐
+# │ Local development and testing of multi-node clusters without Kubernetes.    │
+# │                                                                             │
+# │ USE CASES:                                                                  │
+# │   1. Local development with full cluster                                    │
+# │   2. Integration testing (CI/CD)                                            │
+# │   3. Demo and evaluation                                                    │
+# │   4. Learning how goqueue clustering works                                  │
+# │                                                                             │
+# │ ARCHITECTURE:                                                               │
+# │   ┌─────────────────────────────────────────────────────────────────────┐   │
+# │   │                         Docker Network                              │   │
+# │   │  ┌───────────┐    ┌───────────┐    ┌───────────┐                    │   │
+# │   │  │  node-1   │◄──►│  node-2   │◄──►│  node-3   │                    │   │
+# │   │  │  :8081    │    │  :8082    │    │  :8083    │   HTTP API         │   │
+# │   │  │  :9001    │    │  :9002    │    │  :9003    │   gRPC API         │   │
+# │   │  │  :7001    │    │  :7002    │    │  :7003    │   Internal         │   │
+# │   │  └───────────┘    └───────────┘    └───────────┘                    │   │
+# │   │       │                │                │                           │   │
+# │   │       ▼                ▼                ▼                           │   │
+# │   │  ┌─────────────────────────────────────────────────┐                │   │
+# │   │  │              Prometheus + Grafana               │                │   │
+# │   │  │                   :9090 / :3000                 │                │   │
+# │   │  └─────────────────────────────────────────────────┘                │   │
+# │   └─────────────────────────────────────────────────────────────────────┘   │
+# └─────────────────────────────────────────────────────────────────────────────┘
+#
+# COMMANDS:
+#   docker-compose up -d                    # Start all services
+#   docker-compose up -d --scale goqueue=3  # Alternative scaling
+#   docker-compose logs -f goqueue-1        # Follow node-1 logs
+#   docker-compose down -v                  # Stop and remove volumes
+#
+# =============================================================================
+
+# Docker Compose version (3.8 for compatibility, 3.9+ for latest features)
+version: "3.9"
+
+# =============================================================================
+# NETWORKS
+# =============================================================================
+networks:
+  # Internal network for cluster communication
+  goqueue-internal:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+  
+  # External network for client access and monitoring
+  goqueue-external:
+    driver: bridge
+
+# =============================================================================
+# VOLUMES
+# =============================================================================
+volumes:
+  # Persistent data volumes for each node
+  goqueue-data-1:
+    driver: local
+  goqueue-data-2:
+    driver: local
+  goqueue-data-3:
+    driver: local
+  
+  # Monitoring data
+  prometheus-data:
+    driver: local
+  grafana-data:
+    driver: local
+
+# =============================================================================
+# SERVICES
+# =============================================================================
+services:
+  # ---------------------------------------------------------------------------
+  # GOQUEUE NODE 1 (Leader candidate)
+  # ---------------------------------------------------------------------------
+  goqueue-1:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      target: debug  # Use debug image for local development
+    image: goqueue:local
+    container_name: goqueue-node-1
+    hostname: goqueue-1
+    
+    # ┌─────────────────────────────────────────────────────────────────────────┐
+    # │ ENVIRONMENT VARIABLES                                                   │
+    # │                                                                         │
+    # │ These override config file settings. Useful for container orchestration │
+    # │ where you can't easily modify config files.                             │
+    # │                                                                         │
+    # │ NAMING CONVENTION: GOQUEUE_{SECTION}_{KEY}                              │
+    # │   e.g., GOQUEUE_BROKER_NODEID, GOQUEUE_CLUSTER_PEERS                    │
+    # └─────────────────────────────────────────────────────────────────────────┘
+    environment:
+      - GOQUEUE_BROKER_NODEID=node-1
+      - GOQUEUE_BROKER_DATADIR=/data
+      - GOQUEUE_LISTENERS_HTTP=:8080
+      - GOQUEUE_LISTENERS_GRPC=:9000
+      - GOQUEUE_LISTENERS_INTERNAL=:7000
+      - GOQUEUE_CLUSTER_ENABLED=true
+      - GOQUEUE_CLUSTER_PEERS=goqueue-2:7000,goqueue-3:7000
+      - GOQUEUE_CLUSTER_ADVERTISE=goqueue-1:7000
+      - GOQUEUE_METRICS_ENABLED=true
+      - GOQUEUE_LOG_LEVEL=info
+      - GOQUEUE_LOG_FORMAT=json
+    
+    # Port mapping: host:container
+    ports:
+      - "8081:8080"   # HTTP API
+      - "9001:9000"   # gRPC API
+      - "7001:7000"   # Internal cluster
+    
+    volumes:
+      - goqueue-data-1:/data
+      - ./config/node-1.yaml:/config/config.yaml:ro
+    
+    networks:
+      goqueue-internal:
+        ipv4_address: 172.28.1.1
+      goqueue-external:
+    
+    # ┌─────────────────────────────────────────────────────────────────────────┐
+    # │ HEALTH CHECK                                                            │
+    # │                                                                         │
+    # │ Docker uses this to determine if container is healthy.                  │
+    # │ Compose won't start dependent services until healthy.                   │
+    # │                                                                         │
+    # │ /health endpoint should return 200 when broker is ready.                │
+    # └─────────────────────────────────────────────────────────────────────────┘
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    
+    # Resource limits (adjust based on your machine)
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 128M
+    
+    restart: unless-stopped
+    
+    labels:
+      # Prometheus labels (for metrics scraping)
+      - "prometheus.scrape=true"
+      - "prometheus.port=9000"
+      - "prometheus.path=/metrics"
+      # Traefik labels (for load balancing)
+      - "traefik.enable=true"
+      # HTTP router - load balances HTTP API requests
+      - "traefik.http.routers.goqueue-http.rule=PathPrefix(`/`)"
+      - "traefik.http.routers.goqueue-http.entrypoints=http"
+      - "traefik.http.routers.goqueue-http.service=goqueue-http"
+      - "traefik.http.services.goqueue-http.loadbalancer.server.port=8080"
+      - "traefik.http.services.goqueue-http.loadbalancer.healthcheck.path=/health"
+      - "traefik.http.services.goqueue-http.loadbalancer.healthcheck.interval=10s"
+      # gRPC router - load balances gRPC requests
+      - "traefik.http.routers.goqueue-grpc.rule=PathPrefix(`/`)"
+      - "traefik.http.routers.goqueue-grpc.entrypoints=grpc"
+      - "traefik.http.routers.goqueue-grpc.service=goqueue-grpc"
+      - "traefik.http.services.goqueue-grpc.loadbalancer.server.port=9000"
+      - "traefik.http.services.goqueue-grpc.loadbalancer.server.scheme=h2c"
+
+  # ---------------------------------------------------------------------------
+  # GOQUEUE NODE 2
+  # ---------------------------------------------------------------------------
+  goqueue-2:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      target: debug
+    image: goqueue:local
+    container_name: goqueue-node-2
+    hostname: goqueue-2
+    
+    environment:
+      - GOQUEUE_BROKER_NODEID=node-2
+      - GOQUEUE_BROKER_DATADIR=/data
+      - GOQUEUE_LISTENERS_HTTP=:8080
+      - GOQUEUE_LISTENERS_GRPC=:9000
+      - GOQUEUE_LISTENERS_INTERNAL=:7000
+      - GOQUEUE_CLUSTER_ENABLED=true
+      - GOQUEUE_CLUSTER_PEERS=goqueue-1:7000,goqueue-3:7000
+      - GOQUEUE_CLUSTER_ADVERTISE=goqueue-2:7000
+      - GOQUEUE_METRICS_ENABLED=true
+      - GOQUEUE_LOG_LEVEL=info
+      - GOQUEUE_LOG_FORMAT=json
+    
+    ports:
+      - "8082:8080"
+      - "9002:9000"
+      - "7002:7000"
+    
+    volumes:
+      - goqueue-data-2:/data
+      - ./config/node-2.yaml:/config/config.yaml:ro
+    
+    networks:
+      goqueue-internal:
+        ipv4_address: 172.28.1.2
+      goqueue-external:
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 128M
+    
+    depends_on:
+      goqueue-1:
+        condition: service_healthy
+    
+    restart: unless-stopped
+    
+    labels:
+      # Prometheus labels (for metrics scraping)
+      - "prometheus.scrape=true"
+      - "prometheus.port=9000"
+      - "prometheus.path=/metrics"
+      # Traefik labels (for load balancing)
+      - "traefik.enable=true"
+      # HTTP router - joins the goqueue-http service for load balancing
+      - "traefik.http.routers.goqueue-http.rule=PathPrefix(`/`)"
+      - "traefik.http.routers.goqueue-http.entrypoints=http"
+      - "traefik.http.routers.goqueue-http.service=goqueue-http"
+      - "traefik.http.services.goqueue-http.loadbalancer.server.port=8080"
+      # gRPC router - joins the goqueue-grpc service for load balancing
+      - "traefik.http.routers.goqueue-grpc.rule=PathPrefix(`/`)"
+      - "traefik.http.routers.goqueue-grpc.entrypoints=grpc"
+      - "traefik.http.routers.goqueue-grpc.service=goqueue-grpc"
+      - "traefik.http.services.goqueue-grpc.loadbalancer.server.port=9000"
+      - "traefik.http.services.goqueue-grpc.loadbalancer.server.scheme=h2c"
+
+  # ---------------------------------------------------------------------------
+  # GOQUEUE NODE 3
+  # ---------------------------------------------------------------------------
+  goqueue-3:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      target: debug
+    image: goqueue:local
+    container_name: goqueue-node-3
+    hostname: goqueue-3
+    
+    environment:
+      - GOQUEUE_BROKER_NODEID=node-3
+      - GOQUEUE_BROKER_DATADIR=/data
+      - GOQUEUE_LISTENERS_HTTP=:8080
+      - GOQUEUE_LISTENERS_GRPC=:9000
+      - GOQUEUE_LISTENERS_INTERNAL=:7000
+      - GOQUEUE_CLUSTER_ENABLED=true
+      - GOQUEUE_CLUSTER_PEERS=goqueue-1:7000,goqueue-2:7000
+      - GOQUEUE_CLUSTER_ADVERTISE=goqueue-3:7000
+      - GOQUEUE_METRICS_ENABLED=true
+      - GOQUEUE_LOG_LEVEL=info
+      - GOQUEUE_LOG_FORMAT=json
+    
+    ports:
+      - "8083:8080"
+      - "9003:9000"
+      - "7003:7000"
+    
+    volumes:
+      - goqueue-data-3:/data
+      - ./config/node-3.yaml:/config/config.yaml:ro
+    
+    networks:
+      goqueue-internal:
+        ipv4_address: 172.28.1.3
+      goqueue-external:
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 128M
+    
+    depends_on:
+      goqueue-1:
+        condition: service_healthy
+    
+    restart: unless-stopped
+    
+    labels:
+      # Prometheus labels (for metrics scraping)
+      - "prometheus.scrape=true"
+      - "prometheus.port=9000"
+      - "prometheus.path=/metrics"
+      # Traefik labels (for load balancing)
+      - "traefik.enable=true"
+      # HTTP router - joins the goqueue-http service for load balancing
+      - "traefik.http.routers.goqueue-http.rule=PathPrefix(`/`)"
+      - "traefik.http.routers.goqueue-http.entrypoints=http"
+      - "traefik.http.routers.goqueue-http.service=goqueue-http"
+      - "traefik.http.services.goqueue-http.loadbalancer.server.port=8080"
+      # gRPC router - joins the goqueue-grpc service for load balancing
+      - "traefik.http.routers.goqueue-grpc.rule=PathPrefix(`/`)"
+      - "traefik.http.routers.goqueue-grpc.entrypoints=grpc"
+      - "traefik.http.routers.goqueue-grpc.service=goqueue-grpc"
+      - "traefik.http.services.goqueue-grpc.loadbalancer.server.port=9000"
+      - "traefik.http.services.goqueue-grpc.loadbalancer.server.scheme=h2c"
+
+  # ---------------------------------------------------------------------------
+  # PROMETHEUS - Metrics Collection
+  # ---------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    container_name: goqueue-prometheus
+    hostname: prometheus
+    
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=7d"
+      - "--web.console.libraries=/etc/prometheus/console_libraries"
+      - "--web.console.templates=/etc/prometheus/consoles"
+      - "--web.enable-lifecycle"  # Enable reload via HTTP POST
+    
+    ports:
+      - "9090:9090"
+    
+    volumes:
+      - ../prometheus/prometheus.yaml:/etc/prometheus/prometheus.yml:ro
+      - ../prometheus/alerts:/etc/prometheus/alerts:ro
+      - prometheus-data:/prometheus
+    
+    networks:
+      - goqueue-internal
+      - goqueue-external
+    
+    depends_on:
+      - goqueue-1
+      - goqueue-2
+      - goqueue-3
+    
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # GRAFANA - Visualization
+  # ---------------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:10.2.0
+    container_name: goqueue-grafana
+    hostname: grafana
+    
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=goqueue
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SERVER_ROOT_URL=http://localhost:3000
+      - GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-simple-json-datasource
+    
+    ports:
+      - "3000:3000"
+    
+    volumes:
+      - ../grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - ../grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    
+    networks:
+      - goqueue-external
+    
+    depends_on:
+      - prometheus
+    
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # TRAEFIK - Reverse Proxy / Load Balancer
+  # ---------------------------------------------------------------------------
+  traefik:
+    image: traefik:v3.0
+    container_name: goqueue-traefik
+    hostname: traefik
+    
+    # ┌─────────────────────────────────────────────────────────────────────────┐
+    # │ TRAEFIK AS LOAD BALANCER                                                │
+    # │                                                                         │
+    # │ Distributes client requests across all goqueue nodes.                   │
+    # │                                                                         │
+    # │ Features:                                                               │
+    # │   - Automatic service discovery via Docker labels                       │
+    # │   - Health-check based routing (unhealthy nodes excluded)               │
+    # │   - Dashboard for monitoring (localhost:8080)                           │
+    # │   - HTTP/2 and gRPC support                                             │
+    # └─────────────────────────────────────────────────────────────────────────┘
+    command:
+      - "--api.dashboard=true"
+      - "--api.insecure=true"  # Dashboard without auth (dev only!)
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.network=goqueue-external"
+      - "--entrypoints.http.address=:80"
+      - "--entrypoints.grpc.address=:9000"
+      - "--log.level=INFO"
+    
+    ports:
+      - "80:80"      # HTTP entry point
+      - "9000:9000"  # gRPC entry point
+      - "8080:8080"  # Traefik dashboard
+    
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    
+    networks:
+      - goqueue-external
+    
+    labels:
+      # Enable Traefik dashboard
+      - "traefik.enable=true"
+      - "traefik.http.routers.traefik.rule=Host(`traefik.localhost`)"
+      - "traefik.http.routers.traefik.service=api@internal"
+    
+    restart: unless-stopped
