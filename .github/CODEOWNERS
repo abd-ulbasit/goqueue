@@ -1,0 +1,40 @@
+# =============================================================================
+# CODEOWNERS
+# =============================================================================
+#
+# These owners will be requested for review when someone opens a pull request
+# that modifies code that they own.
+#
+# Order matters: later patterns override earlier ones.
+# Documentation: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+#
+# =============================================================================
+
+# Default owner for everything
+* @abd-ulbasit
+
+# Core broker code - requires careful review
+/internal/broker/ @abd-ulbasit
+
+# Storage layer - critical for durability
+/internal/storage/ @abd-ulbasit
+
+# API and gRPC - public interface
+/internal/api/ @abd-ulbasit
+/internal/grpc/ @abd-ulbasit
+/api/ @abd-ulbasit
+
+# CLI tools
+/cmd/ @abd-ulbasit
+
+# Client libraries
+/clients/ @abd-ulbasit
+
+# Infrastructure and deployment
+/deploy/ @abd-ulbasit
+/.github/ @abd-ulbasit
+
+# Documentation
+/docs/ @abd-ulbasit
+/website/ @abd-ulbasit
+*.md @abd-ulbasit

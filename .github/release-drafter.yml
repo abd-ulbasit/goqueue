@@ -1,0 +1,155 @@
+# =============================================================================
+# RELEASE DRAFTER CONFIGURATION
+# =============================================================================
+#
+# Automatically drafts release notes based on PR labels.
+# When you merge PRs with labels, this updates the draft release.
+# When you publish a tag, the draft becomes the release notes.
+#
+# WORKFLOW:
+#   1. PRs are labeled (feature, bug, docs, etc.)
+#   2. Release drafter categorizes changes
+#   3. Draft is updated with each merge to main
+#   4. Tag triggers release with accumulated notes
+#
+# =============================================================================
+
+name-template: 'v$RESOLVED_VERSION'
+tag-template: 'v$RESOLVED_VERSION'
+
+# -----------------------------------------------------------------------------
+# Categories for grouping changes
+# -----------------------------------------------------------------------------
+categories:
+  - title: '🚀 Features'
+    labels:
+      - 'feature'
+      - 'enhancement'
+      - 'feat'
+  - title: '🐛 Bug Fixes'
+    labels:
+      - 'fix'
+      - 'bugfix'
+      - 'bug'
+  - title: '⚡ Performance'
+    labels:
+      - 'performance'
+      - 'perf'
+  - title: '📚 Documentation'
+    labels:
+      - 'documentation'
+      - 'docs'
+  - title: '🔒 Security'
+    labels:
+      - 'security'
+  - title: '🔧 Maintenance'
+    labels:
+      - 'chore'
+      - 'maintenance'
+      - 'refactor'
+  - title: '📦 Dependencies'
+    labels:
+      - 'dependencies'
+    collapse-after: 5
+  - title: '🧪 Testing'
+    labels:
+      - 'test'
+      - 'testing'
+  - title: '🏗️ Build & CI'
+    labels:
+      - 'ci'
+      - 'build'
+
+# -----------------------------------------------------------------------------
+# Exclude from release notes
+# -----------------------------------------------------------------------------
+exclude-labels:
+  - 'skip-changelog'
+  - 'no-changelog'
+
+# -----------------------------------------------------------------------------
+# Exclude contributors (bots)
+# -----------------------------------------------------------------------------
+exclude-contributors:
+  - 'dependabot[bot]'
+  - 'dependabot-preview[bot]'
+  - 'github-actions[bot]'
+
+# -----------------------------------------------------------------------------
+# Version resolver (based on labels)
+# -----------------------------------------------------------------------------
+version-resolver:
+  major:
+    labels:
+      - 'major'
+      - 'breaking'
+  minor:
+    labels:
+      - 'minor'
+      - 'feature'
+      - 'enhancement'
+  patch:
+    labels:
+      - 'patch'
+      - 'fix'
+      - 'bugfix'
+      - 'docs'
+      - 'chore'
+  default: patch
+
+# -----------------------------------------------------------------------------
+# Autolabeler (automatically label PRs based on files/branch)
+# -----------------------------------------------------------------------------
+autolabeler:
+  - label: 'documentation'
+    files:
+      - '*.md'
+      - 'docs/**/*'
+      - 'website/**/*'
+    branch:
+      - '/docs?[-\/].+/'
+  - label: 'ci'
+    files:
+      - '.github/**/*'
+      - '.goreleaser.yaml'
+      - '.golangci.yml'
+  - label: 'dependencies'
+    files:
+      - 'go.mod'
+      - 'go.sum'
+      - '**/go.mod'
+      - '**/go.sum'
+      - 'package.json'
+      - 'package-lock.json'
+  - label: 'client'
+    files:
+      - 'clients/**/*'
+  - label: 'docker'
+    files:
+      - '**/Dockerfile'
+      - '**/docker-compose*.yml'
+      - 'deploy/docker/**/*'
+  - label: 'api'
+    files:
+      - 'api/**/*'
+      - 'internal/api/**/*'
+  - label: 'broker'
+    files:
+      - 'internal/broker/**/*'
+  - label: 'storage'
+    files:
+      - 'internal/storage/**/*'
+
+# -----------------------------------------------------------------------------
+# Release notes template
+# -----------------------------------------------------------------------------
+template: |
+  ## What's Changed
+
+  $CHANGES
+  
+  ## Contributors
+
+  $CONTRIBUTORS
+  
+  **Full Changelog**: https://github.com/$OWNER/$REPOSITORY/compare/$PREVIOUS_TAG...v$RESOLVED_VERSION

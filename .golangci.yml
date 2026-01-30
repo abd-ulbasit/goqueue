@@ -1,0 +1,142 @@
+# =============================================================================
+# GOLANGCI-LINT CONFIGURATION
+# =============================================================================
+#
+# This configuration enables linters that help maintain code quality.
+# Run locally: golangci-lint run
+# Run with fixes: golangci-lint run --fix
+#
+# =============================================================================
+
+run:
+  timeout: 5m
+  # Skip generated files
+  skip-dirs:
+    - api/proto/gen
+  skip-files:
+    - ".*_test.go$"
+    - ".*_mock.go$"
+
+linters:
+  enable:
+    # Default linters
+    - errcheck      # Check for unchecked errors
+    - gosimple      # Simplify code
+    - govet         # Report suspicious constructs
+    - ineffassign   # Detect ineffectual assignments
+    - staticcheck   # Static analysis
+    - unused        # Check for unused code
+    
+    # Additional linters
+    - bodyclose     # Check HTTP response bodies are closed
+    - contextcheck  # Check context propagation
+    - dupl          # Detect duplicate code
+    - errorlint     # Find error wrapping issues
+    - exhaustive    # Check exhaustive switch statements
+    - exportloopref # Check for loop variable references
+    - gocognit      # Cognitive complexity checker
+    - goconst       # Find repeated strings that could be constants
+    - gocritic      # Extensive code checker
+    - gocyclo       # Cyclomatic complexity checker
+    - godot         # Check comment formatting
+    - gofmt         # Check formatting
+    - goimports     # Check import formatting
+    - gosec         # Security checker
+    - misspell      # Spell checker
+    - nakedret      # Check for naked returns
+    - nilerr        # Find nil error returns
+    - noctx         # Check for HTTP requests without context
+    - prealloc      # Find slice preallocation opportunities
+    - predeclared   # Find shadowed predeclared identifiers
+    - revive        # Extensible linter
+    - stylecheck    # Style checker
+    - tparallel     # Detect misuse of t.Parallel()
+    - unconvert     # Remove unnecessary conversions
+    - unparam       # Find unused parameters
+    - whitespace    # Check for trailing whitespace
+
+linters-settings:
+  gocyclo:
+    min-complexity: 20
+
+  gocognit:
+    min-complexity: 30
+
+  goconst:
+    min-len: 3
+    min-occurrences: 3
+
+  gocritic:
+    enabled-tags:
+      - diagnostic
+      - performance
+      - style
+    disabled-checks:
+      - hugeParam  # Allow large params (common in tests)
+
+  gosec:
+    excludes:
+      - G104  # Audit errors not checked (we handle this case by case)
+      - G304  # File path provided as taint input (acceptable for CLI tools)
+
+  revive:
+    rules:
+      - name: blank-imports
+      - name: context-as-argument
+      - name: context-keys-type
+      - name: dot-imports
+      - name: error-return
+      - name: error-strings
+      - name: error-naming
+      - name: exported
+      - name: increment-decrement
+      - name: indent-error-flow
+      - name: package-comments
+      - name: range
+      - name: receiver-naming
+      - name: time-naming
+      - name: unexported-return
+      - name: var-declaration
+      - name: var-naming
+
+  stylecheck:
+    checks:
+      - all
+      - -ST1000  # Package comments (we use different style)
+
+  dupl:
+    threshold: 150
+
+issues:
+  # Maximum issues count per one linter
+  max-issues-per-linter: 50
+  
+  # Maximum count of issues with the same text
+  max-same-issues: 3
+
+  exclude-rules:
+    # Exclude some linters from running on tests files
+    - path: _test\.go
+      linters:
+        - dupl
+        - gocyclo
+        - gocognit
+        - gosec
+        - errcheck
+
+    # Exclude known patterns
+    - linters:
+        - stylecheck
+      text: "ST1003"  # Underscores in names (acceptable for test files)
+      path: _test\.go
+
+    # Allow fmt.Print in main packages (CLI output)
+    - path: cmd/
+      linters:
+        - forbidigo
+
+    # Allow shadow in tests
+    - path: _test\.go
+      linters:
+        - govet
+      text: "shadow"

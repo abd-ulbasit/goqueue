@@ -1,0 +1,125 @@
+# =============================================================================
+# DEPENDABOT CONFIGURATION
+# =============================================================================
+#
+# Dependabot automatically creates PRs to update dependencies.
+# This keeps the project secure by patching vulnerable dependencies.
+#
+# WHAT IT DOES:
+#   1. Checks for outdated dependencies weekly
+#   2. Creates PRs for updates (grouped by type)
+#   3. Includes changelogs and release notes
+#
+# =============================================================================
+
+version: 2
+
+updates:
+  # -------------------------------------------------------------------------
+  # Go modules
+  # -------------------------------------------------------------------------
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "deps(go)"
+    labels:
+      - "dependencies"
+      - "go"
+    groups:
+      # Group all patch updates together
+      go-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "patch"
+      # Group OpenTelemetry updates
+      otel:
+        patterns:
+          - "go.opentelemetry.io/*"
+      # Group gRPC/protobuf updates
+      grpc:
+        patterns:
+          - "google.golang.org/*"
+
+  # -------------------------------------------------------------------------
+  # GitHub Actions
+  # -------------------------------------------------------------------------
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+    labels:
+      - "dependencies"
+      - "ci"
+    groups:
+      actions:
+        patterns:
+          - "*"
+
+  # -------------------------------------------------------------------------
+  # Docker
+  # -------------------------------------------------------------------------
+  - package-ecosystem: "docker"
+    directory: "/deploy/docker"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "deps(docker)"
+    labels:
+      - "dependencies"
+      - "docker"
+
+  # -------------------------------------------------------------------------
+  # Go client library
+  # -------------------------------------------------------------------------
+  - package-ecosystem: "gomod"
+    directory: "/clients/go"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps(client-go)"
+    labels:
+      - "dependencies"
+      - "client"
+
+  # -------------------------------------------------------------------------
+  # Python client library
+  # -------------------------------------------------------------------------
+  - package-ecosystem: "pip"
+    directory: "/clients/python"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps(client-python)"
+    labels:
+      - "dependencies"
+      - "client"
+
+  # -------------------------------------------------------------------------
+  # JavaScript/TypeScript client library
+  # -------------------------------------------------------------------------
+  - package-ecosystem: "npm"
+    directory: "/clients/javascript"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps(client-js)"
+    labels:
+      - "dependencies"
+      - "client"

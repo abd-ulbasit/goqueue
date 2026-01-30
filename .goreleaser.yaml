@@ -1,0 +1,272 @@
+# =============================================================================
+# GORELEASER CONFIGURATION FOR GOQUEUE
+# =============================================================================
+#
+# GoReleaser automates the release process:
+#   1. Builds binaries for multiple OS/arch combinations
+#   2. Creates archives (tar.gz for Unix, zip for Windows)
+#   3. Generates checksums for verification
+#   4. Creates GitHub releases with changelog
+#   5. Publishes to package managers (optional)
+#
+# USAGE:
+#   goreleaser release --clean           # Full release
+#   goreleaser release --snapshot        # Test build (no publish)
+#   goreleaser check                     # Validate config
+#
+# RELEASE WORKFLOW:
+#   1. git tag v1.0.0
+#   2. git push origin v1.0.0
+#   3. CI triggers GoReleaser automatically
+#
+# =============================================================================
+
+version: 2
+
+# -----------------------------------------------------------------------------
+# Pre-build hooks
+# -----------------------------------------------------------------------------
+before:
+  hooks:
+    # Ensure dependencies are tidy
+    - go mod tidy
+    # Run code generation if any
+    - go generate ./...
+
+# -----------------------------------------------------------------------------
+# Build configurations
+# -----------------------------------------------------------------------------
+# 
+# WHY MULTIPLE BUILDS?
+# goqueue has three binaries with different purposes:
+#   - goqueue: The main broker server
+#   - goqueue-cli: User CLI for managing topics, publishing, consuming
+#   - goqueue-admin: Admin CLI for tenant/quota management
+#
+# Each gets its own build configuration but shares OS/arch targets.
+# -----------------------------------------------------------------------------
+builds:
+  # ---------------------------------------------------------------------------
+  # goqueue - Main broker server
+  # ---------------------------------------------------------------------------
+  - id: goqueue
+    main: ./cmd/goqueue
+    binary: goqueue
+    env:
+      # CGO_ENABLED=0 creates fully static binaries
+      # This ensures the binary runs anywhere without libc dependencies
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    # Exclude Windows/ARM64 (not a common server target)
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      # -s: Strip symbol table (smaller binary)
+      # -w: Strip DWARF debug info (smaller binary)
+      # -X: Inject version info at build time
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.buildTime={{.Date}}
+    # Reproducible builds
+    mod_timestamp: '{{ .CommitTimestamp }}'
+
+  # ---------------------------------------------------------------------------
+  # goqueue-cli - User command-line interface
+  # ---------------------------------------------------------------------------
+  - id: goqueue-cli
+    main: ./cmd/goqueue-cli
+    binary: goqueue-cli
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X goqueue/cmd/goqueue-cli/cmd.version={{.Version}}
+      - -X goqueue/cmd/goqueue-cli/cmd.commit={{.Commit}}
+      - -X goqueue/cmd/goqueue-cli/cmd.buildTime={{.Date}}
+    mod_timestamp: '{{ .CommitTimestamp }}'
+
+  # ---------------------------------------------------------------------------
+  # goqueue-admin - Admin CLI for tenant management
+  # ---------------------------------------------------------------------------
+  - id: goqueue-admin
+    main: ./cmd/goqueue-admin
+    binary: goqueue-admin
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w
+      - -X goqueue/cmd/goqueue-admin/cmd.version={{.Version}}
+      - -X goqueue/cmd/goqueue-admin/cmd.commit={{.Commit}}
+      - -X goqueue/cmd/goqueue-admin/cmd.buildTime={{.Date}}
+    mod_timestamp: '{{ .CommitTimestamp }}'
+
+# -----------------------------------------------------------------------------
+# Archive configurations
+# -----------------------------------------------------------------------------
+#
+# ARCHIVE STRATEGY:
+# - tar.gz for Linux/macOS (standard for Unix)
+# - zip for Windows (native support)
+# - Include all three binaries in one archive per OS/arch
+# - Include documentation and example config
+# -----------------------------------------------------------------------------
+archives:
+  - id: goqueue-archive
+    builds:
+      - goqueue
+      - goqueue-cli
+      - goqueue-admin
+    format: tar.gz
+    format_overrides:
+      - goos: windows
+        format: zip
+    # Naming template for archives
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- .Arch }}
+    # Files to include in the archive (besides binaries)
+    files:
+      - LICENSE
+      - README.md
+      - config.example.yaml
+      - docs/ARCHITECTURE.md
+      - docs/runbook.md
+
+# -----------------------------------------------------------------------------
+# Checksum configuration
+# -----------------------------------------------------------------------------
+checksum:
+  name_template: 'checksums.txt'
+  algorithm: sha256
+
+# -----------------------------------------------------------------------------
+# Snapshot configuration (for testing)
+# -----------------------------------------------------------------------------
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+# -----------------------------------------------------------------------------
+# Changelog configuration
+# -----------------------------------------------------------------------------
+#
+# Auto-generates changelog from git commits.
+# Groups commits by type based on conventional commit prefixes.
+# -----------------------------------------------------------------------------
+changelog:
+  sort: asc
+  use: github
+  groups:
+    - title: '🚀 Features'
+      regexp: '^.*?feat(\([[:word:]]+\))??!?:.+$'
+      order: 0
+    - title: '🐛 Bug Fixes'
+      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
+      order: 1
+    - title: '⚡ Performance'
+      regexp: '^.*?perf(\([[:word:]]+\))??!?:.+$'
+      order: 2
+    - title: '📚 Documentation'
+      regexp: '^.*?docs(\([[:word:]]+\))??!?:.+$'
+      order: 3
+    - title: '🔧 Maintenance'
+      regexp: '^.*?(chore|refactor|style|test)(\([[:word:]]+\))??!?:.+$'
+      order: 4
+    - title: 'Other'
+      order: 999
+  filters:
+    exclude:
+      - '^Merge pull request'
+      - '^Merge branch'
+      - '^WIP:'
+
+# -----------------------------------------------------------------------------
+# Release configuration
+# -----------------------------------------------------------------------------
+release:
+  github:
+    owner: abd-ulbasit
+    name: goqueue
+  # Don't create as draft - publish immediately
+  draft: false
+  # Auto-detect prerelease from version (v1.0.0-beta.1 = prerelease)
+  prerelease: auto
+  # Release name template
+  name_template: "GoQueue {{.Version}}"
+  # Header for release notes
+  header: |
+    ## GoQueue {{ .Version }}
+    
+    {{ if .Prerelease }}⚠️ This is a pre-release version.{{ end }}
+    
+    ### Installation
+    
+    **Download:**
+    - [Linux AMD64](https://github.com/abd-ulbasit/goqueue/releases/download/{{ .Tag }}/goqueue_{{ .Version }}_linux_amd64.tar.gz)
+    - [Linux ARM64](https://github.com/abd-ulbasit/goqueue/releases/download/{{ .Tag }}/goqueue_{{ .Version }}_linux_arm64.tar.gz)
+    - [macOS AMD64](https://github.com/abd-ulbasit/goqueue/releases/download/{{ .Tag }}/goqueue_{{ .Version }}_darwin_amd64.tar.gz)
+    - [macOS ARM64 (Apple Silicon)](https://github.com/abd-ulbasit/goqueue/releases/download/{{ .Tag }}/goqueue_{{ .Version }}_darwin_arm64.tar.gz)
+    - [Windows AMD64](https://github.com/abd-ulbasit/goqueue/releases/download/{{ .Tag }}/goqueue_{{ .Version }}_windows_amd64.zip)
+    
+    **Docker:**
+    ```bash
+    docker pull ghcr.io/abd-ulbasit/goqueue:{{ .Version }}
+    ```
+    
+    **Verify checksums:**
+    ```bash
+    sha256sum -c checksums.txt
+    ```
+  # Footer for release notes
+  footer: |
+    
+    ---
+    
+    **Full Changelog**: https://github.com/abd-ulbasit/goqueue/compare/{{ .PreviousTag }}...{{ .Tag }}
+    
+    **Documentation**: https://abd-ulbasit.github.io/goqueue/
+
+# -----------------------------------------------------------------------------
+# Announce (optional)
+# -----------------------------------------------------------------------------
+# Uncomment to announce releases to various channels
+# announce:
+#   slack:
+#     enabled: true
+#     channel: '#releases'
+
+# -----------------------------------------------------------------------------
+# Note: Docker images are built via the separate Docker job in CI workflow
+# -----------------------------------------------------------------------------
+# WHY NOT USE GORELEASER FOR DOCKER?
+# - Our Dockerfile is multi-stage with detailed comments for learning
+# - CI workflow provides better caching (GitHub Actions cache)
+# - Separate concerns: GoReleaser for binaries, CI for containers
+# - More control over multi-arch builds with docker/build-push-action
+# -----------------------------------------------------------------------------
