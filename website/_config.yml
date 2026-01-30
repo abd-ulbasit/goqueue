@@ -6,6 +6,9 @@ description: A high-performance distributed message queue built in Go
 baseurl: "/goqueue"
 url: "https://abd-ulbasit.github.io"
 
+# GitHub repository (required for github-metadata plugin)
+repository: abd-ulbasit/goqueue
+
 # Theme
 remote_theme: just-the-docs/just-the-docs@v0.8.2
 
