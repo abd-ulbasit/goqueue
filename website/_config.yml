@@ -1,0 +1,107 @@
+# GoQueue Documentation Site Configuration
+
+# Site settings
+title: GoQueue
+description: A high-performance distributed message queue built in Go
+baseurl: "/goqueue"
+url: "https://abd-ulbasit.github.io"
+
+# Theme
+remote_theme: just-the-docs/just-the-docs@v0.8.2
+
+# Color scheme (dark, light, or auto)
+color_scheme: dark
+
+# Logo
+logo: "/assets/images/logo.svg"
+
+# Enable search
+search_enabled: true
+search:
+  heading_level: 2
+  previews: 3
+  preview_words_before: 5
+  preview_words_after: 10
+  tokenizer_separator: /[\s/]+/
+  rel_url: true
+  button: false
+
+# Navigation
+nav_sort: case_sensitive
+
+# External links
+aux_links:
+  "GitHub":
+    - "https://github.com/abd-ulbasit/goqueue"
+
+aux_links_new_tab: true
+
+# Footer
+footer_content: "Copyright &copy; 2025 GoQueue Contributors. Distributed under the MIT License."
+
+# Collections
+collections:
+  docs:
+    permalink: "/:collection/:path/"
+    output: true
+
+# Defaults
+defaults:
+  - scope:
+      path: "docs"
+      type: "docs"
+    values:
+      layout: "default"
+      nav_order: 1
+
+# Build settings
+markdown: kramdown
+highlighter: rouge
+
+kramdown:
+  syntax_highlighter_opts:
+    block:
+      line_numbers: false
+
+# Plugins
+plugins:
+  - jekyll-seo-tag
+  - jekyll-github-metadata
+  - jekyll-include-cache
+
+# Exclude from processing
+exclude:
+  - Gemfile
+  - Gemfile.lock
+  - node_modules/
+  - vendor/
+  - README.md
+
+# GitHub Pages
+github:
+  repository_name: goqueue
+  repository_url: https://github.com/abd-ulbasit/goqueue
+
+# Custom variables
+goqueue:
+  version: "1.0.0"
+  grpc_port: 9000
+  http_port: 8080
+
+# Callouts
+callouts_level: quiet
+callouts:
+  highlight:
+    color: yellow
+  important:
+    title: Important
+    color: blue
+  new:
+    title: New
+    color: green
+  note:
+    title: Note
+    color: purple
+  warning:
+    title: Warning
+    color: red

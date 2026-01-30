@@ -148,8 +148,26 @@ func NewServer(b *broker.Broker, config ServerConfig) *Server {
 
 // registerRoutes sets up all API endpoints using chi router.
 func (s *Server) registerRoutes() {
-	// Health & Stats
+	// ==========================================================================
+	// KUBERNETES-READY HEALTH ENDPOINTS
+	// ==========================================================================
+	//
+	// These endpoints follow cloud-native conventions for orchestration systems.
+	//
+	// ENDPOINT        PURPOSE                      K8S PROBE TYPE
+	// ─────────────────────────────────────────────────────────────────────────
+	// /health         General health (legacy)      -
+	// /healthz        Is process alive?            livenessProbe
+	// /readyz         Ready for traffic?           readinessProbe
+	// /livez          Startup complete?            startupProbe
+	// /version        Build/version info           -
+	//
+	// ==========================================================================
 	s.router.Get("/health", s.handleHealth)
+	s.router.Get("/healthz", s.handleHealthz)
+	s.router.Get("/readyz", s.handleReadyz)
+	s.router.Get("/livez", s.handleLivez)
+	s.router.Get("/version", s.handleVersion)
 	s.router.Get("/stats", s.handleStats)
 
 	// ==========================================================================

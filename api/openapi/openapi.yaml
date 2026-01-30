@@ -1,0 +1,2306 @@
+openapi: 3.1.0
+info:
+  title: GoQueue API
+  description: |
+    # GoQueue - Distributed Message Queue
+
+    GoQueue is a high-performance, distributed message queue built in Go. It combines the best features 
+    of Kafka (log-based storage, partitioning), SQS (visibility timeouts, DLQ), and RabbitMQ (priority queues, 
+    flexible routing) into a single, easy-to-deploy system.
+
+    ## Key Features
+
+    - **Topics & Partitions**: Kafka-style log-based storage with configurable partitions
+    - **Consumer Groups**: Automatic partition assignment and rebalancing
+    - **Message Reliability**: ACK/NACK, visibility timeouts, dead letter queues
+    - **Priority Queues**: 5 priority levels with weighted fair queuing
+    - **Delayed Messages**: Schedule messages for future delivery
+    - **Schema Registry**: JSON Schema validation with compatibility checking
+    - **Transactions**: Exactly-once semantics with idempotent producers
+    - **Observability**: Prometheus metrics, distributed tracing
+
+    ## Authentication
+
+    Currently, GoQueue does not require authentication. In production deployments, 
+    it's recommended to use a reverse proxy (nginx, Traefik) for authentication.
+
+    ## Rate Limiting
+
+    No rate limiting is enforced by default. Use external rate limiters or 
+    configure tenant quotas for multi-tenant deployments.
+
+  version: 1.0.0
+  contact:
+    name: GoQueue Team
+    url: https://github.com/abd-ulbasit/goqueue
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: http://localhost:8080
+    description: Local development server
+  - url: http://goqueue:8080
+    description: Docker/Kubernetes internal service
+  - url: https://api.goqueue.example.com
+    description: Production server (example)
+
+tags:
+  - name: Health
+    description: Health check and status endpoints
+  - name: Topics
+    description: Topic management operations
+  - name: Messages
+    description: Message publishing and consumption
+  - name: Consumer Groups
+    description: Consumer group management and coordination
+  - name: Offsets
+    description: Offset management for consumer groups
+  - name: Reliability
+    description: ACK/NACK, visibility timeouts, DLQ operations
+  - name: Delayed Messages
+    description: Scheduled/delayed message delivery
+  - name: Priority
+    description: Priority queue operations
+  - name: Schemas
+    description: Schema registry operations
+  - name: Transactions
+    description: Transactional message production
+  - name: Tracing
+    description: Message tracing and observability
+  - name: Admin
+    description: Administrative operations
+
+paths:
+  # ===========================================================================
+  # HEALTH ENDPOINTS
+  # ===========================================================================
+  /health:
+    get:
+      tags: [Health]
+      summary: Basic health check
+      description: Returns basic health status. Use /healthz, /readyz, /livez for Kubernetes probes.
+      operationId: getHealth
+      responses:
+        '200':
+          description: Server is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              example:
+                status: ok
+                timestamp: "2025-01-30T10:30:00Z"
+
+  /healthz:
+    get:
+      tags: [Health]
+      summary: Kubernetes liveness probe
+      description: |
+        Returns 200 if the process is alive and not deadlocked.
+        Use this for Kubernetes livenessProbe configuration.
+        
+        **Semantics**: Failing this probe causes the container to be killed and restarted.
+      operationId: getLiveness
+      responses:
+        '200':
+          description: Process is alive
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LivenessResponse'
+        '503':
+          description: Process should be killed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LivenessResponse'
+
+  /readyz:
+    get:
+      tags: [Health]
+      summary: Kubernetes readiness probe
+      description: |
+        Returns 200 if the server is ready to handle requests.
+        Use this for Kubernetes readinessProbe configuration.
+        
+        **Semantics**: Failing this probe removes the pod from service endpoints (no traffic).
+      operationId: getReadiness
+      parameters:
+        - name: verbose
+          in: query
+          description: Include detailed health check results
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: Server is ready for traffic
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadinessResponse'
+        '503':
+          description: Server is not ready for traffic
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadinessResponse'
+
+  /livez:
+    get:
+      tags: [Health]
+      summary: Kubernetes startup probe
+      description: |
+        Returns 200 when initialization is complete.
+        Use this for Kubernetes startupProbe configuration.
+        
+        **Semantics**: Only runs during startup. Failing repeatedly causes container restart.
+      operationId: getStartup
+      responses:
+        '200':
+          description: Startup complete
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LivenessResponse'
+        '503':
+          description: Still initializing
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LivenessResponse'
+
+  /version:
+    get:
+      tags: [Health]
+      summary: Get version information
+      description: Returns build and version information about the server.
+      operationId: getVersion
+      responses:
+        '200':
+          description: Version information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VersionResponse'
+
+  /stats:
+    get:
+      tags: [Health]
+      summary: Get broker statistics
+      description: Returns operational statistics about the broker.
+      operationId: getStats
+      responses:
+        '200':
+          description: Broker statistics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatsResponse'
+
+  /metrics:
+    get:
+      tags: [Health]
+      summary: Prometheus metrics
+      description: |
+        Returns metrics in Prometheus text exposition format.
+        Configure Prometheus to scrape this endpoint.
+      operationId: getMetrics
+      responses:
+        '200':
+          description: Prometheus metrics
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: |
+                # HELP goqueue_broker_messages_published_total Total messages published
+                # TYPE goqueue_broker_messages_published_total counter
+                goqueue_broker_messages_published_total{topic="orders"} 12345
+
+  # ===========================================================================
+  # TOPIC ENDPOINTS
+  # ===========================================================================
+  /topics:
+    get:
+      tags: [Topics]
+      summary: List all topics
+      description: Returns a list of all topic names in the broker.
+      operationId: listTopics
+      responses:
+        '200':
+          description: List of topics
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  topics:
+                    type: array
+                    items:
+                      type: string
+              example:
+                topics: ["orders", "events", "notifications"]
+
+    post:
+      tags: [Topics]
+      summary: Create a new topic
+      description: |
+        Creates a new topic with the specified configuration.
+        Topics are the primary unit of organization in GoQueue.
+      operationId: createTopic
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTopicRequest'
+            example:
+              name: orders
+              num_partitions: 6
+              retention_hours: 168
+      responses:
+        '201':
+          description: Topic created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateTopicResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: Topic already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /topics/{topicName}:
+    parameters:
+      - $ref: '#/components/parameters/TopicName'
+
+    get:
+      tags: [Topics]
+      summary: Get topic details
+      description: Returns detailed information about a specific topic.
+      operationId: getTopic
+      responses:
+        '200':
+          description: Topic details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TopicDetails'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      tags: [Topics]
+      summary: Delete a topic
+      description: |
+        Permanently deletes a topic and all its data.
+        **Warning**: This operation is irreversible.
+      operationId: deleteTopic
+      responses:
+        '200':
+          description: Topic deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted:
+                    type: boolean
+                  name:
+                    type: string
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ===========================================================================
+  # MESSAGE ENDPOINTS
+  # ===========================================================================
+  /topics/{topicName}/messages:
+    parameters:
+      - $ref: '#/components/parameters/TopicName'
+
+    post:
+      tags: [Messages]
+      summary: Publish messages
+      description: |
+        Publishes one or more messages to the topic.
+        
+        **Routing**:
+        - With key: Message routed to partition based on key hash (ordering guarantee)
+        - Without key: Round-robin across partitions
+        - With partition: Direct partition assignment
+        
+        **Priority** (optional):
+        - critical, high, normal (default), low, background
+        
+        **Delay** (optional):
+        - Use `delay` for relative delay: "30s", "1h", "24h"
+        - Use `deliverAt` for absolute time: RFC3339 timestamp
+      operationId: publishMessages
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PublishRequest'
+            examples:
+              simple:
+                summary: Simple message
+                value:
+                  messages:
+                    - value: '{"orderId": "12345"}'
+              with_key:
+                summary: Message with key (for ordering)
+                value:
+                  messages:
+                    - key: "user-123"
+                      value: '{"orderId": "12345"}'
+              with_priority:
+                summary: High priority message
+                value:
+                  messages:
+                    - value: '{"alert": "critical"}'
+                      priority: critical
+              delayed:
+                summary: Delayed message
+                value:
+                  messages:
+                    - value: '{"reminder": "follow up"}'
+                      delay: "1h"
+              batch:
+                summary: Batch publish
+                value:
+                  messages:
+                    - key: "user-1"
+                      value: '{"action": "login"}'
+                    - key: "user-2"
+                      value: '{"action": "purchase"}'
+                      priority: high
+      responses:
+        '200':
+          description: Messages published
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublishResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /topics/{topicName}/partitions/{partitionId}/messages:
+    parameters:
+      - $ref: '#/components/parameters/TopicName'
+      - $ref: '#/components/parameters/PartitionId'
+
+    get:
+      tags: [Messages]
+      summary: Consume messages (simple)
+      description: |
+        Simple message consumption without consumer groups.
+        For production use, prefer consumer groups with `/groups/{groupId}/poll`.
+      operationId: consumeMessages
+      parameters:
+        - name: offset
+          in: query
+          description: Starting offset (0 = beginning)
+          schema:
+            type: integer
+            format: int64
+            default: 0
+        - name: limit
+          in: query
+          description: Maximum messages to return
+          schema:
+            type: integer
+            default: 100
+            maximum: 1000
+      responses:
+        '200':
+          description: Messages consumed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConsumeResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ===========================================================================
+  # DELAYED MESSAGES ENDPOINTS
+  # ===========================================================================
+  /topics/{topicName}/delayed:
+    parameters:
+      - $ref: '#/components/parameters/TopicName'
+
+    get:
+      tags: [Delayed Messages]
+      summary: List delayed messages
+      description: Returns a list of pending delayed messages for the topic.
+      operationId: listDelayedMessages
+      parameters:
+        - name: limit
+          in: query
+          description: Maximum messages to return
+          schema:
+            type: integer
+            default: 100
+      responses:
+        '200':
+          description: List of delayed messages
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DelayedMessagesResponse'
+
+  /topics/{topicName}/delayed/{offset}:
+    parameters:
+      - $ref: '#/components/parameters/TopicName'
+      - name: offset
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+
+    get:
+      tags: [Delayed Messages]
+      summary: Get delayed message
+      description: Returns details about a specific delayed message.
+      operationId: getDelayedMessage
+      responses:
+        '200':
+          description: Delayed message details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DelayedMessage'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /topics/{topicName}/delayed/{partition}/{offset}:
+    parameters:
+      - $ref: '#/components/parameters/TopicName'
+      - $ref: '#/components/parameters/PartitionId'
+      - name: offset
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+
+    delete:
+      tags: [Delayed Messages]
+      summary: Cancel delayed message
+      description: Cancels a pending delayed message before delivery.
+      operationId: cancelDelayedMessage
+      responses:
+        '200':
+          description: Message cancelled
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  cancelled:
+                    type: boolean
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ===========================================================================
+  # CONSUMER GROUP ENDPOINTS
+  # ===========================================================================
+  /groups:
+    get:
+      tags: [Consumer Groups]
+      summary: List consumer groups
+      description: Returns a list of all consumer groups.
+      operationId: listGroups
+      responses:
+        '200':
+          description: List of consumer groups
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GroupListResponse'
+
+  /groups/{groupId}:
+    parameters:
+      - $ref: '#/components/parameters/GroupId'
+
+    get:
+      tags: [Consumer Groups]
+      summary: Get group details
+      description: Returns detailed information about a consumer group.
+      operationId: getGroup
+      responses:
+        '200':
+          description: Group details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GroupDetails'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      tags: [Consumer Groups]
+      summary: Delete consumer group
+      description: Deletes a consumer group and its offset data.
+      operationId: deleteGroup
+      responses:
+        '200':
+          description: Group deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted:
+                    type: boolean
+
+  /groups/{groupId}/join:
+    parameters:
+      - $ref: '#/components/parameters/GroupId'
+
+    post:
+      tags: [Consumer Groups]
+      summary: Join consumer group
+      description: |
+        Joins a consumer group. The broker will assign partitions based on 
+        the number of members and available partitions.
+      operationId: joinGroup
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/JoinGroupRequest'
+      responses:
+        '200':
+          description: Joined successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JoinGroupResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /groups/{groupId}/heartbeat:
+    parameters:
+      - $ref: '#/components/parameters/GroupId'
+
+    post:
+      tags: [Consumer Groups]
+      summary: Send heartbeat
+      description: |
+        Sends a heartbeat to keep the consumer session alive.
+        Must be sent within session timeout (default: 30s).
+      operationId: heartbeat
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HeartbeatRequest'
+      responses:
+        '200':
+          description: Heartbeat acknowledged
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HeartbeatResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /groups/{groupId}/leave:
+    parameters:
+      - $ref: '#/components/parameters/GroupId'
+
+    post:
+      tags: [Consumer Groups]
+      summary: Leave consumer group
+      description: Gracefully leaves the consumer group, triggering a rebalance.
+      operationId: leaveGroup
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LeaveGroupRequest'
+      responses:
+        '200':
+          description: Left successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  left:
+                    type: boolean
+
+  /groups/{groupId}/poll:
+    parameters:
+      - $ref: '#/components/parameters/GroupId'
+
+    get:
+      tags: [Consumer Groups]
+      summary: Poll for messages
+      description: |
+        Long-polls for messages from assigned partitions.
+        Returns immediately if messages are available, or waits up to timeout.
+      operationId: pollMessages
+      parameters:
+        - name: member_id
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: max_messages
+          in: query
+          description: Maximum messages to return
+          schema:
+            type: integer
+            default: 100
+        - name: timeout
+          in: query
+          description: Long-poll timeout (e.g., "30s")
+          schema:
+            type: string
+            default: "30s"
+      responses:
+        '200':
+          description: Messages retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PollResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  # ===========================================================================
+  # OFFSET ENDPOINTS
+  # ===========================================================================
+  /groups/{groupId}/offsets:
+    parameters:
+      - $ref: '#/components/parameters/GroupId'
+
+    get:
+      tags: [Offsets]
+      summary: Get committed offsets
+      description: Returns the committed offsets for all assigned partitions.
+      operationId: getOffsets
+      parameters:
+        - name: topic
+          in: query
+          description: Filter by topic name
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Committed offsets
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OffsetsResponse'
+
+    post:
+      tags: [Offsets]
+      summary: Commit offsets
+      description: |
+        Commits offsets for processed messages.
+        Only offsets for assigned partitions can be committed.
+      operationId: commitOffsets
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommitOffsetsRequest'
+      responses:
+        '200':
+          description: Offsets committed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  committed:
+                    type: boolean
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  # ===========================================================================
+  # RELIABILITY ENDPOINTS (ACK/NACK)
+  # ===========================================================================
+  /messages/ack:
+    post:
+      tags: [Reliability]
+      summary: Acknowledge message
+      description: |
+        Acknowledges successful processing of a message.
+        The message will not be redelivered.
+      operationId: ackMessage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AckRequest'
+      responses:
+        '200':
+          description: Message acknowledged
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  acknowledged:
+                    type: boolean
+
+  /messages/nack:
+    post:
+      tags: [Reliability]
+      summary: Negative acknowledge message
+      description: |
+        Indicates transient processing failure.
+        The message will be redelivered after visibility timeout.
+      operationId: nackMessage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NackRequest'
+      responses:
+        '200':
+          description: Message marked for redelivery
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  requeued:
+                    type: boolean
+
+  /messages/reject:
+    post:
+      tags: [Reliability]
+      summary: Reject message (send to DLQ)
+      description: |
+        Indicates permanent processing failure.
+        The message will be moved to the dead letter queue.
+      operationId: rejectMessage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RejectRequest'
+      responses:
+        '200':
+          description: Message sent to DLQ
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rejected:
+                    type: boolean
+                  dlq_topic:
+                    type: string
+
+  /messages/visibility:
+    post:
+      tags: [Reliability]
+      summary: Extend visibility timeout
+      description: |
+        Extends the visibility timeout for a message being processed.
+        Use when processing takes longer than expected.
+      operationId: extendVisibility
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExtendVisibilityRequest'
+      responses:
+        '200':
+          description: Visibility extended
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  extended:
+                    type: boolean
+                  new_deadline:
+                    type: string
+                    format: date-time
+
+  /reliability/stats:
+    get:
+      tags: [Reliability]
+      summary: Get reliability statistics
+      description: Returns ACK/NACK/DLQ statistics.
+      operationId: getReliabilityStats
+      responses:
+        '200':
+          description: Reliability statistics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReliabilityStats'
+
+  # ===========================================================================
+  # PRIORITY ENDPOINTS
+  # ===========================================================================
+  /priority/stats:
+    get:
+      tags: [Priority]
+      summary: Get priority queue statistics
+      description: Returns statistics about priority distribution and processing.
+      operationId: getPriorityStats
+      responses:
+        '200':
+          description: Priority statistics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PriorityStats'
+
+  # ===========================================================================
+  # DELAY ENDPOINTS
+  # ===========================================================================
+  /delay/stats:
+    get:
+      tags: [Delayed Messages]
+      summary: Get delay queue statistics
+      description: Returns statistics about delayed message processing.
+      operationId: getDelayStats
+      responses:
+        '200':
+          description: Delay statistics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DelayStats'
+
+  # ===========================================================================
+  # SCHEMA REGISTRY ENDPOINTS
+  # ===========================================================================
+  /schemas/subjects:
+    get:
+      tags: [Schemas]
+      summary: List schema subjects
+      description: Returns a list of all schema subjects.
+      operationId: listSchemaSubjects
+      responses:
+        '200':
+          description: List of subjects
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: string
+
+  /schemas/subjects/{subject}/versions:
+    parameters:
+      - $ref: '#/components/parameters/Subject'
+
+    get:
+      tags: [Schemas]
+      summary: List schema versions
+      description: Returns all version numbers for a subject.
+      operationId: listSchemaVersions
+      responses:
+        '200':
+          description: List of versions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: integer
+
+    post:
+      tags: [Schemas]
+      summary: Register schema
+      description: |
+        Registers a new schema version under the subject.
+        The schema is validated for compatibility with existing versions.
+      operationId: registerSchema
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterSchemaRequest'
+      responses:
+        '200':
+          description: Schema registered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegisterSchemaResponse'
+        '409':
+          description: Incompatible schema
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /schemas/subjects/{subject}/versions/{version}:
+    parameters:
+      - $ref: '#/components/parameters/Subject'
+      - name: version
+        in: path
+        required: true
+        description: Version number or "latest"
+        schema:
+          type: string
+
+    get:
+      tags: [Schemas]
+      summary: Get schema version
+      description: Returns the schema for a specific version.
+      operationId: getSchemaVersion
+      responses:
+        '200':
+          description: Schema version
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SchemaVersion'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      tags: [Schemas]
+      summary: Delete schema version
+      description: Soft-deletes a schema version.
+      operationId: deleteSchemaVersion
+      responses:
+        '200':
+          description: Version deleted
+          content:
+            application/json:
+              schema:
+                type: integer
+                description: Deleted version number
+
+  /schemas/config:
+    get:
+      tags: [Schemas]
+      summary: Get global compatibility mode
+      description: Returns the global schema compatibility mode.
+      operationId: getGlobalSchemaConfig
+      responses:
+        '200':
+          description: Compatibility mode
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CompatibilityConfig'
+
+    put:
+      tags: [Schemas]
+      summary: Set global compatibility mode
+      description: Sets the global schema compatibility mode.
+      operationId: setGlobalSchemaConfig
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CompatibilityConfig'
+      responses:
+        '200':
+          description: Compatibility mode updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CompatibilityConfig'
+
+  /schemas/ids/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+
+    get:
+      tags: [Schemas]
+      summary: Get schema by ID
+      description: Returns the schema with the given global ID.
+      operationId: getSchemaById
+      responses:
+        '200':
+          description: Schema
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Schema'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /schemas/stats:
+    get:
+      tags: [Schemas]
+      summary: Get schema registry statistics
+      description: Returns statistics about the schema registry.
+      operationId: getSchemaStats
+      responses:
+        '200':
+          description: Schema statistics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SchemaStats'
+
+  # ===========================================================================
+  # TRANSACTION ENDPOINTS
+  # ===========================================================================
+  /producers/init:
+    post:
+      tags: [Transactions]
+      summary: Initialize producer
+      description: |
+        Initializes an idempotent/transactional producer.
+        Returns a producer ID and epoch for subsequent operations.
+      operationId: initProducer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InitProducerRequest'
+      responses:
+        '200':
+          description: Producer initialized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InitProducerResponse'
+
+  /producers/{producerId}/heartbeat:
+    parameters:
+      - name: producerId
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+
+    post:
+      tags: [Transactions]
+      summary: Producer heartbeat
+      description: Keeps the producer session alive.
+      operationId: producerHeartbeat
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProducerHeartbeatRequest'
+      responses:
+        '200':
+          description: Heartbeat acknowledged
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+
+  /transactions:
+    get:
+      tags: [Transactions]
+      summary: List active transactions
+      description: Returns a list of active transactions.
+      operationId: listTransactions
+      responses:
+        '200':
+          description: Active transactions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionListResponse'
+
+  /transactions/begin:
+    post:
+      tags: [Transactions]
+      summary: Begin transaction
+      description: Begins a new transaction for the producer.
+      operationId: beginTransaction
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BeginTransactionRequest'
+      responses:
+        '200':
+          description: Transaction started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BeginTransactionResponse'
+
+  /transactions/publish:
+    post:
+      tags: [Transactions]
+      summary: Publish transactional message
+      description: Publishes a message as part of the current transaction.
+      operationId: publishTransactional
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransactionalPublishRequest'
+      responses:
+        '200':
+          description: Message published
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionalPublishResponse'
+
+  /transactions/commit:
+    post:
+      tags: [Transactions]
+      summary: Commit transaction
+      description: Atomically commits all messages in the transaction.
+      operationId: commitTransaction
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommitTransactionRequest'
+      responses:
+        '200':
+          description: Transaction committed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [committed]
+
+  /transactions/abort:
+    post:
+      tags: [Transactions]
+      summary: Abort transaction
+      description: Rolls back all messages in the transaction.
+      operationId: abortTransaction
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AbortTransactionRequest'
+      responses:
+        '200':
+          description: Transaction aborted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [aborted]
+
+  /transactions/stats:
+    get:
+      tags: [Transactions]
+      summary: Get transaction statistics
+      description: Returns statistics about transaction processing.
+      operationId: getTransactionStats
+      responses:
+        '200':
+          description: Transaction statistics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionStats'
+
+  # ===========================================================================
+  # TRACING ENDPOINTS
+  # ===========================================================================
+  /traces:
+    get:
+      tags: [Tracing]
+      summary: List recent traces
+      description: Returns a list of recent message traces.
+      operationId: listTraces
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+      responses:
+        '200':
+          description: List of traces
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TraceListResponse'
+
+  /traces/search:
+    get:
+      tags: [Tracing]
+      summary: Search traces
+      description: Searches traces by various criteria.
+      operationId: searchTraces
+      parameters:
+        - name: topic
+          in: query
+          schema:
+            type: string
+        - name: partition
+          in: query
+          schema:
+            type: integer
+        - name: consumer_group
+          in: query
+          schema:
+            type: string
+        - name: start
+          in: query
+          description: Start time (RFC3339)
+          schema:
+            type: string
+            format: date-time
+        - name: end
+          in: query
+          description: End time (RFC3339)
+          schema:
+            type: string
+            format: date-time
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [completed, error, pending]
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+      responses:
+        '200':
+          description: Search results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TraceListResponse'
+
+  /traces/{traceId}:
+    parameters:
+      - name: traceId
+        in: path
+        required: true
+        schema:
+          type: string
+
+    get:
+      tags: [Tracing]
+      summary: Get trace by ID
+      description: Returns detailed trace information.
+      operationId: getTrace
+      responses:
+        '200':
+          description: Trace details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Trace'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /traces/stats:
+    get:
+      tags: [Tracing]
+      summary: Get tracer statistics
+      description: Returns statistics about the tracing system.
+      operationId: getTracerStats
+      responses:
+        '200':
+          description: Tracer statistics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TracerStats'
+
+  # ===========================================================================
+  # ADMIN ENDPOINTS
+  # ===========================================================================
+  /admin/topics/{topicName}/partitions:
+    parameters:
+      - $ref: '#/components/parameters/TopicName'
+
+    post:
+      tags: [Admin]
+      summary: Add partitions to topic
+      description: |
+        Increases the number of partitions for a topic.
+        **Warning**: This can affect message ordering for keyed messages.
+      operationId: addPartitions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddPartitionsRequest'
+      responses:
+        '200':
+          description: Partitions added
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AddPartitionsResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /admin/tenants:
+    get:
+      tags: [Admin]
+      summary: List tenants
+      description: Returns a list of all tenants (multi-tenant mode).
+      operationId: listTenants
+      responses:
+        '200':
+          description: List of tenants
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantListResponse'
+
+    post:
+      tags: [Admin]
+      summary: Create tenant
+      description: Creates a new tenant with specified quotas.
+      operationId: createTenant
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTenantRequest'
+      responses:
+        '201':
+          description: Tenant created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tenant'
+
+# ===========================================================================
+# COMPONENTS
+# ===========================================================================
+components:
+  parameters:
+    TopicName:
+      name: topicName
+      in: path
+      required: true
+      description: Name of the topic
+      schema:
+        type: string
+        pattern: '^[a-zA-Z0-9_-]+$'
+        minLength: 1
+        maxLength: 255
+
+    PartitionId:
+      name: partitionId
+      in: path
+      required: true
+      description: Partition ID (0-based)
+      schema:
+        type: integer
+        minimum: 0
+
+    GroupId:
+      name: groupId
+      in: path
+      required: true
+      description: Consumer group ID
+      schema:
+        type: string
+        pattern: '^[a-zA-Z0-9_-]+$'
+
+    Subject:
+      name: subject
+      in: path
+      required: true
+      description: Schema subject name
+      schema:
+        type: string
+
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    ServerError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+  schemas:
+    # Error Response
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+
+    # Health Responses
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded, fail]
+        timestamp:
+          type: string
+          format: date-time
+
+    LivenessResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [pass, fail]
+        timestamp:
+          type: string
+          format: date-time
+        uptime:
+          type: string
+        message:
+          type: string
+
+    ReadinessResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [pass, fail]
+        timestamp:
+          type: string
+          format: date-time
+        uptime:
+          type: string
+        message:
+          type: string
+        checks:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/HealthCheckResult'
+        broker:
+          type: object
+          properties:
+            node_id:
+              type: string
+            topic_count:
+              type: integer
+            total_size:
+              type: integer
+              format: int64
+
+    HealthCheckResult:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [pass, warn, fail]
+        message:
+          type: string
+        latency:
+          type: string
+
+    VersionResponse:
+      type: object
+      properties:
+        version:
+          type: string
+        git_commit:
+          type: string
+        build_time:
+          type: string
+        go_version:
+          type: string
+
+    StatsResponse:
+      type: object
+      properties:
+        node_id:
+          type: string
+        uptime:
+          type: string
+        topics:
+          type: integer
+        total_size_bytes:
+          type: integer
+          format: int64
+        topic_stats:
+          type: object
+
+    # Topic Schemas
+    CreateTopicRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          description: Topic name
+          pattern: '^[a-zA-Z0-9_-]+$'
+        num_partitions:
+          type: integer
+          description: Number of partitions (default 3)
+          default: 3
+          minimum: 1
+        retention_hours:
+          type: integer
+          description: Message retention in hours (default 168 = 7 days)
+          default: 168
+
+    CreateTopicResponse:
+      type: object
+      properties:
+        name:
+          type: string
+        partitions:
+          type: integer
+        created:
+          type: boolean
+
+    TopicDetails:
+      type: object
+      properties:
+        name:
+          type: string
+        partitions:
+          type: integer
+        total_messages:
+          type: integer
+          format: int64
+        total_size_bytes:
+          type: integer
+          format: int64
+        partition_offsets:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              earliest:
+                type: integer
+                format: int64
+              latest:
+                type: integer
+                format: int64
+
+    # Message Schemas
+    PublishRequest:
+      type: object
+      required: [messages]
+      properties:
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/PublishMessage'
+          minItems: 1
+
+    PublishMessage:
+      type: object
+      required: [value]
+      properties:
+        key:
+          type: string
+          description: Message key for partition routing
+        value:
+          type: string
+          description: Message payload
+        partition:
+          type: integer
+          description: Explicit partition (overrides key routing)
+        delay:
+          type: string
+          description: Relative delay (e.g., "30s", "1h")
+        deliverAt:
+          type: string
+          format: date-time
+          description: Absolute delivery time (RFC3339)
+        priority:
+          type: string
+          enum: [critical, high, normal, low, background]
+          default: normal
+
+    PublishResponse:
+      type: object
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/PublishResult'
+
+    PublishResult:
+      type: object
+      properties:
+        partition:
+          type: integer
+        offset:
+          type: integer
+          format: int64
+        priority:
+          type: string
+        delayed:
+          type: boolean
+        deliverAt:
+          type: string
+          format: date-time
+        error:
+          type: string
+
+    ConsumeResponse:
+      type: object
+      properties:
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/ConsumeMessage'
+        next_offset:
+          type: integer
+          format: int64
+
+    ConsumeMessage:
+      type: object
+      properties:
+        offset:
+          type: integer
+          format: int64
+        timestamp:
+          type: string
+          format: date-time
+        key:
+          type: string
+        value:
+          type: string
+        priority:
+          type: string
+
+    # Delayed Message Schemas
+    DelayedMessagesResponse:
+      type: object
+      properties:
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/DelayedMessage'
+        count:
+          type: integer
+
+    DelayedMessage:
+      type: object
+      properties:
+        topic:
+          type: string
+        partition:
+          type: integer
+        offset:
+          type: integer
+          format: int64
+        deliver_at:
+          type: string
+          format: date-time
+        priority:
+          type: string
+
+    # Consumer Group Schemas
+    GroupListResponse:
+      type: object
+      properties:
+        groups:
+          type: array
+          items:
+            type: string
+
+    GroupDetails:
+      type: object
+      properties:
+        group_id:
+          type: string
+        state:
+          type: string
+          enum: [stable, rebalancing, dead]
+        members:
+          type: array
+          items:
+            $ref: '#/components/schemas/GroupMember'
+        generation:
+          type: integer
+        protocol:
+          type: string
+
+    GroupMember:
+      type: object
+      properties:
+        member_id:
+          type: string
+        client_id:
+          type: string
+        assigned_partitions:
+          type: array
+          items:
+            type: string
+
+    JoinGroupRequest:
+      type: object
+      required: [client_id, topics]
+      properties:
+        client_id:
+          type: string
+        topics:
+          type: array
+          items:
+            type: string
+        session_timeout:
+          type: string
+          default: "30s"
+
+    JoinGroupResponse:
+      type: object
+      properties:
+        member_id:
+          type: string
+        generation:
+          type: integer
+        leader:
+          type: boolean
+        assigned_partitions:
+          type: array
+          items:
+            type: string
+        rebalance_required:
+          type: boolean
+
+    HeartbeatRequest:
+      type: object
+      required: [member_id, generation]
+      properties:
+        member_id:
+          type: string
+        generation:
+          type: integer
+
+    HeartbeatResponse:
+      type: object
+      properties:
+        rebalance_required:
+          type: boolean
+        state:
+          type: string
+
+    LeaveGroupRequest:
+      type: object
+      required: [member_id]
+      properties:
+        member_id:
+          type: string
+
+    PollResponse:
+      type: object
+      properties:
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/PollMessage'
+
+    PollMessage:
+      type: object
+      properties:
+        topic:
+          type: string
+        partition:
+          type: integer
+        offset:
+          type: integer
+          format: int64
+        key:
+          type: string
+        value:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        receipt_handle:
+          type: string
+          description: Handle for ACK/NACK operations
+
+    # Offset Schemas
+    OffsetsResponse:
+      type: object
+      properties:
+        offsets:
+          type: object
+          additionalProperties:
+            type: object
+            additionalProperties:
+              type: integer
+              format: int64
+
+    CommitOffsetsRequest:
+      type: object
+      required: [member_id, offsets]
+      properties:
+        member_id:
+          type: string
+        offsets:
+          type: object
+          additionalProperties:
+            type: object
+            additionalProperties:
+              type: integer
+              format: int64
+
+    # Reliability Schemas
+    AckRequest:
+      type: object
+      required: [receipt_handle]
+      properties:
+        receipt_handle:
+          type: string
+        consumer_id:
+          type: string
+
+    NackRequest:
+      type: object
+      required: [receipt_handle]
+      properties:
+        receipt_handle:
+          type: string
+        delay:
+          type: string
+          description: Redelivery delay (default uses visibility timeout)
+
+    RejectRequest:
+      type: object
+      required: [receipt_handle]
+      properties:
+        receipt_handle:
+          type: string
+        reason:
+          type: string
+
+    ExtendVisibilityRequest:
+      type: object
+      required: [receipt_handle, timeout]
+      properties:
+        receipt_handle:
+          type: string
+        timeout:
+          type: string
+          description: New visibility timeout (e.g., "60s")
+
+    ReliabilityStats:
+      type: object
+      properties:
+        acks_total:
+          type: integer
+          format: int64
+        nacks_total:
+          type: integer
+          format: int64
+        rejects_total:
+          type: integer
+          format: int64
+        dlq_messages:
+          type: integer
+          format: int64
+        visibility_extensions:
+          type: integer
+          format: int64
+
+    # Priority Schemas
+    PriorityStats:
+      type: object
+      properties:
+        messages_by_priority:
+          type: object
+          additionalProperties:
+            type: integer
+            format: int64
+        avg_wait_time_by_priority:
+          type: object
+          additionalProperties:
+            type: string
+
+    # Delay Schemas
+    DelayStats:
+      type: object
+      properties:
+        pending_count:
+          type: integer
+          format: int64
+        delivered_count:
+          type: integer
+          format: int64
+        cancelled_count:
+          type: integer
+          format: int64
+        avg_delay:
+          type: string
+
+    # Schema Registry Schemas
+    RegisterSchemaRequest:
+      type: object
+      required: [schema]
+      properties:
+        schema:
+          type: string
+          description: JSON Schema definition
+        schemaType:
+          type: string
+          default: JSON
+
+    RegisterSchemaResponse:
+      type: object
+      properties:
+        id:
+          type: integer
+          description: Global schema ID
+
+    SchemaVersion:
+      type: object
+      properties:
+        subject:
+          type: string
+        version:
+          type: integer
+        id:
+          type: integer
+        schema:
+          type: string
+
+    Schema:
+      type: object
+      properties:
+        schema:
+          type: string
+
+    CompatibilityConfig:
+      type: object
+      properties:
+        compatibilityLevel:
+          type: string
+          enum: [NONE, BACKWARD, FORWARD, FULL, BACKWARD_TRANSITIVE, FORWARD_TRANSITIVE, FULL_TRANSITIVE]
+
+    SchemaStats:
+      type: object
+      properties:
+        subjects:
+          type: integer
+        schemas:
+          type: integer
+        versions:
+          type: integer
+
+    # Transaction Schemas
+    InitProducerRequest:
+      type: object
+      properties:
+        transactional_id:
+          type: string
+
+    InitProducerResponse:
+      type: object
+      properties:
+        producer_id:
+          type: integer
+          format: int64
+        epoch:
+          type: integer
+
+    ProducerHeartbeatRequest:
+      type: object
+      required: [epoch]
+      properties:
+        epoch:
+          type: integer
+
+    BeginTransactionRequest:
+      type: object
+      required: [producer_id, epoch, transactional_id]
+      properties:
+        producer_id:
+          type: integer
+          format: int64
+        epoch:
+          type: integer
+        transactional_id:
+          type: string
+
+    BeginTransactionResponse:
+      type: object
+      properties:
+        transaction_id:
+          type: string
+
+    TransactionalPublishRequest:
+      type: object
+      required: [producer_id, epoch, topic, value]
+      properties:
+        producer_id:
+          type: integer
+          format: int64
+        epoch:
+          type: integer
+        topic:
+          type: string
+        key:
+          type: string
+        value:
+          type: string
+        sequence:
+          type: integer
+
+    TransactionalPublishResponse:
+      type: object
+      properties:
+        partition:
+          type: integer
+        offset:
+          type: integer
+          format: int64
+
+    CommitTransactionRequest:
+      type: object
+      required: [producer_id, epoch, transactional_id]
+      properties:
+        producer_id:
+          type: integer
+          format: int64
+        epoch:
+          type: integer
+        transactional_id:
+          type: string
+
+    AbortTransactionRequest:
+      type: object
+      required: [producer_id, epoch, transactional_id]
+      properties:
+        producer_id:
+          type: integer
+          format: int64
+        epoch:
+          type: integer
+        transactional_id:
+          type: string
+
+    TransactionListResponse:
+      type: object
+      properties:
+        transactions:
+          type: array
+          items:
+            $ref: '#/components/schemas/TransactionInfo'
+
+    TransactionInfo:
+      type: object
+      properties:
+        transaction_id:
+          type: string
+        producer_id:
+          type: integer
+          format: int64
+        state:
+          type: string
+          enum: [ongoing, preparing_commit, preparing_abort, completed_commit, completed_abort]
+        started_at:
+          type: string
+          format: date-time
+
+    TransactionStats:
+      type: object
+      properties:
+        active_transactions:
+          type: integer
+        committed_total:
+          type: integer
+          format: int64
+        aborted_total:
+          type: integer
+          format: int64
+        avg_duration:
+          type: string
+
+    # Tracing Schemas
+    TraceListResponse:
+      type: object
+      properties:
+        traces:
+          type: array
+          items:
+            $ref: '#/components/schemas/Trace'
+
+    Trace:
+      type: object
+      properties:
+        trace_id:
+          type: string
+        topic:
+          type: string
+        partition:
+          type: integer
+        offset:
+          type: integer
+          format: int64
+        status:
+          type: string
+          enum: [completed, error, pending]
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/TraceEvent'
+
+    TraceEvent:
+      type: object
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        event_type:
+          type: string
+        details:
+          type: object
+
+    TracerStats:
+      type: object
+      properties:
+        traces_total:
+          type: integer
+          format: int64
+        traces_completed:
+          type: integer
+          format: int64
+        traces_error:
+          type: integer
+          format: int64
+        avg_latency:
+          type: string
+
+    # Admin Schemas
+    AddPartitionsRequest:
+      type: object
+      required: [count]
+      properties:
+        count:
+          type: integer
+          description: New total partition count
+          minimum: 1
+        replica_assignments:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              type: string
+
+    AddPartitionsResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        topic_name:
+          type: string
+        old_partition_count:
+          type: integer
+        new_partition_count:
+          type: integer
+        partitions_added:
+          type: array
+          items:
+            type: integer
+        error:
+          type: string
+
+    TenantListResponse:
+      type: object
+      properties:
+        tenants:
+          type: array
+          items:
+            $ref: '#/components/schemas/Tenant'
+
+    CreateTenantRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        display_name:
+          type: string
+        quotas:
+          $ref: '#/components/schemas/TenantQuotas'
+
+    Tenant:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        display_name:
+          type: string
+        status:
+          type: string
+          enum: [active, suspended, disabled]
+        created_at:
+          type: string
+          format: date-time
+        quotas:
+          $ref: '#/components/schemas/TenantQuotas'
+
+    TenantQuotas:
+      type: object
+      properties:
+        max_topics:
+          type: integer
+        max_partitions_per_topic:
+          type: integer
+        max_message_size_bytes:
+          type: integer
+        max_messages_per_second:
+          type: integer
+        max_bytes_per_second:
+          type: integer
+          format: int64
+        max_retention_hours:
+          type: integer
