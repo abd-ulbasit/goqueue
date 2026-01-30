@@ -1,15 +1,15 @@
 ---
 layout: default
 title: Concepts
-nav_order: 3
-has_children: true
+
+
 ---
 
 # Core Concepts
-{: .no_toc }
+
 
 Understand the fundamental concepts behind GoQueue's message queue architecture.
-{: .fs-6 .fw-300 }
+
 
 ---
 

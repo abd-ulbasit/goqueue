@@ -1,15 +1,15 @@
 ---
 layout: default
 title: Topics & Partitions
-parent: Concepts
-nav_order: 1
+
+
 ---
 
 # Topics & Partitions
-{: .no_toc }
+
 
 Understanding how messages are organized and stored in GoQueue.
-{: .fs-6 .fw-300 }
+
 
 ## Table of contents
 {: .no_toc .text-delta }

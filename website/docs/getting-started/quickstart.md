@@ -1,15 +1,15 @@
 ---
 layout: default
 title: Quickstart
-parent: Getting Started
-nav_order: 2
+
+
 ---
 
 # Quickstart
-{: .no_toc }
+
 
 Get GoQueue running in 5 minutes.
-{: .fs-6 .fw-300 }
+
 
 ## Table of contents
 {: .no_toc .text-delta }

@@ -1,8 +1,8 @@
 ---
 layout: default
 title: Configuration
-nav_order: 4
-has_children: true
+
+
 permalink: /docs/configuration
 ---
 
@@ -10,7 +10,7 @@ permalink: /docs/configuration
 
 Configure GoQueue for your environment and workload.
 
-{: .fs-6 .fw-300 }
+
 
 ---
 

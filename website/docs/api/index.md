@@ -1,15 +1,15 @@
 ---
 layout: default
 title: API Reference
-nav_order: 4
-has_children: true
+
+
 ---
 
 # API Reference
-{: .no_toc }
+
 
 Complete reference for GoQueue's REST and gRPC APIs.
-{: .fs-6 .fw-300 }
+
 
 ---
 

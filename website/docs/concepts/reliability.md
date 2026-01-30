@@ -1,15 +1,15 @@
 ---
 layout: default
 title: Reliability & Delivery
-parent: Concepts
-nav_order: 3
+
+
 ---
 
 # Reliability & Delivery Guarantees
-{: .no_toc }
+
 
 Understanding ACK, NACK, visibility timeouts, and dead letter queues.
-{: .fs-6 .fw-300 }
+
 
 ## Table of contents
 {: .no_toc .text-delta }
