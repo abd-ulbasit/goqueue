@@ -1,0 +1,580 @@
+# =============================================================================
+# GOQUEUE HELM VALUES
+# =============================================================================
+#
+# This file contains all configurable values for the GoQueue Helm chart.
+# Override these values by:
+#   1. Creating your own values.yaml: helm install -f my-values.yaml
+#   2. Using --set: helm install --set replicaCount=5
+#
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# GLOBAL SETTINGS
+# -----------------------------------------------------------------------------
+global:
+  # Image pull secrets (for private registries)
+  imagePullSecrets: []
+  
+  # Storage class for PVCs (empty = cluster default)
+  storageClass: ""
+
+# -----------------------------------------------------------------------------
+# DEPLOYMENT MODE
+# -----------------------------------------------------------------------------
+# ┌─────────────────────────────────────────────────────────────────────────────┐
+# │ GoQueue supports three deployment modes:                                    │
+# │                                                                             │
+# │ 1. SINGLE (replicaCount: 1)                                                 │
+# │    - One broker, no replication                                             │
+# │    - Good for: Development, testing                                         │
+# │    - NOT for production (single point of failure)                           │
+# │                                                                             │
+# │ 2. CLUSTER-LITE (replicaCount: 3)                                           │
+# │    - 3 brokers with replication                                             │
+# │    - Good for: Small production, startups                                   │
+# │    - Tolerates 1 node failure                                               │
+# │                                                                             │
+# │ 3. PRODUCTION (replicaCount: 5+)                                            │
+# │    - 5+ brokers with replication factor 3                                   │
+# │    - Good for: Large production workloads                                   │
+# │    - Tolerates 2 node failures                                              │
+# └─────────────────────────────────────────────────────────────────────────────┘
+
+# Number of GoQueue broker replicas
+# For production: minimum 3 (odd number recommended for leader election)
+replicaCount: 3
+
+# -----------------------------------------------------------------------------
+# IMAGE CONFIGURATION
+# -----------------------------------------------------------------------------
+image:
+  repository: ghcr.io/abd-ulbasit/goqueue
+  pullPolicy: IfNotPresent
+  # Overrides the image tag (default is Chart appVersion)
+  tag: ""
+
+# Additional image pull secrets
+imagePullSecrets: []
+
+# Override chart name
+nameOverride: ""
+fullnameOverride: ""
+
+# -----------------------------------------------------------------------------
+# SERVICE ACCOUNT
+# -----------------------------------------------------------------------------
+serviceAccount:
+  # Create a service account for GoQueue pods
+  create: true
+  
+  # Annotations to add (useful for IAM roles on AWS/GCP)
+  annotations: {}
+  
+  # Name override (auto-generated if empty)
+  name: ""
+
+# -----------------------------------------------------------------------------
+# POD CONFIGURATION
+# -----------------------------------------------------------------------------
+podAnnotations:
+  # Prometheus scraping (if using pod annotations instead of ServiceMonitor)
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "8080"
+  prometheus.io/path: "/metrics"
+
+podLabels: {}
+
+# Pod security context (applied to all containers in pod)
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  fsGroupChangePolicy: "OnRootMismatch"
+
+# Container security context
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# -----------------------------------------------------------------------------
+# GOQUEUE CONFIGURATION
+# -----------------------------------------------------------------------------
+# ┌─────────────────────────────────────────────────────────────────────────────┐
+# │ These settings are passed to GoQueue via ConfigMap or environment vars.    │
+# │ They map to the goqueue config.yaml structure.                             │
+# └─────────────────────────────────────────────────────────────────────────────┘
+
+config:
+  # Cluster settings
+  cluster:
+    enabled: true
+    replicationFactor: 2
+    minInSyncReplicas: 1
+    replicationTimeout: "5s"
+  
+  # Storage settings
+  storage:
+    segmentSize: 1073741824  # 1GB
+    indexInterval: 4096
+    syncOnWrite: false
+    syncInterval: "1s"
+  
+  # Default topic settings
+  defaults:
+    topic:
+      partitions: 6
+      retention:
+        hours: 168  # 7 days
+        bytes: -1   # unlimited
+      delivery:
+        visibilityTimeout: "30s"
+        maxRetries: 3
+  
+  # Consumer settings
+  consumer:
+    sessionTimeout: "30s"
+    heartbeatInterval: "10s"
+    maxPollRecords: 500
+    maxPollTimeout: "30s"
+    autoCommitInterval: "5s"
+  
+  # Producer settings
+  producer:
+    batchSize: 16384
+    lingerMs: 5
+    acks: "leader"
+    retries: 3
+    retryBackoff: "100ms"
+  
+  # Logging
+  logging:
+    level: "info"
+    format: "json"
+
+# -----------------------------------------------------------------------------
+# NETWORK / SERVICES
+# -----------------------------------------------------------------------------
+service:
+  # Main service type (ClusterIP for internal, LoadBalancer for external)
+  type: ClusterIP
+  
+  # HTTP API port
+  httpPort: 8080
+  
+  # gRPC API port
+  grpcPort: 9000
+  
+  # Internal cluster communication port
+  internalPort: 7000
+  
+  # Annotations (for cloud load balancers)
+  annotations: {}
+  
+  # External traffic policy (Cluster or Local)
+  # Local preserves client IP but may have uneven distribution
+  externalTrafficPolicy: Cluster
+
+# Headless service for StatefulSet (used for internal discovery)
+headlessService:
+  annotations: {}
+
+# -----------------------------------------------------------------------------
+# INGRESS CONFIGURATION
+# -----------------------------------------------------------------------------
+ingress:
+  enabled: false
+  className: "traefik"
+  annotations: {}
+    # traefik.ingress.kubernetes.io/router.entrypoints: web
+  hosts:
+    - host: goqueue.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+  #  - secretName: goqueue-tls
+  #    hosts:
+  #      - goqueue.local
+
+# gRPC Ingress (separate because different protocol)
+grpcIngress:
+  enabled: false
+  className: "traefik"
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: grpc
+  hosts:
+    - host: grpc.goqueue.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# -----------------------------------------------------------------------------
+# PERSISTENCE (PVC)
+# -----------------------------------------------------------------------------
+# ┌─────────────────────────────────────────────────────────────────────────────┐
+# │ PERSISTENCE IS CRITICAL FOR MESSAGE QUEUES                                  │
+# │                                                                             │
+# │ Without persistence:                                                        │
+# │   - Pod restart = ALL MESSAGES LOST                                         │
+# │   - Never acceptable in production                                          │
+# │                                                                             │
+# │ With persistence (PVC):                                                     │
+# │   - Pod restart = Messages survive (replayed from WAL)                      │
+# │   - Pod migration = PVC reattaches to new pod                               │
+# │                                                                             │
+# │ WHY STATEFULSET?                                                            │
+# │   Deployments: All pods share storage (not suitable for distributed state)  │
+# │   StatefulSets: Each pod gets its own PVC (pod-0, pod-1, pod-2)            │
+# │                                                                             │
+# │ STORAGE CLASS CONSIDERATIONS:                                               │
+# │   - AWS EBS gp3: Good balance of cost/performance                           │
+# │   - GCP SSD PD: Low latency, higher cost                                    │
+# │   - Azure Premium: Best for production                                      │
+# │   - Local SSD: Fastest but not portable (node failure = data loss)          │
+# └─────────────────────────────────────────────────────────────────────────────┘
+
+persistence:
+  enabled: true
+  
+  # Storage class (empty = cluster default)
+  # Examples: gp3, premium-rwo, standard-rwo
+  storageClass: ""
+  
+  # Access mode
+  # ReadWriteOnce: Can only be mounted by one pod (standard for StatefulSet)
+  accessMode: ReadWriteOnce
+  
+  # Storage size per broker
+  # Rule of thumb: 2-3x your expected data retention
+  size: 10Gi
+  
+  # Annotations for the PVC
+  annotations: {}
+  
+  # Selector for pre-provisioned PVs
+  selector: {}
+  
+  # Existing claim to use (instead of creating new)
+  existingClaim: ""
+
+# -----------------------------------------------------------------------------
+# RESOURCE LIMITS
+# -----------------------------------------------------------------------------
+# ┌─────────────────────────────────────────────────────────────────────────────┐
+# │ RESOURCE MANAGEMENT IN KUBERNETES                                           │
+# │                                                                             │
+# │ requests: Minimum guaranteed resources                                      │
+# │   - Scheduler uses this to place pod on node                                │
+# │   - Pod always gets at least this much                                      │
+# │                                                                             │
+# │ limits: Maximum allowed resources                                           │
+# │   - CPU: Pod is throttled if it exceeds                                     │
+# │   - Memory: Pod is OOM-killed if it exceeds                                 │
+# │                                                                             │
+# │ GOQUEUE RECOMMENDATIONS:                                                    │
+# │   - Development: 256Mi memory, 100m CPU                                     │
+# │   - Production: 2Gi memory, 1 CPU per 50k msg/s                             │
+# │   - High-throughput: 4Gi+ memory, 2+ CPU                                    │
+# │                                                                             │
+# │ MEMORY SIZING FACTORS:                                                      │
+# │   - Message batch buffers                                                   │
+# │   - Index caches                                                            │
+# │   - Inflight message tracking                                               │
+# │   - gRPC streaming buffers                                                  │
+# └─────────────────────────────────────────────────────────────────────────────┘
+
+resources:
+  limits:
+    cpu: "2"
+    memory: 2Gi
+  requests:
+    cpu: "500m"
+    memory: 512Mi
+
+# -----------------------------------------------------------------------------
+# AUTOSCALING
+# -----------------------------------------------------------------------------
+# Note: Message queues are stateful; horizontal scaling requires careful 
+# partition management. Use with caution.
+autoscaling:
+  enabled: false
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+# -----------------------------------------------------------------------------
+# NODE PLACEMENT
+# -----------------------------------------------------------------------------
+# Node selector (simple node selection)
+nodeSelector: {}
+  # kubernetes.io/arch: amd64
+  # node-type: message-queue
+
+# Tolerations (for taints)
+tolerations: []
+  # - key: "dedicated"
+  #   operator: "Equal"
+  #   value: "goqueue"
+  #   effect: "NoSchedule"
+
+# Affinity rules (advanced scheduling)
+affinity: {}
+  # podAntiAffinity:
+  #   requiredDuringSchedulingIgnoredDuringExecution:
+  #     - labelSelector:
+  #         matchExpressions:
+  #           - key: app.kubernetes.io/name
+  #             operator: In
+  #             values:
+  #               - goqueue
+  #       topologyKey: "kubernetes.io/hostname"
+
+# Topology spread constraints (distribute across zones)
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: goqueue
+
+# -----------------------------------------------------------------------------
+# PROBES
+# -----------------------------------------------------------------------------
+# ┌─────────────────────────────────────────────────────────────────────────────┐
+# │ KUBERNETES HEALTH PROBES                                                    │
+# │                                                                             │
+# │ livenessProbe: "Is the process stuck?"                                      │
+# │   - Failure: Kubernetes restarts the container                              │
+# │   - Use: Detect deadlocks, infinite loops                                   │
+# │                                                                             │
+# │ readinessProbe: "Can the pod serve traffic?"                                │
+# │   - Failure: Pod removed from Service endpoints (no traffic)                │
+# │   - Use: During startup, during graceful shutdown                           │
+# │                                                                             │
+# │ startupProbe: "Has the app finished starting?"                              │
+# │   - Failure: Kubernetes restarts container                                  │
+# │   - Use: Slow-starting apps (loading data, warming caches)                  │
+# │   - While running: liveness/readiness probes are disabled                   │
+# │                                                                             │
+# │ GOQUEUE PROBE ENDPOINTS:                                                    │
+# │   /health: Overall health (for liveness)                                    │
+# │   /ready: Ready to serve traffic (for readiness)                            │
+# │   /live: Simple alive check (for startup)                                   │
+# └─────────────────────────────────────────────────────────────────────────────┘
+
+livenessProbe:
+  httpGet:
+    path: /health
+    port: http
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /ready
+    port: http
+  initialDelaySeconds: 10
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+startupProbe:
+  httpGet:
+    path: /health
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 30  # 30 * 5s = 150s max startup time
+
+# -----------------------------------------------------------------------------
+# POD DISRUPTION BUDGET
+# -----------------------------------------------------------------------------
+# ┌─────────────────────────────────────────────────────────────────────────────┐
+# │ PodDisruptionBudget protects against voluntary disruptions:                 │
+# │   - Node drains (kubectl drain)                                             │
+# │   - Cluster upgrades                                                        │
+# │   - Cluster autoscaler scale-down                                           │
+# │                                                                             │
+# │ Does NOT protect against:                                                   │
+# │   - Node crashes (involuntary)                                              │
+# │   - Pod OOM kills                                                           │
+# │                                                                             │
+# │ For a 3-node cluster: minAvailable=2 ensures quorum during maintenance      │
+# └─────────────────────────────────────────────────────────────────────────────┘
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
+  # maxUnavailable: 1  # Alternative to minAvailable
+
+# -----------------------------------------------------------------------------
+# MONITORING
+# -----------------------------------------------------------------------------
+metrics:
+  enabled: true
+  
+  # ServiceMonitor for Prometheus Operator
+  serviceMonitor:
+    enabled: true
+    
+    # Additional labels for ServiceMonitor discovery
+    additionalLabels: {}
+    
+    # Namespace for ServiceMonitor (default: release namespace)
+    namespace: ""
+    
+    # Scrape interval
+    interval: 15s
+    
+    # Scrape timeout
+    scrapeTimeout: 10s
+    
+    # Path to metrics endpoint
+    path: /metrics
+    
+    # Metric relabeling (optional)
+    metricRelabelings: []
+    
+    # Target relabeling (optional)
+    relabelings: []
+
+  # PrometheusRule for alerts
+  prometheusRule:
+    enabled: true
+    additionalLabels: {}
+    namespace: ""
+    rules:
+      - alert: GoQueueHighConsumerLag
+        expr: sum(goqueue_consumer_lag) by (consumer_group, topic) > 10000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High consumer lag detected"
+          description: "Consumer group {{ $labels.consumer_group }} has lag > 10k on topic {{ $labels.topic }}"
+      
+      - alert: GoQueueHighPublishLatency
+        expr: histogram_quantile(0.99, rate(goqueue_broker_publish_latency_seconds_bucket[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High publish latency"
+          description: "p99 publish latency is {{ $value }}s (threshold: 100ms)"
+      
+      - alert: GoQueueBrokerDown
+        expr: up{job="goqueue"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "GoQueue broker is down"
+          description: "GoQueue broker {{ $labels.instance }} has been down for more than 1 minute"
+      
+      - alert: GoQueueHighErrorRate
+        expr: rate(goqueue_broker_errors_total[5m]) / rate(goqueue_broker_messages_published_total[5m]) > 0.01
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High error rate"
+          description: "Error rate is {{ $value | humanizePercentage }}"
+
+# Grafana dashboards
+grafana:
+  enabled: true
+  dashboards:
+    enabled: true
+    # Label for dashboard discovery
+    label: grafana_dashboard
+    labelValue: "1"
+    annotations: {}
+
+# -----------------------------------------------------------------------------
+# OPTIONAL DEPENDENCIES
+# -----------------------------------------------------------------------------
+# ┌─────────────────────────────────────────────────────────────────────────────┐
+# │ These sub-charts are OPTIONAL. Enable for quick start, disable if you      │
+# │ already have these running in your cluster.                                 │
+# │                                                                             │
+# │ DEFAULT: Enabled for "one-command" deployment experience                    │
+# │ PRODUCTION: Usually disabled (use existing monitoring stack)                │
+# └─────────────────────────────────────────────────────────────────────────────┘
+
+# Prometheus stack (includes Grafana)
+prometheus:
+  enabled: true
+  
+  # Prometheus Operator configuration
+  kube-prometheus-stack:
+    prometheus:
+      prometheusSpec:
+        serviceMonitorSelectorNilUsesHelmValues: false
+        podMonitorSelectorNilUsesHelmValues: false
+        ruleSelectorNilUsesHelmValues: false
+    
+    grafana:
+      enabled: true
+      adminPassword: "goqueue-admin"
+      dashboardProviders:
+        dashboardproviders.yaml:
+          apiVersion: 1
+          providers:
+            - name: 'goqueue'
+              orgId: 1
+              folder: 'GoQueue'
+              type: file
+              disableDeletion: false
+              editable: true
+              options:
+                path: /var/lib/grafana/dashboards/goqueue
+    
+    alertmanager:
+      enabled: true
+
+# Traefik ingress controller
+traefik:
+  enabled: true
+  
+  traefik:
+    ports:
+      web:
+        port: 8000
+        expose: true
+        exposedPort: 80
+      grpc:
+        port: 9000
+        expose: true
+        exposedPort: 9000
+    
+    service:
+      type: LoadBalancer
+    
+    logs:
+      general:
+        level: INFO
+      access:
+        enabled: true
+
+# -----------------------------------------------------------------------------
+# EXTRA OBJECTS
+# -----------------------------------------------------------------------------
+# Additional Kubernetes objects to create
+extraObjects: []
+  # - apiVersion: v1
+  #   kind: ConfigMap
+  #   metadata:
+  #     name: extra-config
+  #   data:
+  #     key: value

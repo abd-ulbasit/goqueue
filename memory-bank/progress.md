@@ -3,7 +3,7 @@
 ## Overall Status
 
 **Phase**: 4 of 4
-**Milestones**: 18/18 complete (Phase 4 fully complete!)
+**Milestones**: 19/26 complete
 **Tests**: 640+ passing (storage: 50+, broker: 470+, api: 24, grpc: 16, client: 14, cluster: 50+)
 **Started**: Session 1
 
@@ -182,12 +182,12 @@ This gives: clean code, zero overhead when disabled, testability.
 - [x] Milestone 13: Online Partition Scaling ✅ ⭐
 - [x] Milestone 14: Log Compaction, Snapshots & Time Index ⭐ 
 
-### Phase 4: Operations (2/12)
+### Phase 4: Operations (3/12)
 - [x] Milestone 15: gRPC API & Go Client ✅ ⭐
 - [ ] Milestone 16: CLI Tool
 - [ ] Milestone 17: Prometheus Metrics & Grafana
 - [x] Milestone 18: Multi-Tenancy & Quotas ✅ ⭐
-- [ ] Milestone 19: Kubernetes & Chaos Testing
+- [x] Milestone 19: Kubernetes & Chaos Testing ✅ ⭐
 - [ ] Milestone 20: Final Review & Documentation with Examples and Comparison to Alternatives
 - [ ] Milestone 21: Buffer Pooling & Performance Tuning
 - [ ] Milestone 22: Security - TLS, Auth, RBAC
@@ -195,6 +195,195 @@ This gives: clean code, zero overhead when disabled, testability.
 - [ ] Milestone 24: Monitoring & Alerting
 - [ ] Milestone 25: Production Hardening & Best Practices
 - [ ] Milestone 26: Release Process & CI/CD
+
+---
+
+## Milestone 19 - Kubernetes & Chaos Testing ⭐ (COMPLETE!)
+
+### What Was Built
+
+**Multi-Stage Dockerfile** (`deploy/docker/Dockerfile`):
+- 3-stage build: builder → debug → production
+- Builder: Go 1.24, static binary with `CGO_ENABLED=0`
+- Debug: Includes delve debugger for troubleshooting
+- Production: Distroless base (~15MB final image)
+- Exposes ports: 8080 (HTTP), 9000 (gRPC/metrics), 7000 (Raft)
+- Non-root user (65532) for security
+
+**Docker Compose 3-Node Cluster** (`deploy/docker/docker-compose.yaml`):
+- 3 GoQueue broker nodes with health checks
+- Prometheus for metrics scraping
+- Grafana for visualization (port 3001)
+- Traefik as reverse proxy/load balancer
+- Resource limits (512MB memory per broker)
+- Persistent volumes for each node
+
+**Helm Chart** (`deploy/kubernetes/helm/goqueue/`):
+- Chart v0.1.0, appVersion 0.2.0
+- StatefulSet with PVC templates for persistent storage
+- Headless service for peer discovery
+- ClusterIP service for client access
+- Optional dependencies:
+  - kube-prometheus-stack (monitoring)
+  - traefik (ingress controller)
+- Features:
+  - ServiceMonitor for Prometheus scraping
+  - PrometheusRule for alerting (HighLag, DiskPressure, Down)
+  - PodDisruptionBudget (minAvailable: 2)
+  - Ingress for HTTP + gRPC with TLS support
+  - Grafana dashboard ConfigMap
+  - Configurable resources, replicas, persistence
+
+**Terraform Multi-Cloud Modules**:
+
+**AWS Module** (`deploy/terraform/modules/aws/main.tf`):
+- VPC with public/private subnets across 3 AZs
+- EKS cluster with managed node groups
+- gp3 StorageClass (encrypted, 3000 IOPS)
+- EBS CSI driver with IRSA authentication
+- ALB for ingress traffic
+- Helm provider to deploy GoQueue chart
+- ~400 lines, production-ready
+
+**GCP Module** (`deploy/terraform/modules/gcp/main.tf`):
+- VPC with secondary ranges for pods/services
+- GKE cluster with Workload Identity
+- premium-rwo StorageClass (SSD)
+- Node pool with autoscaling (1-10 nodes)
+- Private cluster with NAT gateway
+- ~400 lines, production-ready
+
+**Azure Module** (`deploy/terraform/modules/azure/main.tf`):
+- Resource group in specified region
+- VNET with subnet for AKS
+- AKS cluster with managed identity
+- managed-premium StorageClass
+- System-assigned identity for Azure integrations
+- ~300 lines, production-ready
+
+**Environment Configs** (`deploy/terraform/environments/`):
+- `dev/main.tf`: Small instances, 2 replicas, 10Gi storage
+- `prod/main.tf`: Large instances, 3 replicas, 100Gi storage
+
+**Chaos Test Scripts** (`deploy/testing/chaos/`):
+- `pod-kill.sh`: Random pod deletion, monitors recovery
+- `node-drain.sh`: Cordon/drain node, verify PDB respected
+- `network-partition.sh`: Uses Chaos Mesh NetworkChaos CRD
+- `disk-pressure.sh`: Fill PVC to threshold, test backpressure
+- `run-all.sh`: Run all chaos tests in sequence
+
+**Load Test Scripts** (`deploy/testing/load/`):
+- k6-based load testing framework
+- `produce.js`: Producer throughput test
+- `consume.js`: Consumer throughput test  
+- `stress.js`: Combined stress test (15 min, ramping VUs)
+- `run-load-tests.sh`: Test runner with quick/standard/stress modes
+- Targets: 100K+ msg/s, p99 <10ms, <0.01% error rate
+
+**Runbook Documentation** (`docs/runbook.md`):
+- Quick reference with key metrics
+- Deployment procedures (fresh install, upgrade, rollback)
+- Day-to-day operations (health checks, topic/consumer management)
+- Monitoring & alerting guide
+- Troubleshooting guides
+- Incident response procedures (P1/P2/P3)
+- Maintenance procedures (PVC resize, node drain)
+- Disaster recovery (backup/restore, cross-region failover)
+
+### Architecture Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Container runtime | Distroless | Minimal attack surface, ~15MB image |
+| K8s workload | StatefulSet | Stable network IDs, ordered deployment, persistent storage |
+| Service discovery | Headless service | DNS-based peer discovery for Raft |
+| Storage | PVC templates | Each pod gets dedicated persistent volume |
+| Monitoring | ServiceMonitor | Native Prometheus Operator integration |
+| Ingress | Optional Traefik | HTTP + gRPC support, TLS termination |
+| Multi-cloud | Separate modules | Different APIs, avoid lowest common denominator |
+| Chaos testing | Chaos Mesh + scripts | CRD-based, declarative, reproducible |
+| Load testing | k6 | Modern, scriptable, good metrics |
+
+### Directory Structure Created
+
+```
+deploy/
+├── docker/
+│   ├── Dockerfile                    # Multi-stage build
+│   ├── docker-compose.yaml           # 3-node local cluster
+│   └── config/
+│       ├── node-1.yaml
+│       ├── node-2.yaml
+│       └── node-3.yaml
+├── kubernetes/
+│   └── helm/
+│       └── goqueue/
+│           ├── Chart.yaml
+│           ├── values.yaml
+│           ├── README.md
+│           ├── .helmignore
+│           └── templates/
+│               ├── _helpers.tpl
+│               ├── statefulset.yaml
+│               ├── service.yaml
+│               ├── configmap.yaml
+│               ├── serviceaccount.yaml
+│               ├── pdb.yaml
+│               ├── servicemonitor.yaml
+│               ├── prometheusrule.yaml
+│               ├── ingress.yaml
+│               └── grafana-dashboards.yaml
+├── terraform/
+│   ├── modules/
+│   │   ├── aws/main.tf
+│   │   ├── gcp/main.tf
+│   │   └── azure/main.tf
+│   └── environments/
+│       ├── dev/main.tf
+│       └── prod/main.tf
+└── testing/
+    ├── chaos/
+    │   ├── pod-kill.sh
+    │   ├── node-drain.sh
+    │   ├── network-partition.sh
+    │   ├── disk-pressure.sh
+    │   └── run-all.sh
+    └── load/
+        ├── produce.js
+        ├── consume.js
+        ├── stress.js
+        └── run-load-tests.sh
+```
+
+### Key Concepts Learned
+
+**StatefulSet vs Deployment**:
+- StatefulSet: Ordered pod creation, stable network IDs (goqueue-0, goqueue-1), PVC per pod
+- Deployment: Random pod names, shared storage, stateless
+- For message queues: Always StatefulSet (need stable identity for Raft, persistent storage)
+
+**Headless Service**:
+- `clusterIP: None` creates DNS records for each pod
+- `goqueue-0.goqueue-headless.namespace.svc.cluster.local`
+- Essential for Raft peer discovery
+
+**PodDisruptionBudget**:
+- Limits voluntary disruptions (upgrades, node drain)
+- `minAvailable: 2` ensures majority for Raft quorum
+- Kubernetes respects PDB during maintenance
+
+**StorageClass per Cloud**:
+- AWS: gp3 (newest, best price/performance)
+- GCP: premium-rwo (regional SSD, auto-replication)
+- Azure: managed-premium (SSD-backed)
+
+**Chaos Engineering Categories**:
+1. Pod failures (kill, OOM)
+2. Node failures (drain, shutdown)
+3. Network failures (partition, latency)
+4. Storage failures (disk pressure, corruption)
+
+---
 
 ## Up Next – Milestone 16 (CLI Tool)
 

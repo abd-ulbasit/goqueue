@@ -1,0 +1,40 @@
+# GoQueue Node 3 Configuration
+
+broker:
+  nodeId: "node-3"
+  dataDir: "/data"
+
+listeners:
+  http: ":8080"
+  grpc: ":9000"
+  internal: ":7000"
+
+metrics:
+  enabled: true
+  listen: ":8080"
+  path: "/metrics"
+
+logging:
+  level: "info"
+  format: "json"
+
+cluster:
+  enabled: true
+  advertiseAddress: "goqueue-3:7000"
+  peers:
+    - "goqueue-1:7000"
+    - "goqueue-2:7000"
+  replicationFactor: 2
+  minInSyncReplicas: 1
+
+storage:
+  segmentSize: 1073741824
+  indexInterval: 4096
+  syncOnWrite: false
+  syncInterval: "1s"
+
+defaults:
+  topic:
+    partitions: 3
+    retention:
+      hours: 168
