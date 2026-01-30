@@ -1,0 +1,98 @@
+{{- if .Values.ingress.enabled -}}
+# =============================================================================
+# GOQUEUE INGRESS (HTTP API)
+# =============================================================================
+#
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "goqueue.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "goqueue.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.ingress.className }}
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- end }}
+  {{- if .Values.ingress.tls }}
+  tls:
+    {{- range .Values.ingress.tls }}
+    - hosts:
+        {{- range .hosts }}
+        - {{ . | quote }}
+        {{- end }}
+      secretName: {{ .secretName }}
+    {{- end }}
+  {{- end }}
+  rules:
+    {{- range .Values.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ include "goqueue.fullname" $ }}
+                port:
+                  number: {{ $.Values.service.httpPort }}
+          {{- end }}
+    {{- end }}
+{{- end }}
+---
+{{- if .Values.grpcIngress.enabled -}}
+# =============================================================================
+# GOQUEUE INGRESS (gRPC API)
+# =============================================================================
+#
+# Separate Ingress for gRPC because it requires different handling:
+# - HTTP/2 support
+# - Different TLS termination
+# - Traefik/nginx need specific annotations
+#
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "goqueue.fullname" . }}-grpc
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "goqueue.labels" . | nindent 4 }}
+  {{- with .Values.grpcIngress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.grpcIngress.className }}
+  ingressClassName: {{ .Values.grpcIngress.className }}
+  {{- end }}
+  {{- if .Values.grpcIngress.tls }}
+  tls:
+    {{- range .Values.grpcIngress.tls }}
+    - hosts:
+        {{- range .hosts }}
+        - {{ . | quote }}
+        {{- end }}
+      secretName: {{ .secretName }}
+    {{- end }}
+  {{- end }}
+  rules:
+    {{- range .Values.grpcIngress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ include "goqueue.fullname" $ }}
+                port:
+                  number: {{ $.Values.service.grpcPort }}
+          {{- end }}
+    {{- end }}
+{{- end }}

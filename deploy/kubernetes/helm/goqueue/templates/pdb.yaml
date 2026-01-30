@@ -1,0 +1,47 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+# =============================================================================
+# GOQUEUE POD DISRUPTION BUDGET
+# =============================================================================
+#
+# PDB ensures minimum availability during voluntary disruptions.
+#
+# ┌─────────────────────────────────────────────────────────────────────────────┐
+# │ VOLUNTARY vs INVOLUNTARY DISRUPTIONS                                        │
+# │                                                                             │
+# │ VOLUNTARY (PDB protects against):                                           │
+# │   - kubectl drain (node maintenance)                                        │
+# │   - Cluster upgrades                                                        │
+# │   - Cluster autoscaler scale-down                                           │
+# │   - kubectl delete pod (if eviction API used)                               │
+# │                                                                             │
+# │ INVOLUNTARY (PDB does NOT protect):                                         │
+# │   - Hardware failures                                                       │
+# │   - Node crashes                                                            │
+# │   - OOM kills                                                               │
+# │   - Kernel panics                                                           │
+# │                                                                             │
+# │ QUORUM CONSIDERATIONS:                                                      │
+# │   - 3-node cluster: minAvailable=2 allows 1 node maintenance                │
+# │   - 5-node cluster: minAvailable=3 allows 2 simultaneous maintenances       │
+# │   - Never set minAvailable = replicaCount (blocks all maintenance!)         │
+# └─────────────────────────────────────────────────────────────────────────────┘
+#
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "goqueue.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "goqueue.labels" . | nindent 4 }}
+spec:
+  {{- if .Values.podDisruptionBudget.minAvailable }}
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  {{- else if .Values.podDisruptionBudget.maxUnavailable }}
+  maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable }}
+  {{- else }}
+  minAvailable: 2
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "goqueue.selectorLabels" . | nindent 6 }}
+{{- end }}

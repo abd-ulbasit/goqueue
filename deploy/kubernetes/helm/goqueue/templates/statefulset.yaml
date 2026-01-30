@@ -1,0 +1,290 @@
+# =============================================================================
+# GOQUEUE STATEFULSET
+# =============================================================================
+#
+# WHY STATEFULSET?
+# ┌─────────────────────────────────────────────────────────────────────────────┐
+# │ StatefulSet vs Deployment:                                                  │
+# │                                                                             │
+# │ Deployment:                                                                 │
+# │   - Pods are interchangeable (random names: deploy-xyz123)                  │
+# │   - Shared storage (all pods see same PVC)                                  │
+# │   - Good for: Stateless apps (web servers, API gateways)                    │
+# │                                                                             │
+# │ StatefulSet:                                                                │
+# │   - Pods have stable identities (goqueue-0, goqueue-1, goqueue-2)           │
+# │   - Each pod gets its own PVC (persistent, survives restarts)               │
+# │   - Ordered deployment (0 → 1 → 2) and termination (2 → 1 → 0)              │
+# │   - Stable network identity (DNS: goqueue-0.goqueue-headless)               │
+# │   - Good for: Databases, message queues, distributed systems                │
+# │                                                                             │
+# │ WHY GOQUEUE NEEDS STATEFULSET:                                              │
+# │   1. Each broker has its own data (partitions it leads)                     │
+# │   2. Cluster membership requires stable identities                          │
+# │   3. Replication needs to know peer addresses                               │
+# │   4. Data must survive pod restarts                                         │
+# └─────────────────────────────────────────────────────────────────────────────┘
+#
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "goqueue.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "goqueue.labels" . | nindent 4 }}
+spec:
+  # Service name for DNS resolution (pod-0.service-name.namespace.svc.cluster.local)
+  serviceName: {{ include "goqueue.headlessServiceName" . }}
+  
+  # Number of broker replicas
+  replicas: {{ .Values.replicaCount }}
+  
+  # Selector must match template labels
+  selector:
+    matchLabels:
+      {{- include "goqueue.selectorLabels" . | nindent 6 }}
+  
+  # ┌─────────────────────────────────────────────────────────────────────────────┐
+  # │ UPDATE STRATEGY                                                             │
+  # │                                                                             │
+  # │ RollingUpdate: Update one pod at a time (safe for distributed systems)      │
+  # │ OnDelete: Only update when pod is manually deleted (for debugging)          │
+  # │                                                                             │
+  # │ partition: Only update pods with ordinal >= partition                        │
+  # │   - Set partition=2 to test update on pod-2 before rolling to 0,1           │
+  # │   - Useful for canary deployments                                           │
+  # └─────────────────────────────────────────────────────────────────────────────┘
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      partition: 0
+  
+  # ┌─────────────────────────────────────────────────────────────────────────────┐
+  # │ POD MANAGEMENT POLICY                                                       │
+  # │                                                                             │
+  # │ OrderedReady (default): Create pods 0→1→2, each must be Ready before next   │
+  # │ Parallel: Create all pods simultaneously                                    │
+  # │                                                                             │
+  # │ For goqueue: OrderedReady ensures cluster forms correctly                   │
+  # │   - Pod 0 starts, becomes initial leader                                    │
+  # │   - Pod 1 starts, joins cluster                                             │
+  # │   - Pod 2 starts, joins cluster, quorum achieved                            │
+  # └─────────────────────────────────────────────────────────────────────────────┘
+  podManagementPolicy: OrderedReady
+  
+  # Revision history for rollback
+  revisionHistoryLimit: 10
+  
+  template:
+    metadata:
+      labels:
+        {{- include "goqueue.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        # Checksum of config to trigger rolling update on config change
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      
+      serviceAccountName: {{ include "goqueue.serviceAccountName" . }}
+      
+      # Pod security context
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      
+      # ┌─────────────────────────────────────────────────────────────────────────┐
+      # │ TERMINATION GRACE PERIOD                                                │
+      # │                                                                         │
+      # │ How long Kubernetes waits for graceful shutdown before SIGKILL.         │
+      # │                                                                         │
+      # │ GoQueue needs time to:                                                  │
+      # │   1. Stop accepting new connections                                     │
+      # │   2. Finish processing in-flight messages                               │
+      # │   3. Sync data to disk                                                  │
+      # │   4. Transfer leadership (if leader)                                    │
+      # │   5. Notify cluster of departure                                        │
+      # │                                                                         │
+      # │ 60 seconds is conservative; adjust based on your workload.              │
+      # └─────────────────────────────────────────────────────────────────────────┘
+      terminationGracePeriodSeconds: 60
+      
+      containers:
+        - name: goqueue
+          image: {{ include "goqueue.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          
+          # Container security context
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          
+          ports:
+            - name: http
+              containerPort: {{ include "goqueue.httpPort" . }}
+              protocol: TCP
+            - name: grpc
+              containerPort: {{ include "goqueue.grpcPort" . }}
+              protocol: TCP
+            - name: internal
+              containerPort: {{ include "goqueue.internalPort" . }}
+              protocol: TCP
+          
+          # ┌─────────────────────────────────────────────────────────────────────┐
+          # │ ENVIRONMENT VARIABLES                                               │
+          # │                                                                     │
+          # │ StatefulSet provides metadata via downward API:                     │
+          # │   - POD_NAME: goqueue-0, goqueue-1, etc.                            │
+          # │   - POD_NAMESPACE: kubernetes namespace                             │
+          # │   - POD_IP: Pod's IP address                                        │
+          # │                                                                     │
+          # │ We use POD_NAME as the node ID for cluster membership.              │
+          # └─────────────────────────────────────────────────────────────────────┘
+          env:
+            # Pod metadata via downward API
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            
+            # GoQueue configuration
+            - name: GOQUEUE_BROKER_NODEID
+              value: "$(POD_NAME)"
+            - name: GOQUEUE_BROKER_DATADIR
+              value: "/data"
+            - name: GOQUEUE_LISTENERS_HTTP
+              value: ":{{ include "goqueue.httpPort" . }}"
+            - name: GOQUEUE_LISTENERS_GRPC
+              value: ":{{ include "goqueue.grpcPort" . }}"
+            - name: GOQUEUE_LISTENERS_INTERNAL
+              value: ":{{ include "goqueue.internalPort" . }}"
+            
+            # Cluster configuration
+            - name: GOQUEUE_CLUSTER_ENABLED
+              value: {{ .Values.config.cluster.enabled | quote }}
+            - name: GOQUEUE_CLUSTER_PEERS
+              value: {{ include "goqueue.clusterPeers" . | quote }}
+            - name: GOQUEUE_CLUSTER_ADVERTISE
+              value: "$(POD_NAME).{{ include "goqueue.headlessServiceName" . }}.$(POD_NAMESPACE).svc.cluster.local:{{ include "goqueue.internalPort" . }}"
+            - name: GOQUEUE_CLUSTER_REPLICATION_FACTOR
+              value: {{ .Values.config.cluster.replicationFactor | quote }}
+            - name: GOQUEUE_CLUSTER_MIN_ISR
+              value: {{ .Values.config.cluster.minInSyncReplicas | quote }}
+            
+            # Metrics
+            - name: GOQUEUE_METRICS_ENABLED
+              value: {{ .Values.metrics.enabled | quote }}
+            
+            # Logging
+            - name: GOQUEUE_LOG_LEVEL
+              value: {{ .Values.config.logging.level | quote }}
+            - name: GOQUEUE_LOG_FORMAT
+              value: {{ .Values.config.logging.format | quote }}
+          
+          # Volume mounts
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: config
+              mountPath: /config
+              readOnly: true
+            # Tmp directory for read-only root filesystem
+            - name: tmp
+              mountPath: /tmp
+          
+          # Health probes
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          
+          startupProbe:
+            {{- toYaml .Values.startupProbe | nindent 12 }}
+          
+          # Resource limits
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      
+      # Volumes (non-persistent)
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "goqueue.configMapName" . }}
+        - name: tmp
+          emptyDir: {}
+      
+      # Node selection and affinity
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  
+  # ┌─────────────────────────────────────────────────────────────────────────────┐
+  # │ VOLUME CLAIM TEMPLATES                                                      │
+  # │                                                                             │
+  # │ Unlike Deployments, StatefulSets create a PVC per pod:                      │
+  # │   - goqueue-0 → data-goqueue-0                                              │
+  # │   - goqueue-1 → data-goqueue-1                                              │
+  # │   - goqueue-2 → data-goqueue-2                                              │
+  # │                                                                             │
+  # │ PVCs persist across pod restarts and even StatefulSet deletion.             │
+  # │ You must manually delete PVCs if you want to remove data.                   │
+  # └─────────────────────────────────────────────────────────────────────────────┘
+  {{- if .Values.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "goqueue.labels" . | nindent 10 }}
+        {{- with .Values.persistence.annotations }}
+        annotations:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+      spec:
+        accessModes:
+          - {{ .Values.persistence.accessMode }}
+        {{- if .Values.persistence.storageClass }}
+        {{- if (eq "-" .Values.persistence.storageClass) }}
+        storageClassName: ""
+        {{- else }}
+        storageClassName: {{ .Values.persistence.storageClass | quote }}
+        {{- end }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}
+        {{- with .Values.persistence.selector }}
+        selector:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+  {{- end }}

@@ -1,0 +1,65 @@
+{{- if and .Values.metrics.enabled .Values.metrics.serviceMonitor.enabled }}
+# =============================================================================
+# GOQUEUE SERVICEMONITOR
+# =============================================================================
+#
+# ServiceMonitor tells Prometheus Operator which services to scrape.
+#
+# ┌─────────────────────────────────────────────────────────────────────────────┐
+# │ HOW PROMETHEUS OPERATOR WORKS                                               │
+# │                                                                             │
+# │ Traditional Prometheus: You manually edit prometheus.yml                    │
+# │                                                                             │
+# │ Prometheus Operator: You create ServiceMonitor CRDs                         │
+# │   - Operator watches for ServiceMonitor resources                           │
+# │   - Automatically configures Prometheus to scrape targets                   │
+# │   - No need to restart Prometheus or edit configs                           │
+# │                                                                             │
+# │ FLOW:                                                                       │
+# │   ServiceMonitor ──► Prometheus Operator ──► Prometheus Config ──► Scrape   │
+# │                                                                             │
+# │ DISCOVERY:                                                                  │
+# │   The Operator finds ServiceMonitors by label selector.                     │
+# │   Default: All ServiceMonitors in all namespaces (configurable).            │
+# └─────────────────────────────────────────────────────────────────────────────┘
+#
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "goqueue.fullname" . }}
+  {{- if .Values.metrics.serviceMonitor.namespace }}
+  namespace: {{ .Values.metrics.serviceMonitor.namespace }}
+  {{- else }}
+  namespace: {{ .Release.Namespace }}
+  {{- end }}
+  labels:
+    {{- include "goqueue.labels" . | nindent 4 }}
+    {{- with .Values.metrics.serviceMonitor.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  # Select the GoQueue service
+  selector:
+    matchLabels:
+      {{- include "goqueue.selectorLabels" . | nindent 6 }}
+  
+  # Namespace where the service lives
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  
+  # Which port to scrape
+  endpoints:
+    - port: http
+      path: {{ .Values.metrics.serviceMonitor.path }}
+      interval: {{ .Values.metrics.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.metrics.serviceMonitor.scrapeTimeout }}
+      {{- with .Values.metrics.serviceMonitor.metricRelabelings }}
+      metricRelabelings:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.metrics.serviceMonitor.relabelings }}
+      relabelings:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
