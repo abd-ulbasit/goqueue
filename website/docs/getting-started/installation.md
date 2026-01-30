@@ -1,15 +1,15 @@
 ---
 layout: default
 title: Installation
-parent: Getting Started
-nav_order: 1
+
+
 ---
 
 # Installation
-{: .no_toc }
+
 
 Install GoQueue on your system.
-{: .fs-6 .fw-300 }
+
 
 ## Table of contents
 {: .no_toc .text-delta }

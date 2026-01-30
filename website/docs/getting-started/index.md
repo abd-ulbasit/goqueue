@@ -1,16 +1,13 @@
 ---
 layout: default
 title: Getting Started
-nav_order: 2
-has_children: true
-permalink: /docs/getting-started
+description: Learn how to install and start using GoQueue
+permalink: /docs/getting-started/
 ---
 
 # Getting Started
 
 Learn how to install, configure, and start using GoQueue.
-
-{: .fs-6 .fw-300 }
 
 ---
 
@@ -27,7 +24,6 @@ Getting started with GoQueue is straightforward:
 
 - [Installation Guide](installation) - Install GoQueue on your system
 - [Quickstart Tutorial](quickstart) - Get up and running in 5 minutes
-- [Docker Setup](docker) - Run GoQueue in containers
 - [Kubernetes Deployment](kubernetes) - Deploy to Kubernetes
 
 ## Prerequisites

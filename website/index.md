@@ -1,19 +1,17 @@
 ---
-layout: home
+layout: default
 title: Home
-nav_order: 1
-description: "GoQueue is a high-performance distributed message queue built in Go, combining the best features of Kafka, SQS, and RabbitMQ."
-permalink: /
+description: GoQueue is a high-performance distributed message queue built in Go
 ---
 
-# GoQueue
-{: .fs-9 }
-
-A high-performance distributed message queue built in Go.
-{: .fs-6 .fw-300 }
-
-[Get Started](/goqueue/docs/getting-started/quickstart){: .btn .btn-primary .fs-5 .mb-4 .mb-md-0 .mr-2 }
-[View on GitHub](https://github.com/abd-ulbasit/goqueue){: .btn .fs-5 .mb-4 .mb-md-0 }
+<div class="hero">
+  <h1>GoQueue</h1>
+  <p class="hero-tagline">A high-performance distributed message queue built in Go.<br>Combines the best of Kafka, SQS, and RabbitMQ.</p>
+  <div class="hero-buttons">
+    <a href="{{ '/docs/getting-started/quickstart' | relative_url }}" class="btn btn-primary">Get Started</a>
+    <a href="https://github.com/abd-ulbasit/goqueue" class="btn btn-secondary">View on GitHub</a>
+  </div>
+</div>
 
 ---
 
@@ -22,7 +20,7 @@ A high-performance distributed message queue built in Go.
 GoQueue is a **distributed message queue** that combines the best features from multiple messaging systems:
 
 - **Kafka-style** log-based storage with partitions for ordering and parallelism
-- **SQS-style** visibility timeouts and dead letter queues for reliability
+- **SQS-style** visibility timeouts and dead letter queues for reliability  
 - **RabbitMQ-style** priority queues and flexible routing
 
 Built from the ground up in Go for **performance**, **simplicity**, and **cloud-native** deployments.
@@ -31,32 +29,47 @@ Built from the ground up in Go for **performance**, **simplicity**, and **cloud-
 
 ## Key Features
 
-<div class="feature-grid">
-
-### 📦 Topics & Partitions
-Kafka-style log-based storage with configurable partitions for parallelism and ordering guarantees.
-
-### 👥 Consumer Groups
-Automatic partition assignment, rebalancing, and cooperative rebalancing (KIP-429 style).
-
-### ✅ Message Reliability
-ACK/NACK, visibility timeouts, automatic retries, and dead letter queues.
-
-### ⚡ Priority Queues
-5 priority levels with weighted fair queuing to prevent starvation.
-
-### ⏰ Delayed Messages
-Schedule messages for future delivery with second-precision timing.
-
-### 📋 Schema Registry
-JSON Schema validation with compatibility checking (Confluent API compatible).
-
-### 🔄 Transactions
-Exactly-once semantics with idempotent producers and atomic commits.
-
-### 📊 Observability
-Prometheus metrics, distributed tracing, and comprehensive health checks.
-
+<div class="features">
+  <div class="feature">
+    <div class="feature-icon">📦</div>
+    <h3>Topics & Partitions</h3>
+    <p>Kafka-style log-based storage with configurable partitions for parallelism and ordering guarantees.</p>
+  </div>
+  <div class="feature">
+    <div class="feature-icon">👥</div>
+    <h3>Consumer Groups</h3>
+    <p>Automatic partition assignment, rebalancing, and cooperative rebalancing (KIP-429 style).</p>
+  </div>
+  <div class="feature">
+    <div class="feature-icon">✅</div>
+    <h3>Message Reliability</h3>
+    <p>ACK/NACK, visibility timeouts, automatic retries, and dead letter queues.</p>
+  </div>
+  <div class="feature">
+    <div class="feature-icon">⚡</div>
+    <h3>Priority Queues</h3>
+    <p>5 priority levels with weighted fair queuing to prevent starvation.</p>
+  </div>
+  <div class="feature">
+    <div class="feature-icon">⏰</div>
+    <h3>Delayed Messages</h3>
+    <p>Schedule messages for future delivery with second-precision timing.</p>
+  </div>
+  <div class="feature">
+    <div class="feature-icon">📋</div>
+    <h3>Schema Registry</h3>
+    <p>JSON Schema validation with compatibility checking (Confluent API compatible).</p>
+  </div>
+  <div class="feature">
+    <div class="feature-icon">🔄</div>
+    <h3>Transactions</h3>
+    <p>Exactly-once semantics with idempotent producers and atomic commits.</p>
+  </div>
+  <div class="feature">
+    <div class="feature-icon">📊</div>
+    <h3>Observability</h3>
+    <p>Prometheus metrics, distributed tracing, and comprehensive health checks.</p>
+  </div>
 </div>
 
 ---
@@ -124,44 +137,18 @@ func main() {
 
 ## Why GoQueue?
 
-| Aspect | Kafka | RabbitMQ | SQS | GoQueue |
-|--------|-------|----------|-----|---------|
-| **Deployment** | Complex (JVM + ZK) | Medium | Managed | Simple (single binary) |
-| **Priority Queues** | ❌ | ✅ | ❌ | ✅ |
-| **Delayed Messages** | ❌ | ✅ Plugin | ✅ | ✅ |
-| **Visibility Timeout** | ❌ | ❌ | ✅ | ✅ |
-| **Partitioning** | ✅ | ❌ | FIFO only | ✅ |
-| **Consumer Groups** | ✅ | ❌ | ❌ | ✅ |
-| **Transactions** | ✅ | ✅ | ❌ | ✅ |
-| **Schema Registry** | Separate | ❌ | ❌ | ✅ Built-in |
+| Feature | Kafka | RabbitMQ | SQS | GoQueue |
+|---------|-------|----------|-----|---------|
+| Deployment | Complex (JVM + ZK) | Medium | Managed | **Simple (single binary)** |
+| Priority Queues | ❌ | ✅ | ❌ | ✅ |
+| Delayed Messages | ❌ | ✅ Plugin | ✅ | ✅ |
+| Visibility Timeout | ❌ | ❌ | ✅ | ✅ |
+| Partitioning | ✅ | ❌ | FIFO only | ✅ |
+| Consumer Groups | ✅ | ❌ | ❌ | ✅ |
+| Transactions | ✅ | ✅ | ❌ | ✅ |
+| Schema Registry | Separate | ❌ | ❌ | **Built-in** |
 
-[See full comparison →](/goqueue/comparison)
-
----
-
-## Architecture
-
-```
-┌────────────────────────────────────────────────────────────────┐
-│                         GOQUEUE CLUSTER                        │
-│                                                                │
-│  ┌─────────────────────────────────────────────────────────┐  │
-│  │                    CONTROL PLANE                         │  │
-│  │  Cluster Coordinator │ Metadata Store │ Leader Election  │  │
-│  └─────────────────────────────────────────────────────────┘  │
-│                                                                │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐           │
-│  │   Node 1    │  │   Node 2    │  │   Node 3    │           │
-│  │  (Broker)   │  │  (Broker)   │  │  (Broker)   │           │
-│  │             │  │             │  │             │           │
-│  │ Partitions: │  │ Partitions: │  │ Partitions: │           │
-│  │  orders-0   │  │  orders-1   │  │  orders-2   │           │
-│  │  events-1   │  │  events-2   │  │  events-0   │           │
-│  └─────────────┘  └─────────────┘  └─────────────┘           │
-└────────────────────────────────────────────────────────────────┘
-```
-
-[Learn more about architecture →](/goqueue/docs/concepts/architecture)
+[See full comparison →]({{ '/comparison' | relative_url }})
 
 ---
 
@@ -169,29 +156,7 @@ func main() {
 
 Ready to try GoQueue? Follow our quickstart guide:
 
-1. [Install GoQueue](/goqueue/docs/getting-started/installation)
-2. [Create your first topic](/goqueue/docs/getting-started/quickstart)
-3. [Publish and consume messages](/goqueue/docs/getting-started/quickstart#publish-messages)
-4. [Set up consumer groups](/goqueue/docs/concepts/consumer-groups)
-
----
-
-## Community
-
-- [GitHub Discussions](https://github.com/abd-ulbasit/goqueue/discussions)
-- [Report Issues](https://github.com/abd-ulbasit/goqueue/issues)
-- [Contribute](https://github.com/abd-ulbasit/goqueue/blob/main/CONTRIBUTING.md)
-
----
-
-<div class="footer-badges">
-  <a href="https://github.com/abd-ulbasit/goqueue/blob/main/LICENSE">
-    <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License">
-  </a>
-  <a href="https://github.com/abd-ulbasit/goqueue/releases">
-    <img src="https://img.shields.io/github/v/release/abd-ulbasit/goqueue" alt="Release">
-  </a>
-  <a href="https://goreportcard.com/report/github.com/abd-ulbasit/goqueue">
-    <img src="https://goreportcard.com/badge/github.com/abd-ulbasit/goqueue" alt="Go Report Card">
-  </a>
-</div>
+1. [Install GoQueue]({{ '/docs/getting-started/installation' | relative_url }})
+2. [Create your first topic]({{ '/docs/getting-started/quickstart' | relative_url }})
+3. [Set up consumer groups]({{ '/docs/concepts/consumer-groups' | relative_url }})
+4. [Explore the API]({{ '/docs/api/' | relative_url }})

@@ -1,20 +1,12 @@
 ---
 layout: default
 title: Comparison
-nav_order: 6
+description: How GoQueue compares to Kafka, RabbitMQ, SQS, and other message queues
 ---
 
 # GoQueue vs Alternatives
-{: .no_toc }
 
 How GoQueue compares to other message queues and when to use each.
-{: .fs-6 .fw-300 }
-
-## Table of contents
-{: .no_toc .text-delta }
-
-1. TOC
-{:toc}
 
 ---
 

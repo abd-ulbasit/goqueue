@@ -1,15 +1,15 @@
 ---
 layout: default
 title: Operations
-nav_order: 5
-has_children: true
+
+
 ---
 
 # Operations Guide
-{: .no_toc }
+
 
 Deploy, monitor, and operate GoQueue in production.
-{: .fs-6 .fw-300 }
+
 
 ---
 
