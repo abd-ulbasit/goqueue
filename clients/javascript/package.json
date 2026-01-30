@@ -1,0 +1,63 @@
+{
+  "name": "goqueue-client",
+  "version": "1.0.0",
+  "description": "Official JavaScript/TypeScript client for GoQueue - a high-performance distributed message queue",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format cjs,esm --dts --clean",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint src --ext .ts",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "goqueue",
+    "message-queue",
+    "message-broker",
+    "queue",
+    "pubsub",
+    "kafka",
+    "sqs",
+    "rabbitmq",
+    "distributed-systems",
+    "typescript",
+    "nodejs"
+  ],
+  "author": "GoQueue Team",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/abd-ulbasit/goqueue.git",
+    "directory": "clients/javascript"
+  },
+  "homepage": "https://github.com/abd-ulbasit/goqueue#readme",
+  "bugs": {
+    "url": "https://github.com/abd-ulbasit/goqueue/issues"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.3.0",
+    "vitest": "^1.0.0",
+    "eslint": "^8.55.0",
+    "@typescript-eslint/eslint-plugin": "^6.13.0",
+    "@typescript-eslint/parser": "^6.13.0"
+  }
+}
