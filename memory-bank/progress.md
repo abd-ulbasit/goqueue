@@ -7,7 +7,73 @@
 **Tests**: 640+ passing (storage: 50+, broker: 470+, api: 24, grpc: 16, client: 14, cluster: 50+)
 **Started**: Session 1
 
-## Latest Session - Cluster Formation Fix & Failover Detection
+## Latest Session - Topic Metadata Sync & Partition API
+
+### What Was Accomplished
+
+**Topic Metadata Sync (FIXED)**:
+- **Problem**: Topics created on controller weren't visible on followers for replication
+- **Root Cause**: `handleMetadataChange` in cluster_integration.go was a stub that only logged
+- **Fix**: Added `ensureLocalTopic()` that creates topics locally when metadata is synced
+- Added `CreateTopicLocal()` to broker - creates topic without re-registering with cluster metadata
+- Now when controller creates a topic, followers automatically create it locally via metadata sync
+
+**Partition Leader API (NEW)**:
+- Added `GET /topics/{topicName}/partitions` endpoint
+- Returns: partition number, leader, replicas, ISR, version for each partition
+- Example response:
+  ```json
+  {
+    "partitions": [
+      {"partition": 0, "leader": "goqueue-0", "replicas": ["goqueue-0", "goqueue-1", "goqueue-2"], "isr": ["goqueue-0", "goqueue-1", "goqueue-2"], "version": 1}
+    ],
+    "topic": "sync-test3"
+  }
+  ```
+
+**Failover Testing (VERIFIED)**:
+- Tested node death by scaling down: `kubectl scale statefulset goqueue --replicas=2`
+- Failure detector correctly identifies dead nodes (~12s)
+- Leader election occurs when nodes rejoin
+- ISR tracking works - all 3 nodes in ISR when healthy
+- Epoch/version increments on leadership changes
+- Unclean election prevention working: "no ISR available, unclean election disabled"
+
+### Code Changes
+
+**`internal/broker/cluster_integration.go`**:
+- `handleMetadataChange()`: Now iterates through all topics in metadata and calls `ensureLocalTopic()`
+- Added `ensureLocalTopic(name, partitions)`: Creates topic locally from cluster metadata
+
+**`internal/broker/broker.go`**:
+- Added `CreateTopicLocal(config TopicConfig)`: Creates topic without cluster metadata registration
+- Used for metadata sync - idempotent (returns nil if topic exists)
+
+**`internal/api/server.go`**:
+- Added route: `r.Get("/partitions", s.getTopicPartitions)`
+- Handler calls `b.GetTopicPartitions(topicName)` and returns JSON
+
+### Test Results
+
+- 3-node EKS cluster running with v0.5.0-isr3
+- Topic creation on controller syncs to all followers
+- Partition API returns correct leader/replica/ISR information
+- Failover tested: node death detected, re-election works
+
+### Docker Images
+
+- `v0.5.0-isr3`: Latest with metadata sync fix
+- Built with cross-compilation: `CGO_ENABLED=0 GOOS=linux GOARCH=amd64`
+
+### Known Gaps
+
+1. **Request Routing**: Writes to non-leader partitions go locally instead of forwarding to leader
+2. **Synchronous Replication**: WaitForReplication is called but may not wait for ISR ack
+3. **Leader Election on Death**: Works but needs more testing
+
+---
+
+## Previous Session - Cluster Formation Fix & Failover Detection
 
 ### What Was Accomplished
 

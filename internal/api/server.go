@@ -224,6 +224,31 @@ func (s *Server) registerRoutes() {
 			r.Get("/delayed/{offset}", s.getDelayedMessage)
 			r.Delete("/delayed/{partition}/{offset}", s.cancelDelayedMessage)
 
+			// ======================================================================
+			// PARTITION INFO (Cluster Mode)
+			// ======================================================================
+			//
+			// WHY: Clients and operators need visibility into partition assignments.
+			//
+			// USE CASES:
+			//   - Debug routing issues (which node handles which partition?)
+			//   - Monitor ISR health (are replicas in sync?)
+			//   - Client optimization (direct connect to leader)
+			//
+			// RESPONSE: Array of partition info objects with:
+			//   - partition: Partition number (0-based)
+			//   - leader: Node ID of current leader
+			//   - replicas: All replica node IDs
+			//   - isr: In-Sync Replicas (subset of replicas that are caught up)
+			//
+			// COMPARISON:
+			//   - Kafka: AdminClient.describeTopics()
+			//   - RabbitMQ: GET /api/queues shows node ownership
+			//   - goqueue: GET /topics/{name}/partitions
+			//
+			// ======================================================================
+			r.Get("/partitions", s.getTopicPartitions)
+
 			// Partitions
 			r.Route("/partitions/{partitionID}", func(r chi.Router) {
 				r.Get("/messages", s.consumeMessages)
@@ -789,6 +814,72 @@ func (s *Server) deleteTopic(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, map[string]interface{}{
 		"deleted": true,
 		"name":    topicName,
+	})
+}
+
+// =============================================================================
+// PARTITION INFO HANDLER
+// =============================================================================
+//
+// WHY: Operators and clients need to see partition leadership assignments.
+// Essential for:
+//   - Debugging: "Why is my message going to the wrong node?"
+//   - Monitoring: "Are all partitions in sync?"
+//   - Optimization: "Can I connect directly to the leader?"
+//
+// RESPONSE FORMAT:
+//
+//	{
+//	  "topic": "orders",
+//	  "partitions": [
+//	    {
+//	      "partition": 0,
+//	      "leader": "node-0",
+//	      "replicas": ["node-0", "node-1", "node-2"],
+//	      "isr": ["node-0", "node-1"]  // node-2 is behind
+//	    },
+//	    ...
+//	  ]
+//	}
+//
+// ISR EXPLANATION:
+//   ISR (In-Sync Replicas) = replicas that have caught up to the leader.
+//   If ISR < replicas, some nodes are lagging (network, disk, overload).
+//   If ISR is empty (except leader), data loss risk if leader fails.
+//
+// COMPARISON:
+//   - Kafka: kafka-topics.sh --describe shows Leader/Replicas/ISR
+//   - RabbitMQ: rabbitmqctl list_queues shows mirror status
+//   - goqueue: GET /topics/{name}/partitions
+//
+// =============================================================================
+
+func (s *Server) getTopicPartitions(w http.ResponseWriter, r *http.Request) {
+	topicName := chi.URLParam(r, "topicName")
+
+	// Get partition info from broker
+	partitions := s.broker.GetTopicPartitions(topicName)
+	if len(partitions) == 0 {
+		// Topic doesn't exist or no cluster metadata
+		s.errorResponse(w, http.StatusNotFound, "topic not found or no partition info available")
+		return
+	}
+
+	// Convert to response format
+	partitionInfos := make([]map[string]interface{}, len(partitions))
+	for i, p := range partitions {
+		partitionInfos[i] = map[string]interface{}{
+			"partition": p.Partition,
+			"leader":    p.Leader,
+			"replicas":  p.Replicas,
+			"isr":       p.ISR,
+			"version":   p.Version,
+		}
+	}
+
+	s.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"topic":      topicName,
+		"partitions": partitionInfos,
 	})
 }
 

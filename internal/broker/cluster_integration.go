@@ -180,6 +180,84 @@ func (cc *clusterCoordinator) GetReplicas(topic string, partition int) []cluster
 	return assign.Replicas
 }
 
+// GetPartitionInfo returns detailed partition assignment info for API responses.
+func (cc *clusterCoordinator) GetPartitionInfo(topic string, partition int) *PartitionInfo {
+	assign := cc.coordinator.MetadataStore().GetAssignment(topic, partition)
+	if assign == nil {
+		// No assignment - single node mode
+		return &PartitionInfo{
+			Topic:     topic,
+			Partition: partition,
+			Leader:    string(cc.coordinator.Node().ID()),
+			Replicas:  []string{string(cc.coordinator.Node().ID())},
+			ISR:       []string{string(cc.coordinator.Node().ID())},
+			Version:   0,
+		}
+	}
+
+	replicas := make([]string, len(assign.Replicas))
+	for i, r := range assign.Replicas {
+		replicas[i] = string(r)
+	}
+
+	isr := make([]string, len(assign.ISR))
+	for i, r := range assign.ISR {
+		isr[i] = string(r)
+	}
+
+	return &PartitionInfo{
+		Topic:     assign.Topic,
+		Partition: assign.Partition,
+		Leader:    string(assign.Leader),
+		Replicas:  replicas,
+		ISR:       isr,
+		Version:   assign.Version,
+	}
+}
+
+// GetTopicPartitions returns partition info for all partitions of a topic.
+func (cc *clusterCoordinator) GetTopicPartitions(topic string) []*PartitionInfo {
+	assignments := cc.coordinator.MetadataStore().GetAssignmentsForTopic(topic)
+	if len(assignments) == 0 {
+		// Check if topic exists in broker
+		return nil
+	}
+
+	infos := make([]*PartitionInfo, 0, len(assignments))
+	for _, assign := range assignments {
+		replicas := make([]string, len(assign.Replicas))
+		for i, r := range assign.Replicas {
+			replicas[i] = string(r)
+		}
+
+		isr := make([]string, len(assign.ISR))
+		for i, r := range assign.ISR {
+			isr[i] = string(r)
+		}
+
+		infos = append(infos, &PartitionInfo{
+			Topic:     assign.Topic,
+			Partition: assign.Partition,
+			Leader:    string(assign.Leader),
+			Replicas:  replicas,
+			ISR:       isr,
+			Version:   assign.Version,
+		})
+	}
+
+	return infos
+}
+
+// PartitionInfo represents partition assignment info for API responses.
+type PartitionInfo struct {
+	Topic     string   `json:"topic"`
+	Partition int      `json:"partition"`
+	Leader    string   `json:"leader"`
+	Replicas  []string `json:"replicas"`
+	ISR       []string `json:"isr"`
+	Version   int64    `json:"version"`
+}
+
 // =============================================================================
 // TOPIC METADATA (CONTROLLER ONLY)
 // =============================================================================
@@ -232,6 +310,27 @@ func (cc *clusterCoordinator) CreateTopicMeta(name string, partitions int, repli
 		}
 	}
 
+	// =========================================================================
+	// IMMEDIATE METADATA SYNC
+	// =========================================================================
+	//
+	// WHY: Background sync runs every 9s. Clients expect topic to be usable
+	// immediately after creation. Push metadata NOW so all nodes know.
+	//
+	// FLOW:
+	//   1. Topic created on controller
+	//   2. Assignments stored locally
+	//   3. SyncMetadataNow() pushes to all followers
+	//   4. Followers update their local metadata store
+	//   5. Any node can now handle requests for this topic
+	//
+	// =========================================================================
+	cc.logger.Info("syncing new topic metadata to followers",
+		"topic", name,
+		"partitions", partitions,
+		"replication_factor", replicationFactor)
+	cc.coordinator.SyncMetadataNow()
+
 	return nil
 }
 
@@ -259,13 +358,78 @@ func (cc *clusterCoordinator) RegisterRoutes(mux *http.ServeMux) {
 // =============================================================================
 
 // handleMetadataChange is called when cluster metadata changes.
+//
+// WHY THIS MATTERS:
+//
+//	When the controller creates a topic, it syncs metadata to followers.
+//	Followers must create the topic locally so they can:
+//	1. Accept replication requests from leaders
+//	2. Serve as leader if elected for a partition
+//	3. Respond to fetch requests from other followers
+//
+// FLOW:
+//
+//	┌────────────────┐    sync     ┌────────────────┐
+//	│   Controller   │────────────►│    Follower    │
+//	│ CreateTopic()  │             │handleMetadata()│
+//	└────────────────┘             └───────┬────────┘
+//	                                       │
+//	                                       ▼
+//	                            ┌──────────────────┐
+//	                            │ ensureLocalTopic │
+//	                            │ for each topic   │
+//	                            └──────────────────┘
+//
+// WHAT GETS SYNCED:
+//   - Topic name and partition count
+//   - Partition assignments (leader, replicas, ISR)
+//   - Topic configuration (retention, etc.) - future
 func (cc *clusterCoordinator) handleMetadataChange(meta *cluster.ClusterMeta) {
 	cc.logger.Debug("metadata changed",
 		"version", meta.Version,
 		"topics", len(meta.Topics))
 
-	// In future: sync topic configs with local broker
-	// For M10: metadata is informational only
+	// Ensure all topics in cluster metadata exist locally.
+	// This is critical for replication - followers must have topics
+	// to accept fetch requests and store replicated messages.
+	for topicName, topicMeta := range meta.Topics {
+		if err := cc.ensureLocalTopic(topicName, topicMeta.PartitionCount); err != nil {
+			cc.logger.Error("failed to create local topic from metadata",
+				"topic", topicName,
+				"partitions", topicMeta.PartitionCount,
+				"error", err)
+		}
+	}
+}
+
+// ensureLocalTopic creates a topic locally if it doesn't exist.
+//
+// WHY NOT JUST CALL CreateTopic?
+//
+//	CreateTopic would trigger another CreateTopicMeta call, creating
+//	a feedback loop. We need to create the topic locally WITHOUT
+//	registering it with cluster metadata again.
+//
+// IDEMPOTENT:
+//
+//	Safe to call multiple times - skips if topic already exists.
+func (cc *clusterCoordinator) ensureLocalTopic(name string, partitions int) error {
+	// Check if topic already exists (fast path)
+	if cc.broker.TopicExists(name) {
+		return nil
+	}
+
+	cc.logger.Info("creating local topic from cluster metadata",
+		"topic", name,
+		"partitions", partitions)
+
+	// Create topic locally without triggering cluster metadata registration.
+	// This is a direct local creation for replication purposes.
+	return cc.broker.CreateTopicLocal(TopicConfig{
+		Name:           name,
+		NumPartitions:  partitions,
+		RetentionHours: 168, // 7 days default
+	})
 }
 
 // handleCoordinatorEvent is called for coordinator lifecycle events.
