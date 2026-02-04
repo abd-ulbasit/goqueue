@@ -7,7 +7,164 @@
 **Tests**: 640+ passing (storage: 50+, broker: 470+, api: 24, grpc: 16, client: 14, cluster: 50+)
 **Started**: Session 1
 
-## Latest Session - QuotaEnforcer Refactoring
+## Latest Session - 3-Node Cluster Deployment & High-Throughput Benchmarks
+
+### What Was Built
+
+**Cluster Deployment Bug Fixes**:
+- Fixed `normalizeAddr()` function in `cmd/goqueue/main.go` - was prepending `:` to full addresses like `0.0.0.0:8080` creating invalid `:0.0.0.0:8080`
+- Added `strings` import for `LastIndex` usage
+- Docker image rebuilt and pushed as `v0.4.1` and `latest`
+
+**Docker Build Optimization**:
+- Created `.dockerignore` reducing build context from 1GB to 65MB
+- Excludes: .git/, data/, website/, docs/, terraform state, node_modules/
+
+**StatefulSet Configuration** (`deploy/kubernetes/manual/statefulset.yaml`):
+- `podManagementPolicy: Parallel` for simultaneous pod startup
+- Environment variables for cluster mode:
+  - `GOQUEUE_BROKER_NODEID` from pod name
+  - `GOQUEUE_CLUSTER_ENABLED=true`
+  - `GOQUEUE_CLUSTER_PEERS` with all 3 node addresses
+  - `GOQUEUE_CLUSTER_ADVERTISE` for inter-node discovery
+  - `GOQUEUE_LISTENERS_HTTP/GRPC/INTERNAL` bound to 0.0.0.0
+
+**Benchmark Jobs**:
+- Created `publish-benchmark.yaml` for comprehensive publish testing
+- Tests: Sequential, concurrent (4-32 threads), batch (10-1000 msgs)
+
+### Benchmark Results (3-Node EKS Cluster, c5.xlarge)
+
+**In-Cluster Benchmarks** (minimal network latency):
+
+| Mode | Configuration | Throughput |
+|------|--------------|------------|
+| Sequential | 1 msg at a time | **~320 msgs/sec** |
+| Concurrent | 8 threads | **~1,300 msgs/sec** |
+| Batch (100) | 100 msgs/batch | **~30,000 msgs/sec** |
+| Batch (1000) | 1000 msgs/batch | **~220,000 msgs/sec** |
+
+**Scaling Analysis**:
+```
+Batch Size    Throughput       vs Sequential
+─────────────────────────────────────────────
+     1        ~320/s           baseline
+    10        ~3,000/s         ~10x
+   100        ~30,000/s        ~100x
+   500        ~130,000/s       ~400x
+  1000        ~220,000/s       ~700x
+```
+
+**Concurrent Thread Scaling**:
+```
+Threads    Throughput    vs Single Thread
+────────────────────────────────────────
+   4       ~1,140/s      3.5x
+   8       ~1,300/s      4x (optimal)
+  16       ~1,030/s      diminishing returns
+  32       ~1,030/s      contention
+```
+
+### Documentation Updates
+
+**Created `docs/BENCHMARKS.md`**:
+- Full benchmark methodology and results
+- Hardware recommendations by workload
+- Comparison with other systems
+- Instructions to run benchmarks
+
+**Updated `README.md` Performance Section**:
+- In-cluster benchmark results
+- Batch scaling chart
+- Comparison table with Kafka, RabbitMQ, SQS
+
+### Key Learnings
+
+**Network is the Bottleneck for Sequential Publish**:
+- Remote (150ms RTT): ~30 msgs/sec
+- In-cluster: ~320 msgs/sec (10x faster)
+- Batch mode: eliminates network as bottleneck
+
+**Batch Amortizes Per-Request Overhead**:
+- TCP connection, HTTP parsing, logging all happen once per batch
+- 100 msg batch = 100x throughput improvement
+- 1000 msg batch = 700x throughput improvement
+
+**Cluster State Not Yet Replicated**:
+- Topics created on one node aren't visible to others
+- LoadBalancer routes to different pods = inconsistent state
+- This is expected - topic replication is future work
+
+### Files Changed
+
+- `cmd/goqueue/main.go` - Fixed normalizeAddr function
+- `.dockerignore` - Created for build optimization
+- `deploy/kubernetes/manual/statefulset.yaml` - Cluster env vars
+- `deploy/kubernetes/manual/publish-benchmark.yaml` - Benchmark job
+- `deploy/kubernetes/manual/full-benchmark.yaml` - Full test suite
+- `docs/BENCHMARKS.md` - Performance documentation
+- `README.md` - Updated Performance section
+
+---
+
+## Previous Session - EKS Benchmarks & Deployment Improvements
+
+### What Was Built
+
+**Benchmarking Infrastructure**:
+- Fixed benchmark tests to use correct API field (`num_partitions` not `partitions`)
+- Fixed Python benchmark API paths (removed `/api/v1/` prefix, fixed poll endpoint)
+- Fixed TypeScript benchmark API paths (same fixes as Python)
+
+**Benchmark Results (AWS EKS, ap-south-1, LoadBalancer, ~150ms RTT)**:
+
+| Test | Go | Python | TypeScript |
+|------|-----|--------|------------|
+| Single message (1KB) | 6.3 msg/s | - | - |
+| Batch 100 × 1KB | 112 msg/s | 331 msg/s | 284 msg/s |
+| Batch 100 × 100B | 365 msg/s | - | - |
+| Batch 1000 × 100B | 1,090 msg/s | - | - |
+| 8 Concurrent | 152 msg/s | 567 msg/s | 571 msg/s |
+| Sustained (30s) | - | 552 msg/s | 549 msg/s |
+
+**Deployment Simplification** (`deploy/deploy.sh`):
+- One-command EKS deployment: `./deploy.sh deploy dev`
+- GoQueue-only deployment: `./deploy.sh goqueue dev`
+- LoadBalancer URL retrieval: `./deploy.sh url dev`
+- Status check: `./deploy.sh status dev`
+- Benchmark runner: `./deploy.sh benchmark dev`
+- Teardown: `./deploy.sh destroy dev`
+
+**Docker Image Updates**:
+- Pushed `ghcr.io/abd-ulbasit/goqueue:latest` with K8s fixes
+- Tagged as `v0.2.0` for release tracking
+- Kubernetes fixes: env vars for data directory and listener addresses
+
+**README Updates**:
+- Added Performance section with benchmark results
+- Updated Quick Start with Kubernetes deployment instructions
+- Added Helm installation command
+
+### Key Learnings
+
+**Multi-replica Load Balancing Issue**:
+- With 3 replicas, topic created on pod1 but publish routed to pod2
+- Root cause: pods have independent state (not clustered)
+- Solution: Scale to 1 replica OR implement proper clustering
+
+**Network Latency Impact**:
+- Single-message throughput limited by RTT (~150ms each way)
+- Batching is critical for throughput (100x improvement)
+- Concurrent producers help saturate network
+
+**Client Language Comparison**:
+- Go client: Fastest raw throughput with small batches
+- Python/TS: Better sustained throughput with HTTP connection pooling
+- All clients: Similar performance with concurrent producers
+
+---
+
+## Previous Session - QuotaEnforcer Refactoring
 
 ### What Was Built
 

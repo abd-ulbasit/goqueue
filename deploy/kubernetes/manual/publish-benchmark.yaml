@@ -1,0 +1,163 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: goqueue-publish-bench
+  namespace: goqueue
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 600
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: benchmark
+        image: python:3.12-alpine
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "256Mi"
+          limits:
+            cpu: "1000m"
+            memory: "512Mi"
+        command: ["python3", "-c"]
+        args:
+        - |
+          import urllib.request
+          import urllib.error
+          import json
+          import time
+          from concurrent.futures import ThreadPoolExecutor, as_completed
+
+          URL = "http://goqueue.goqueue.svc.cluster.local:8080"
+
+          def post(path, data=None):
+              req = urllib.request.Request(
+                  f"{URL}{path}",
+                  data=json.dumps(data).encode() if data else None,
+                  headers={"Content-Type": "application/json"}
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as resp:
+                      return resp.read().decode(), resp.status
+              except urllib.error.HTTPError as e:
+                  return e.read().decode(), e.code
+              except Exception as e:
+                  return str(e), 0
+
+          def get(path):
+              try:
+                  with urllib.request.urlopen(f"{URL}{path}", timeout=30) as resp:
+                      return resp.read().decode(), resp.status
+              except:
+                  return "", 0
+
+          print("=" * 70)
+          print("GoQueue Publish Benchmark")
+          print("3-Node EKS Cluster (c5.xlarge - 4 vCPU, 8GB RAM each)")
+          print("=" * 70)
+          print()
+
+          # Health check
+          body, _ = get("/health")
+          print(f"Health: {body}")
+          print()
+
+          # Create topic
+          topic = f"pub-bench-{int(time.time())}"
+          post(f"/topics/{topic}", {"partitions": 6})
+          print(f"Topic: {topic}")
+          print()
+
+          results = []
+
+          # TEST 1: Sequential Publish
+          print("-" * 70)
+          print("TEST 1: Sequential Publish")
+          print("-" * 70)
+          for msg_count in [100, 500, 1000, 2000]:
+              start = time.perf_counter()
+              for i in range(msg_count):
+                  post(f"/topics/{topic}/messages", {"payload": f"seq-{i}"})
+              duration = time.perf_counter() - start
+              tput = msg_count / duration
+              print(f"  {msg_count:>5} msgs: {duration:.2f}s → {tput:>6.0f} msgs/sec")
+              results.append(("Sequential", msg_count, duration, tput))
+          print()
+
+          # TEST 2: Concurrent Publish (vary thread count)
+          print("-" * 70)
+          print("TEST 2: Concurrent Publish (varying threads)")
+          print("-" * 70)
+          def publish_n(thread_id, count, topic_name):
+              for i in range(count):
+                  post(f"/topics/{topic_name}/messages", {"payload": f"t{thread_id}-{i}"})
+              return count
+
+          for threads in [4, 8, 16, 32]:
+              msgs_per_thread = 100
+              total = threads * msgs_per_thread
+              start = time.perf_counter()
+              with ThreadPoolExecutor(max_workers=threads) as ex:
+                  futures = [ex.submit(publish_n, t, msgs_per_thread, topic) for t in range(threads)]
+                  for f in as_completed(futures): pass
+              duration = time.perf_counter() - start
+              tput = total / duration
+              print(f"  {threads:>2} threads x {msgs_per_thread} = {total:>5} msgs: {duration:.2f}s → {tput:>6.0f} msgs/sec")
+              results.append((f"Concurrent-{threads}t", total, duration, tput))
+          print()
+
+          # TEST 3: Batch Publish (vary batch size)
+          print("-" * 70)
+          print("TEST 3: Batch Publish (varying batch size)")
+          print("-" * 70)
+          for batch_size in [10, 50, 100, 200]:
+              num_batches = 50
+              total = batch_size * num_batches
+              start = time.perf_counter()
+              for b in range(num_batches):
+                  messages = [{"payload": f"batch-{b}-{i}"} for i in range(batch_size)]
+                  post(f"/topics/{topic}/messages/batch", {"messages": messages})
+              duration = time.perf_counter() - start
+              tput = total / duration
+              print(f"  {num_batches:>2} batches x {batch_size:>3} = {total:>5} msgs: {duration:.2f}s → {tput:>6.0f} msgs/sec")
+              results.append((f"Batch-{batch_size}", total, duration, tput))
+          print()
+
+          # TEST 4: Large batch test
+          print("-" * 70)
+          print("TEST 4: Large Batch Stress Test")
+          print("-" * 70)
+          for batch_size in [500, 1000]:
+              num_batches = 10
+              total = batch_size * num_batches
+              start = time.perf_counter()
+              for b in range(num_batches):
+                  messages = [{"payload": f"big-{b}-{i}"} for i in range(batch_size)]
+                  post(f"/topics/{topic}/messages/batch", {"messages": messages})
+              duration = time.perf_counter() - start
+              tput = total / duration
+              print(f"  {num_batches:>2} batches x {batch_size:>4} = {total:>5} msgs: {duration:.2f}s → {tput:>6.0f} msgs/sec")
+              results.append((f"LargeBatch-{batch_size}", total, duration, tput))
+          print()
+
+          # SUMMARY
+          print("=" * 70)
+          print("BENCHMARK SUMMARY")
+          print("=" * 70)
+          print(f"{'Test':<20} {'Messages':>10} {'Duration':>10} {'Throughput':>12}")
+          print("-" * 55)
+          for test, msgs, dur, tput in results:
+              print(f"{test:<20} {msgs:>10} {dur:>9.2f}s {tput:>10.0f}/s")
+          print("=" * 70)
+          print()
+
+          # Key metrics
+          seq_tput = [r[3] for r in results if r[0] == "Sequential"][-1]
+          conc_best = max([r[3] for r in results if r[0].startswith("Concurrent")])
+          batch_best = max([r[3] for r in results if "Batch" in r[0]])
+          
+          print("KEY METRICS FOR DOCUMENTATION:")
+          print(f"  • Sequential Publish:  ~{seq_tput:.0f} msgs/sec")
+          print(f"  • Concurrent Publish:  ~{conc_best:.0f} msgs/sec (best)")
+          print(f"  • Batch Publish:       ~{batch_best:.0f} msgs/sec (best)")
+          print()

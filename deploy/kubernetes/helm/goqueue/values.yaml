@@ -277,25 +277,28 @@ persistence:
 # │   - CPU: Pod is throttled if it exceeds                                     │
 # │   - Memory: Pod is OOM-killed if it exceeds                                 │
 # │                                                                             │
-# │ GOQUEUE RECOMMENDATIONS:                                                    │
-# │   - Development: 256Mi memory, 100m CPU                                     │
-# │   - Production: 2Gi memory, 1 CPU per 50k msg/s                             │
-# │   - High-throughput: 4Gi+ memory, 2+ CPU                                    │
+# │ C5.XLARGE NODE SPECS (4 vCPU, 8 GB RAM):                                    │
+# │   - We run 1 goqueue pod per node                                           │
+# │   - Reserve ~1 CPU for system + kubelet                                     │
+# │   - Reserve ~1.5 GB for system + kubelet                                    │
+# │   - Available for goqueue: ~3 CPU, ~6 GB RAM                                │
 # │                                                                             │
-# │ MEMORY SIZING FACTORS:                                                      │
-# │   - Message batch buffers                                                   │
-# │   - Index caches                                                            │
-# │   - Inflight message tracking                                               │
-# │   - gRPC streaming buffers                                                  │
+# │ GOQUEUE MEMORY BREAKDOWN (estimated for high throughput):                   │
+# │   - Write buffers: ~256 MB                                                  │
+# │   - Index caches: ~512 MB                                                   │
+# │   - In-flight tracking: ~256 MB                                             │
+# │   - gRPC buffers: ~256 MB                                                   │
+# │   - Go runtime/GC headroom: ~1 GB                                           │
+# │   - Total recommended: 4 GB (with headroom)                                 │
 # └─────────────────────────────────────────────────────────────────────────────┘
 
 resources:
   limits:
-    cpu: "2"
-    memory: 2Gi
+    cpu: "3"
+    memory: 5Gi
   requests:
-    cpu: "500m"
-    memory: 512Mi
+    cpu: "2"
+    memory: 4Gi
 
 # -----------------------------------------------------------------------------
 # AUTOSCALING
@@ -325,16 +328,30 @@ tolerations: []
   #   effect: "NoSchedule"
 
 # Affinity rules (advanced scheduling)
-affinity: {}
-  # podAntiAffinity:
-  #   requiredDuringSchedulingIgnoredDuringExecution:
-  #     - labelSelector:
-  #         matchExpressions:
-  #           - key: app.kubernetes.io/name
-  #             operator: In
-  #             values:
-  #               - goqueue
-  #       topologyKey: "kubernetes.io/hostname"
+# ┌─────────────────────────────────────────────────────────────────────────────┐
+# │ POD ANTI-AFFINITY - ONE POD PER NODE                                        │
+# │                                                                             │
+# │ For a distributed queue, we want each broker on a different node:           │
+# │   - Node failure only affects one broker                                    │
+# │   - Better resource utilization                                             │
+# │   - Reduced blast radius                                                    │
+# │                                                                             │
+# │ requiredDuringSchedulingIgnoredDuringExecution = HARD requirement           │
+# │   Kubernetes will NOT schedule if rule cannot be satisfied                  │
+# │                                                                             │
+# │ preferredDuringSchedulingIgnoredDuringExecution = SOFT preference           │
+# │   Kubernetes will TRY to satisfy but schedule anyway if it cannot           │
+# └─────────────────────────────────────────────────────────────────────────────┘
+affinity:
+  podAntiAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      - labelSelector:
+          matchExpressions:
+            - key: app.kubernetes.io/name
+              operator: In
+              values:
+                - goqueue
+        topologyKey: "kubernetes.io/hostname"
 
 # Topology spread constraints (distribute across zones)
 topologySpreadConstraints:
@@ -372,7 +389,7 @@ topologySpreadConstraints:
 
 livenessProbe:
   httpGet:
-    path: /health
+    path: /healthz
     port: http
   initialDelaySeconds: 30
   periodSeconds: 10
@@ -381,7 +398,7 @@ livenessProbe:
 
 readinessProbe:
   httpGet:
-    path: /ready
+    path: /readyz
     port: http
   initialDelaySeconds: 10
   periodSeconds: 5
@@ -390,7 +407,7 @@ readinessProbe:
 
 startupProbe:
   httpGet:
-    path: /health
+    path: /healthz
     port: http
   initialDelaySeconds: 5
   periodSeconds: 5

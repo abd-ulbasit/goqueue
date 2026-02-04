@@ -1,0 +1,32 @@
+# Build outputs
+data/
+.git/
+*.log
+*.tmp
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Test and cache
+*.test
+.cache/
+__pycache__/
+node_modules/
+
+# Docs and website
+website/
+docs/
+*.md
+!README.md
+
+# Terraform state
+deploy/terraform/**/.terraform/
+deploy/terraform/**/*.tfstate*
+
+# Large directories not needed for build
+memory-bank/
+api/postman/
+clients/

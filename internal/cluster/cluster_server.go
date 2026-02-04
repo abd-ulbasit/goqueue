@@ -179,16 +179,37 @@ func (cs *ClusterServer) handleJoin(w http.ResponseWriter, r *http.Request) {
 		"from", req.NodeID,
 		"addr", req.NodeInfo.ClientAddress)
 
-	// Only controller can process joins
-	if !cs.elector.IsController() {
-		// Redirect to controller
-		controllerID := cs.membership.ControllerID()
-		if controllerID == "" {
-			cs.jsonError(w, "no controller elected yet", http.StatusServiceUnavailable)
-			return
-		}
+	// ==========================================================================
+	// BOOTSTRAP MODE: Allow joins even without a controller
+	// ==========================================================================
+	//
+	// PROBLEM (Chicken-and-Egg):
+	//   1. All pods start simultaneously in Kubernetes
+	//   2. All try to join via peers
+	//   3. All reject joins because "no controller elected yet"
+	//   4. Quorum never reached → controller never elected → deadlock
+	//
+	// SOLUTION:
+	//   During bootstrap (no controller), any node can accept a join request.
+	//   The joining node is added to local membership. Once enough nodes join,
+	//   quorum is reached and controller election can proceed.
+	//
+	// SAFETY:
+	//   This only happens during initial cluster formation. Once a controller
+	//   is elected, normal join flow (controller-only) is used.
+	//
+	// COMPARISON:
+	//   - Kafka KRaft: Voters form quorum first, then elect
+	//   - etcd: Bootstrap flag + initial-cluster list
+	//   - Consul: Bootstrap-expect setting
+	//   - goqueue: Auto-bootstrap when no controller exists
+	//
+	// ==========================================================================
+	controllerID := cs.membership.ControllerID()
+	isBootstrapMode := controllerID == ""
 
-		// Return controller address for redirect
+	if !isBootstrapMode && !cs.elector.IsController() {
+		// Normal mode: only controller can process joins, redirect
 		controllerInfo := cs.membership.GetNode(controllerID)
 		if controllerInfo == nil {
 			cs.jsonError(w, "controller not found", http.StatusServiceUnavailable)
@@ -206,7 +227,12 @@ func (cs *ClusterServer) handleJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Process join as controller
+	// Process join (either as controller or in bootstrap mode)
+	if isBootstrapMode {
+		cs.logger.Info("bootstrap mode: accepting join without controller",
+			"from", req.NodeID)
+	}
+
 	nodeInfo := req.NodeInfo
 	if err := cs.membership.AddNode(&nodeInfo); err != nil {
 		cs.logger.Error("failed to add node",
@@ -228,7 +254,8 @@ func (cs *ClusterServer) handleJoin(w http.ResponseWriter, r *http.Request) {
 
 	cs.logger.Info("node joined cluster",
 		"node", req.NodeID,
-		"cluster_size", len(state.Nodes))
+		"cluster_size", len(state.Nodes),
+		"bootstrap_mode", isBootstrapMode)
 
 	cs.jsonResponse(w, resp)
 }

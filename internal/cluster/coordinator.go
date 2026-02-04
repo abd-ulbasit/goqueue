@@ -510,12 +510,37 @@ func (c *Coordinator) joinViaDiscovery() error {
 }
 
 // waitForQuorum waits until we have enough nodes for quorum.
+//
+// RETRY STRATEGY:
+//
+//	During bootstrap, all pods start simultaneously. The initial joinViaDiscovery
+//	may fail because peer HTTP servers aren't running yet. This function periodically
+//	retries joining peers while waiting for quorum.
+//
+// FLOW:
+//
+//	┌─────────────────────────────────────────────────────────────────────────┐
+//	│ Every second while waiting for quorum:                                  │
+//	│   1. Check if quorum reached (AliveCount >= QuorumSize) → done          │
+//	│   2. Every 3 seconds, retry joinViaDiscovery to find new peers          │
+//	│   3. Continue until quorum or timeout (60s default)                     │
+//	└─────────────────────────────────────────────────────────────────────────┘
+//
+// WHY RETRY:
+//   - Pods start at nearly the same time in Kubernetes (Parallel policy)
+//   - First join attempt may fail (peers not listening yet)
+//   - Retrying allows late-starting pods to discover early ones
+//   - Once any two pods connect, quorum forms and election proceeds
 func (c *Coordinator) waitForQuorum() error {
 	ctx, cancel := context.WithTimeout(c.ctx, c.config.BootstrapTimeout)
 	defer cancel()
 
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
+
+	// Track when we last tried to join peers (retry every 3 seconds)
+	lastJoinAttempt := time.Now()
+	joinRetryInterval := 3 * time.Second
 
 	for {
 		select {
@@ -529,6 +554,22 @@ func (c *Coordinator) waitForQuorum() error {
 					"needed", c.config.QuorumSize)
 				return nil
 			}
+
+			// Periodically retry joining peers to discover late-starting nodes
+			if time.Since(lastJoinAttempt) >= joinRetryInterval && len(c.config.Peers) > 0 {
+				c.logger.Debug("retrying peer discovery",
+					"current_count", count,
+					"needed", c.config.QuorumSize)
+
+				// Try to join any available peer - this updates our membership
+				// if successful, which increases AliveCount
+				if err := c.joinViaDiscovery(); err != nil {
+					c.logger.Debug("peer discovery retry failed",
+						"error", err)
+				}
+				lastJoinAttempt = time.Now()
+			}
+
 			c.logger.Debug("waiting for quorum",
 				"current", count,
 				"needed", c.config.QuorumSize)
