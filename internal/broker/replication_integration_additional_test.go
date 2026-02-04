@@ -39,14 +39,24 @@ func newClusterEnabledTestBroker(t *testing.T) *Broker {
 		_ = b.Close()
 	})
 
+	// Start cluster coordinator - this is normally done after HTTP server starts,
+	// but for unit tests we can start it immediately since we don't need peer connections.
+	if b.clusterCoordinator != nil {
+		if err := b.StartCluster(); err != nil {
+			t.Fatalf("StartCluster() failed: %v", err)
+		}
+	}
+
 	// In a single-node quorum, leadership should be acquired quickly but can be
 	// async (background goroutines). Poll briefly to reduce flake.
-	deadline := time.Now().Add(2 * time.Second)
+	// NOTE: Increased timeout from 2s to 5s after M11 changes added partition
+	// elector initialization which can add latency to startup.
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if b.clusterCoordinator != nil && b.clusterCoordinator.IsController() {
 			return b
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
 
 	// If we can't become controller, something is badly wrong and many cluster

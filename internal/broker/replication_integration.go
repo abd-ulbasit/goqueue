@@ -78,13 +78,10 @@ func newReplicationCoordinator(broker *Broker, logger *slog.Logger) (*replicatio
 	// Create snapshot manager
 	snapshotManager := cluster.NewSnapshotManager(snapshotDir, logger)
 
-	// Create partition elector (only needed on controller, but create on all nodes for simplicity)
-	partitionElector := cluster.NewPartitionLeaderElector(
-		cc.MetadataStore(),
-		cc.Membership(),
-		config,
-		logger,
-	)
+	// Get partition elector from coordinator (M11 - centralized election).
+	// The coordinator owns the partition elector so that failover is triggered
+	// automatically when nodes die (via membership events).
+	partitionElector := cc.PartitionElector()
 
 	// Create replica manager
 	replicaManager := cluster.NewReplicaManager(
@@ -126,6 +123,11 @@ func newReplicationCoordinator(broker *Broker, logger *slog.Logger) (*replicatio
 
 	// Register for replica events
 	replicaManager.AddListener(rc.handleReplicaEvent)
+
+	// Register for metadata changes (M11/M12 - role transitions on failover).
+	// When assignments change (e.g., after leader election), we need to
+	// transition replicas between leader and follower roles.
+	cc.MetadataStore().AddListener(rc.handleMetadataChange)
 
 	return rc, nil
 }
@@ -402,6 +404,124 @@ func (rc *replicationCoordinator) handleReplicaEvent(event cluster.ReplicaEvent)
 		rc.logger.Debug("high watermark advanced",
 			"topic", event.Topic,
 			"partition", event.Partition)
+	}
+}
+
+// =============================================================================
+// METADATA CHANGE HANDLING (M11/M12 - AUTOMATIC FAILOVER)
+// =============================================================================
+//
+// WHEN METADATA CHANGES:
+//   - Leader election completed → assignments changed
+//   - Topic created/deleted → new assignments
+//   - ISR updated → inform replicas
+//
+// WHAT WE DO:
+//   - Compare new assignments with current replica states
+//   - If we're now leader → transition to leader mode
+//   - If we're now follower → transition to follower mode
+//   - If partition removed → stop replica
+//
+// =============================================================================
+
+// handleMetadataChange is called when cluster metadata changes.
+// This is triggered after leader elections, topic changes, etc.
+func (rc *replicationCoordinator) handleMetadataChange(meta *cluster.ClusterMeta) {
+	rc.logger.Debug("metadata changed, checking for role transitions",
+		"version", meta.Version)
+
+	cc := rc.broker.clusterCoordinator.coordinator
+	nodeID := cc.Node().ID()
+
+	// Check all assignments for this node
+	for _, assignment := range meta.Assignments {
+		// Check if this node is in the replica list
+		isReplica := false
+		for _, replica := range assignment.Replicas {
+			if replica == nodeID {
+				isReplica = true
+				break
+			}
+		}
+
+		if !isReplica {
+			continue // Not our partition
+		}
+
+		// Get current replica state
+		currentState := rc.replicaManager.GetReplicaState(assignment.Topic, assignment.Partition)
+		shouldBeLeader := assignment.Leader == nodeID
+
+		// Transition if needed
+		if shouldBeLeader && (currentState == nil || currentState.Role != cluster.ReplicaRoleLeader) {
+			// We should be leader but we're not
+			rc.logger.Info("transitioning to leader after failover",
+				"topic", assignment.Topic,
+				"partition", assignment.Partition,
+				"epoch", assignment.Version)
+
+			logEndOffset, err := rc.getLogEndOffset(assignment.Topic, assignment.Partition)
+			if err != nil {
+				rc.logger.Warn("failed to get log end offset for transition",
+					"topic", assignment.Topic,
+					"partition", assignment.Partition,
+					"error", err)
+				logEndOffset = 0
+			}
+
+			if err := rc.replicaManager.BecomeLeader(
+				assignment.Topic,
+				assignment.Partition,
+				assignment.Version,
+				assignment.Replicas,
+				logEndOffset,
+			); err != nil {
+				rc.logger.Error("failed to become leader",
+					"topic", assignment.Topic,
+					"partition", assignment.Partition,
+					"error", err)
+			}
+
+		} else if !shouldBeLeader && (currentState == nil || currentState.Role != cluster.ReplicaRoleFollower) {
+			// We should be follower but we're not
+			leaderAddr := rc.getNodeAddress(assignment.Leader)
+			if leaderAddr == "" {
+				rc.logger.Warn("cannot transition to follower - leader address unknown",
+					"topic", assignment.Topic,
+					"partition", assignment.Partition,
+					"leader", assignment.Leader)
+				continue
+			}
+
+			rc.logger.Info("transitioning to follower after failover",
+				"topic", assignment.Topic,
+				"partition", assignment.Partition,
+				"leader", assignment.Leader,
+				"epoch", assignment.Version)
+
+			logEndOffset, err := rc.getLogEndOffset(assignment.Topic, assignment.Partition)
+			if err != nil {
+				rc.logger.Warn("failed to get log end offset for transition",
+					"topic", assignment.Topic,
+					"partition", assignment.Partition,
+					"error", err)
+				logEndOffset = 0
+			}
+
+			if err := rc.replicaManager.BecomeFollower(
+				assignment.Topic,
+				assignment.Partition,
+				assignment.Leader,
+				leaderAddr,
+				assignment.Version,
+				logEndOffset,
+			); err != nil {
+				rc.logger.Error("failed to become follower",
+					"topic", assignment.Topic,
+					"partition", assignment.Partition,
+					"error", err)
+			}
+		}
 	}
 }
 

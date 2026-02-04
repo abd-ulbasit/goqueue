@@ -63,6 +63,11 @@ type Coordinator struct {
 	// elector handles controller election
 	elector *ControllerElector
 
+	// partitionElector handles partition leader election (M11).
+	// Only the controller actively uses this, but all nodes have it
+	// so they can serve leader election requests forwarded to them.
+	partitionElector *PartitionLeaderElector
+
 	// metadataStore stores cluster metadata
 	metadataStore *MetadataStore
 
@@ -160,6 +165,15 @@ func NewCoordinator(config *ClusterConfig, dataDir string, logger *slog.Logger) 
 	// Create client
 	client := NewClusterClient(node, membership, logger)
 
+	// Create partition leader elector (M11).
+	// Uses default replication config - can be customized via SetReplicationConfig later.
+	partitionElector := NewPartitionLeaderElector(
+		metadataStore,
+		membership,
+		DefaultReplicationConfig(),
+		logger,
+	)
+
 	// Create server
 	server := NewClusterServer(node, membership, failureDetector, elector, metadataStore, logger)
 
@@ -169,16 +183,17 @@ func NewCoordinator(config *ClusterConfig, dataDir string, logger *slog.Logger) 
 	})
 
 	c := &Coordinator{
-		config:          config,
-		node:            node,
-		membership:      membership,
-		failureDetector: failureDetector,
-		elector:         elector,
-		metadataStore:   metadataStore,
-		client:          client,
-		server:          server,
-		logger:          logger.With("component", "coordinator"),
-		readyCh:         make(chan struct{}),
+		config:           config,
+		node:             node,
+		membership:       membership,
+		failureDetector:  failureDetector,
+		elector:          elector,
+		partitionElector: partitionElector,
+		metadataStore:    metadataStore,
+		client:           client,
+		server:           server,
+		logger:           logger.With("component", "coordinator"),
+		readyCh:          make(chan struct{}),
 	}
 
 	// Register membership event listener
@@ -234,6 +249,12 @@ func (c *Coordinator) IsController() bool {
 	return c.elector.IsController()
 }
 
+// PartitionElector returns the partition leader elector.
+// Used by replication coordinator to access election functionality.
+func (c *Coordinator) PartitionElector() *PartitionLeaderElector {
+	return c.partitionElector
+}
+
 // Ready returns a channel that's closed when coordinator is ready.
 func (c *Coordinator) Ready() <-chan struct{} {
 	return c.readyCh
@@ -244,6 +265,8 @@ func (c *Coordinator) Ready() <-chan struct{} {
 // =============================================================================
 
 // Start begins cluster operations.
+// The passed ctx is used only for the bootstrap phase (timeout).
+// Background tasks use an independent context that lives until Stop() is called.
 func (c *Coordinator) Start(ctx context.Context) error {
 	c.mu.Lock()
 	if c.running {
@@ -252,7 +275,18 @@ func (c *Coordinator) Start(ctx context.Context) error {
 	}
 	c.running = true
 	c.startedAt = time.Now()
-	c.ctx, c.cancel = context.WithCancel(ctx)
+	// =========================================================================
+	// CONTEXT LIFECYCLE FIX
+	// =========================================================================
+	//
+	// WHY: The passed ctx may be a timeout context for bootstrap. If we derive
+	// our long-running context from it, our background tasks will be cancelled
+	// when the bootstrap timeout is cancelled (even on success due to defer).
+	//
+	// FIX: Use context.Background() for the coordinator's long-running context.
+	// The passed ctx is only used for bootstrap operations that need a timeout.
+	//
+	c.ctx, c.cancel = context.WithCancel(context.Background())
 	c.mu.Unlock()
 
 	c.logger.Info("starting cluster coordinator",
@@ -615,12 +649,15 @@ func (c *Coordinator) startBackgroundTasks() {
 func (c *Coordinator) heartbeatLoop() {
 	defer c.wg.Done()
 
+	c.logger.Info("heartbeat loop started", "interval", c.config.HeartbeatInterval)
+
 	ticker := time.NewTicker(c.config.HeartbeatInterval)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-c.ctx.Done():
+			c.logger.Debug("heartbeat loop stopping")
 			return
 		case <-ticker.C:
 			c.client.BroadcastHeartbeats(c.ctx)
@@ -686,10 +723,65 @@ func (c *Coordinator) handleMembershipEvent(event MembershipEvent) {
 
 	switch event.Type {
 	case EventNodeDied:
-		// If controller died, trigger election
+		// If controller died, trigger controller election
 		if event.NodeID == c.membership.ControllerID() {
 			c.logger.Info("controller died, triggering election")
 			c.elector.TriggerElection()
+		}
+
+		// =======================================================================
+		// M11/M12: AUTOMATIC PARTITION FAILOVER
+		// =======================================================================
+		//
+		// WHEN A NODE DIES:
+		//   1. Failure detector marks it dead (EventNodeDied)
+		//   2. If we're the controller, elect new leaders for its partitions
+		//   3. Notify replicas of the new leaders
+		//
+		// WHY ONLY ON CONTROLLER:
+		//   - Leader election must be centralized to avoid split-brain
+		//   - Non-controllers just observe the metadata changes
+		//
+		// WHAT HAPPENS:
+		//   - For each partition where dead node was leader:
+		//     - Pick new leader from ISR (or replicas if unclean allowed)
+		//     - Update metadata with new leader + epoch
+		//     - Followers will detect leader change and start fetching
+		//
+		// =======================================================================
+		if c.elector.IsController() {
+			c.logger.Info("triggering partition failover for dead node",
+				"dead_node", event.NodeID)
+
+			go func() {
+				results, err := c.partitionElector.ElectLeadersForNode(event.NodeID)
+				if err != nil {
+					c.logger.Error("partition failover failed",
+						"dead_node", event.NodeID,
+						"error", err)
+					return
+				}
+
+				// Log results
+				for _, result := range results {
+					if result.ErrorCode == LeaderElectionSuccess {
+						c.logger.Info("partition leader elected",
+							"topic", result.Topic,
+							"partition", result.Partition,
+							"new_leader", result.NewLeader,
+							"epoch", result.NewEpoch)
+					} else {
+						c.logger.Warn("partition election failed",
+							"topic", result.Topic,
+							"partition", result.Partition,
+							"error_code", result.ErrorCode,
+							"error_message", result.ErrorMessage)
+					}
+				}
+
+				// Sync metadata to all nodes so they learn about new leaders
+				c.syncMetadataToFollowers()
+			}()
 		}
 
 	case EventControllerChanged:
@@ -711,6 +803,40 @@ func (c *Coordinator) handleMembershipEvent(event MembershipEvent) {
 				meta := c.metadataStore.Meta()
 				if err := c.client.PushMetadata(ctx, event.NodeID, meta); err != nil {
 					c.logger.Warn("failed to sync metadata to new node",
+						"node", event.NodeID,
+						"error", err)
+				}
+			}()
+		}
+
+	case EventNodeRecovered:
+		// =======================================================================
+		// M12: NODE RECOVERY - OPTIONAL PREFERRED LEADER REBALANCE
+		// =======================================================================
+		//
+		// WHEN A NODE RECOVERS:
+		//   1. Node rejoins cluster, catches up replicas
+		//   2. Controller can optionally move leadership back (preferred leader)
+		//   3. This rebalances partition leadership across the cluster
+		//
+		// WHY OPTIONAL:
+		//   - Moving leadership causes brief unavailability
+		//   - May not be desired in all situations
+		//   - Can be triggered manually via admin API instead
+		//
+		// For now, we just sync metadata. Preferred leader election can be
+		// triggered manually via the /cluster/preferred-leader API.
+		// =======================================================================
+		if c.elector.IsController() {
+			c.logger.Info("node recovered, syncing metadata",
+				"recovered_node", event.NodeID)
+
+			go func() {
+				ctx, cancel := context.WithTimeout(c.ctx, 5*time.Second)
+				defer cancel()
+				meta := c.metadataStore.Meta()
+				if err := c.client.PushMetadata(ctx, event.NodeID, meta); err != nil {
+					c.logger.Warn("failed to sync metadata to recovered node",
 						"node", event.NodeID,
 						"error", err)
 				}

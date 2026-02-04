@@ -3,61 +3,65 @@
 ## Current Focus
 
 **Phase**: 4 - Operations
-**Milestone**: 18 - Multi-Tenancy & Quotas ✅ COMPLETE (with optional mode + QuotaEnforcer refactoring)
-**Status**: Milestone 18 fully implemented with tests - multi-tenancy is OPTIONAL
+**Milestone**: 11/12 - Leader Election & Replication / Automatic Failover - IN PROGRESS
+**Status**: Cluster formation fixed, failover detection working, partition failover code added
 
-## Deployment Model
+## Recent Session: Cluster Formation Fix & Failover Detection
 
-GoQueue supports two deployment modes:
+### Critical Bug Fixed: Coordinator Context Lifecycle
 
-**Single-Tenant (Default)** - `EnableMultiTenancy: false`
-- No namespace prefixing (topics accessed directly by name)
-- No quota enforcement
-- No TenantManager overhead
-- Uses `NoOpEnforcer` - zero overhead, all checks pass
-- Ideal for: Kubernetes deployments where each customer gets their own cluster
-
-**Multi-Tenant** - `EnableMultiTenancy: true`
-- Topic prefixing: `{tenantID}.{topicName}`
-- Per-tenant quotas (rate limits, storage limits)
-- Usage tracking and statistics
-- Uses `TenantQuotaEnforcer` - actual quota enforcement
-- Ideal for: Managed service / SaaS deployments
-
-## What I Just Completed
-
-### QuotaEnforcer Interface Refactoring ⭐
-
-**Problem**: 14 scattered `if b.tenantManager != nil` checks in tenant_broker.go
-
-**Solution**: Strategy pattern with QuotaEnforcer interface (`internal/broker/quota_enforcer.go`)
-
+**The Bug**:
 ```go
-type QuotaEnforcer interface {
-    CheckPublish(tenantID string, messageSize int) error
-    CheckPublishBatch(tenantID string, messageCount, totalSize int) error
-    CheckConsume(tenantID string, messageCount int) error
-    CheckTopicCreation(tenantID string) error
-    CheckConsumerGroup(tenantID string) error
-    CheckDelay(tenantID string) error
-    TrackUsage(tenantID string, messages int, bytes int64, messagesConsumed int, bytesConsumed int64)
-    IsEnabled() bool
-}
+// In broker.go StartCluster():
+startCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+defer cancel()  // <-- This cancels immediately when StartCluster() returns!
+
+if err := b.clusterCoordinator.Start(startCtx); err != nil { ... }
+
+// In coordinator.go Start():
+c.ctx, c.cancel = context.WithCancel(ctx)  // <-- Derived from cancelled parent!
 ```
 
-**Implementations**:
-- `NoOpEnforcer` - Single-tenant mode, all methods return nil (zero overhead)
-- `TenantQuotaEnforcer` - Multi-tenant mode, delegates to QuotaManager
+When `StartCluster()` returned (even on success), `defer cancel()` cancelled `startCtx`, 
+which cancelled `c.ctx`, which caused `heartbeatLoop()` to exit immediately.
 
-**Benefits**:
-- Eliminated 14 nil checks with clean interface calls
-- Zero runtime overhead in single-tenant mode
-- Testable in isolation
-- Clear separation of concerns
+**The Fix**:
+```go
+// coordinator.go Start():
+c.ctx, c.cancel = context.WithCancel(context.Background())  // Independent context
+```
 
-### CLI Consistency Refactoring ⭐
+### What's Working Now
 
-**Problem**: goqueue-admin used raw `return err` while goqueue-cli used `handleError(err)`
+1. **Cluster Formation**: 3 nodes join and stay alive
+2. **Heartbeats**: Sent every 3s, received and recorded
+3. **Failure Detection**: Nodes marked suspect (6s) then dead (9s)
+4. **Controller Election**: Triggered when controller dies
+5. **Partition Failover Code**: `ElectLeadersForNode()` called on node death
+
+### What Still Needs Work
+
+1. **Topic Sync**: Topics created on one node not visible on others (metadata sync issue)
+2. **Partition Leader API**: No way to query which node leads which partition
+3. **Full Failover Test**: Hard to test because K8s restarts killed pods quickly
+
+### EKS Cluster Details
+
+- **Cluster**: goqueue-dev (ap-south-1)
+- **Nodes**: 3x c5.xlarge (4 vCPU, 8 GB)
+- **LoadBalancer**: ab822e00193ff46f7ab447e128ecd3a8-1415729494.ap-south-1.elb.amazonaws.com:8080
+- **Image**: ghcr.io/abd-ulbasit/goqueue:v0.5.0-failover9
+
+### Next Steps
+
+1. Fix topic metadata sync so topics propagate to all nodes
+2. Add endpoint to view partition leader assignments
+3. Implement replication (followers fetch from leader)
+4. Test complete failover scenario with partition leader reassignment
+
+---
+
+## Previous Focus: Multi-Tenancy & Quotas
 
 **Solution**: Unified error handling across both CLIs
 - Added `handleError()` to goqueue-admin (matches goqueue-cli pattern)
