@@ -1,0 +1,156 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: goqueue-go-benchmark
+  namespace: goqueue
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: benchmark
+          image: ghcr.io/abd-ulbasit/goqueue:latest
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "=== GoQueue Cluster Benchmark ==="
+              echo "Running from within EKS cluster"
+              echo ""
+              
+              BASE_URL="http://goqueue-lb.goqueue.svc.cluster.local:8080"
+              
+              # Test connectivity
+              echo "Testing connectivity..."
+              curl -sf "$BASE_URL/health" || exit 1
+              echo ""
+              
+              # Create benchmark topics
+              echo "Creating benchmark topics..."
+              curl -sf "$BASE_URL/topics" -X POST -H "Content-Type: application/json" \
+                -d '{"name":"bench-perf","num_partitions":6}' || echo "Topic may exist"
+              echo ""
+              
+              # Install wrk if available or use simple loop
+              echo ""
+              echo "=== Throughput Benchmark ==="
+              
+              # Sequential publish benchmark - 5000 messages
+              echo "Starting sequential publish of 5000 messages..."
+              START=$(date +%s)
+              SUCCESS=0
+              FAILED=0
+              for i in $(seq 1 5000); do
+                RESULT=$(curl -sf "$BASE_URL/topics/bench-perf/messages" \
+                  -X POST -H "Content-Type: application/json" \
+                  -d "{\"key\":\"key-$i\",\"value\":\"benchmark-message-$i-with-some-payload-to-simulate-real-data\"}" 2>/dev/null)
+                if [ $? -eq 0 ]; then
+                  SUCCESS=$((SUCCESS + 1))
+                else
+                  FAILED=$((FAILED + 1))
+                fi
+                # Progress every 1000
+                if [ $((i % 1000)) -eq 0 ]; then
+                  echo "  Published $i messages..."
+                fi
+              done
+              END=$(date +%s)
+              ELAPSED=$((END - START))
+              if [ $ELAPSED -gt 0 ]; then
+                THROUGHPUT=$((5000 / ELAPSED))
+              else
+                THROUGHPUT=5000
+              fi
+              echo ""
+              echo "Sequential Publish Results:"
+              echo "  Messages: 5000"
+              echo "  Success: $SUCCESS"
+              echo "  Failed: $FAILED"
+              echo "  Time: ${ELAPSED}s"
+              echo "  Throughput: ~${THROUGHPUT} msgs/sec"
+              
+              # Batch publish benchmark - 50 batches of 100 = 5000 messages
+              echo ""
+              echo "=== Batch Publish Benchmark (50 x 100 msgs) ==="
+              START=$(date +%s)
+              SUCCESS=0
+              for batch in $(seq 1 50); do
+                # Build batch payload
+                MSGS="["
+                for i in $(seq 1 100); do
+                  MSGS="${MSGS}{\"key\":\"b$batch-k$i\",\"value\":\"batch-$batch-msg-$i-data\"}"
+                  if [ $i -lt 100 ]; then MSGS="${MSGS},"; fi
+                done
+                MSGS="${MSGS}]"
+                
+                RESULT=$(curl -sf "$BASE_URL/topics/bench-perf/messages/batch" \
+                  -X POST -H "Content-Type: application/json" \
+                  -d "{\"messages\":$MSGS}" 2>/dev/null)
+                if [ $? -eq 0 ]; then
+                  SUCCESS=$((SUCCESS + 1))
+                fi
+                
+                if [ $((batch % 10)) -eq 0 ]; then
+                  echo "  Batch $batch complete..."
+                fi
+              done
+              END=$(date +%s)
+              ELAPSED=$((END - START))
+              if [ $ELAPSED -gt 0 ]; then
+                THROUGHPUT=$((5000 / ELAPSED))
+              else
+                THROUGHPUT=5000
+              fi
+              echo ""
+              echo "Batch Publish Results:"
+              echo "  Batches: 50 x 100 = 5000 messages"
+              echo "  Successful batches: $SUCCESS"
+              echo "  Time: ${ELAPSED}s"
+              echo "  Throughput: ~${THROUGHPUT} msgs/sec"
+              
+              # Parallel publish benchmark using background processes
+              echo ""
+              echo "=== Parallel Publish Benchmark (8 producers x 625 msgs) ==="
+              START=$(date +%s)
+              
+              parallel_publish() {
+                PRODUCER_ID=$1
+                for i in $(seq 1 625); do
+                  curl -sf "$BASE_URL/topics/bench-perf/messages" \
+                    -X POST -H "Content-Type: application/json" \
+                    -d "{\"key\":\"p$PRODUCER_ID-k$i\",\"value\":\"producer-$PRODUCER_ID-msg-$i\"}" > /dev/null 2>&1
+                done
+              }
+              
+              for p in 1 2 3 4 5 6 7 8; do
+                parallel_publish $p &
+              done
+              wait
+              
+              END=$(date +%s)
+              ELAPSED=$((END - START))
+              if [ $ELAPSED -gt 0 ]; then
+                THROUGHPUT=$((5000 / ELAPSED))
+              else
+                THROUGHPUT=5000
+              fi
+              echo "Parallel Publish Results:"
+              echo "  Producers: 8"
+              echo "  Messages per producer: 625"
+              echo "  Total: 5000 messages"
+              echo "  Time: ${ELAPSED}s"
+              echo "  Throughput: ~${THROUGHPUT} msgs/sec"
+              
+              echo ""
+              echo "=== Summary ==="
+              curl -sf "$BASE_URL/stats" 2>/dev/null | head -100
+              echo ""
+              echo "=== Benchmark Complete ==="
+          resources:
+            limits:
+              cpu: "2"
+              memory: 1Gi
+            requests:
+              cpu: "1"
+              memory: 512Mi

@@ -65,12 +65,13 @@ spec:
   # │ OrderedReady (default): Create pods 0→1→2, each must be Ready before next   │
   # │ Parallel: Create all pods simultaneously                                    │
   # │                                                                             │
-  # │ For goqueue: OrderedReady ensures cluster forms correctly                   │
-  # │   - Pod 0 starts, becomes initial leader                                    │
-  # │   - Pod 1 starts, joins cluster                                             │
-  # │   - Pod 2 starts, joins cluster, quorum achieved                            │
+  # │ For goqueue: Parallel is needed for initial cluster bootstrap               │
+  # │   - All pods start simultaneously                                           │
+  # │   - They discover each other via headless service DNS                       │
+  # │   - Quorum forms once 2+ pods are running                                   │
+  # │   - Without Parallel, OrderedReady causes deadlock (pod 0 waits for quorum) │
   # └─────────────────────────────────────────────────────────────────────────────┘
-  podManagementPolicy: OrderedReady
+  podManagementPolicy: Parallel
   
   # Revision history for rollback
   revisionHistoryLimit: 10

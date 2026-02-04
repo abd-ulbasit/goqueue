@@ -133,6 +133,18 @@ variable "goqueue_storage_size" {
   default     = "10Gi"
 }
 
+variable "goqueue_image_repository" {
+  description = "GoQueue Docker image repository"
+  type        = string
+  default     = "ghcr.io/abd-ulbasit/goqueue"
+}
+
+variable "goqueue_image_tag" {
+  description = "GoQueue Docker image tag (latest includes cluster support)"
+  type        = string
+  default     = "latest"
+}
+
 variable "install_prometheus" {
   description = "Install Prometheus stack"
   type        = bool
@@ -149,8 +161,8 @@ variable "tags" {
   description = "Tags to apply to all resources"
   type        = map(string)
   default = {
-    Project     = "goqueue"
-    ManagedBy   = "terraform"
+    Project   = "goqueue"
+    ManagedBy = "terraform"
   }
 }
 
@@ -170,7 +182,7 @@ data "aws_caller_identity" "current" {}
 
 locals {
   azs = slice(data.aws_availability_zones.available.names, 0, 2)
-  
+
   common_tags = merge(var.tags, {
     Environment = var.environment
     Cluster     = var.cluster_name
@@ -188,10 +200,10 @@ module "vpc" {
   private_subnets = [for k, v in local.azs : cidrsubnet(var.vpc_cidr, 4, k)]
   public_subnets  = [for k, v in local.azs : cidrsubnet(var.vpc_cidr, 4, k + 4)]
 
-  enable_nat_gateway     = true
-  single_nat_gateway     = var.environment != "prod"  # Cost optimization for non-prod
-  enable_dns_hostnames   = true
-  enable_dns_support     = true
+  enable_nat_gateway   = true
+  single_nat_gateway   = var.environment != "prod" # Cost optimization for non-prod
+  enable_dns_hostnames = true
+  enable_dns_support   = true
 
   # ┌─────────────────────────────────────────────────────────────────────────┐
   # │ SUBNET TAGS FOR EKS                                                     │
@@ -201,12 +213,12 @@ module "vpc" {
   # │   - kubernetes.io/role/internal-elb: Private subnets for internal LBs   │
   # └─────────────────────────────────────────────────────────────────────────┘
   public_subnet_tags = {
-    "kubernetes.io/role/elb"                      = 1
+    "kubernetes.io/role/elb"                    = 1
     "kubernetes.io/cluster/${var.cluster_name}" = "owned"
   }
 
   private_subnet_tags = {
-    "kubernetes.io/role/internal-elb"             = 1
+    "kubernetes.io/role/internal-elb"           = 1
     "kubernetes.io/cluster/${var.cluster_name}" = "owned"
   }
 
@@ -252,7 +264,7 @@ module "eks" {
       most_recent = true
     }
     aws-ebs-csi-driver = {
-      most_recent = true
+      most_recent              = true
       service_account_role_arn = module.ebs_csi_irsa.iam_role_arn
     }
   }
@@ -388,7 +400,7 @@ provider "helm" {
   kubernetes {
     host                   = module.eks.cluster_endpoint
     cluster_ca_certificate = base64decode(module.eks.cluster_certificate_authority_data)
-    
+
     exec {
       api_version = "client.authentication.k8s.io/v1beta1"
       command     = "aws"
@@ -400,7 +412,7 @@ provider "helm" {
 provider "kubernetes" {
   host                   = module.eks.cluster_endpoint
   cluster_ca_certificate = base64decode(module.eks.cluster_certificate_authority_data)
-  
+
   exec {
     api_version = "client.authentication.k8s.io/v1beta1"
     command     = "aws"
@@ -422,40 +434,112 @@ resource "kubernetes_namespace" "goqueue" {
 
 # GoQueue Helm release
 resource "helm_release" "goqueue" {
-  name       = "goqueue"
-  namespace  = kubernetes_namespace.goqueue.metadata[0].name
-  chart      = "${path.module}/../../../../kubernetes/helm/goqueue"
-  
+  name      = "goqueue"
+  namespace = kubernetes_namespace.goqueue.metadata[0].name
+  # path.module is the directory containing this .tf file
+  # From deploy/terraform/modules/aws, we go to deploy/kubernetes/helm/goqueue
+  chart     = "${path.module}/../../kubernetes/helm/goqueue"
+
+  # ┌─────────────────────────────────────────────────────────────────────────┐
+  # │ HELM VALUES CONFIGURATION                                               │
+  # │                                                                         │
+  # │ These values override the default values.yaml in the Helm chart.        │
+  # │ Key settings:                                                           │
+  # │   - image.tag: Use cluster-enabled version (v0.3.4-cluster)             │
+  # │   - config.cluster.enabled: Must be true for multi-node                 │
+  # │   - resources: Tuned for c5.xlarge (4 vCPU, 8GB RAM)                    │
+  # │   - persistence: Use gp3 SSD for production workloads                   │
+  # └─────────────────────────────────────────────────────────────────────────┘
   values = [
     yamlencode({
       replicaCount = var.goqueue_replicas
-      
+
+      # Image configuration - use cluster-enabled version
+      image = {
+        repository = var.goqueue_image_repository
+        tag        = var.goqueue_image_tag
+        pullPolicy = "IfNotPresent"
+      }
+
+      # Cluster configuration - REQUIRED for multi-node deployment
+      config = {
+        cluster = {
+          enabled            = true
+          replicationFactor  = 2
+          minInSyncReplicas  = 1
+          replicationTimeout = "5s"
+        }
+        storage = {
+          segmentSize   = 1073741824 # 1GB
+          indexInterval = 4096
+          syncOnWrite   = false
+          syncInterval  = "1s"
+        }
+        logging = {
+          level  = "info"
+          format = "json"
+        }
+      }
+
+      # Persistence - use gp3 SSD with encryption
       persistence = {
         enabled      = true
         storageClass = "gp3"
         size         = var.goqueue_storage_size
+        accessMode   = "ReadWriteOnce"
       }
-      
+
+      # Resources - tuned for c5.xlarge (4 vCPU, 8GB RAM)
+      # Reserve ~1 CPU and 1.5GB for system/kubelet
       resources = {
         limits = {
-          cpu    = "2"
-          memory = "2Gi"
+          cpu    = "3"
+          memory = "5Gi"
         }
         requests = {
-          cpu    = "500m"
-          memory = "512Mi"
+          cpu    = "2"
+          memory = "4Gi"
         }
       }
-      
-      prometheus = {
-        enabled = var.install_prometheus
+
+      # Service configuration
+      service = {
+        type         = "ClusterIP"
+        httpPort     = 8080
+        grpcPort     = 9000
+        internalPort = 7000
       }
-      
-      traefik = {
-        enabled = var.install_traefik
+
+      # Pod anti-affinity - one pod per node
+      affinity = {
+        podAntiAffinity = {
+          requiredDuringSchedulingIgnoredDuringExecution = [
+            {
+              labelSelector = {
+                matchExpressions = [
+                  {
+                    key      = "app.kubernetes.io/name"
+                    operator = "In"
+                    values   = ["goqueue"]
+                  }
+                ]
+              }
+              topologyKey = "kubernetes.io/hostname"
+            }
+          ]
+        }
+      }
+
+      # Metrics - enable Prometheus scraping
+      metrics = {
+        enabled = var.install_prometheus
       }
     })
   ]
+
+  # Wait for storage class and EKS to be ready
+  timeout = 600 # 10 minutes for initial deployment
+  wait    = true
 
   depends_on = [
     kubernetes_storage_class.gp3,

@@ -1,0 +1,113 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: goqueue
+  namespace: goqueue
+spec:
+  replicas: 3
+  serviceName: goqueue-headless
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: goqueue
+      app.kubernetes.io/instance: goqueue
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: goqueue
+        app.kubernetes.io/instance: goqueue
+    spec:
+      # Run as non-root user (distroless image uses 65532:65532)
+      securityContext:
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+      # Init container to set permissions on fresh EBS volume
+      initContainers:
+      - name: init-permissions
+        image: busybox:1.36
+        command: ['sh', '-c', 'chown -R 65532:65532 /data']
+        volumeMounts:
+        - name: data
+          mountPath: /data
+        securityContext:
+          runAsUser: 0
+      containers:
+      - name: goqueue
+        image: ghcr.io/abd-ulbasit/goqueue:v0.3.2-cluster
+        imagePullPolicy: Always
+        ports:
+        - name: http
+          containerPort: 8080
+        - name: grpc
+          containerPort: 9000
+        - name: internal
+          containerPort: 7000
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: GOQUEUE_BROKER_NODEID
+          value: "$(POD_NAME)"
+        - name: GOQUEUE_BROKER_DATADIR
+          value: /data
+        - name: GOQUEUE_LISTENERS_HTTP
+          value: ":8080"
+        - name: GOQUEUE_LISTENERS_GRPC
+          value: ":9000"
+        - name: GOQUEUE_LISTENERS_INTERNAL
+          value: ":7000"
+        - name: GOQUEUE_CLUSTER_ENABLED
+          value: "true"
+        - name: GOQUEUE_CLUSTER_PEERS
+          value: "goqueue-0.goqueue-headless.goqueue.svc.cluster.local:7000,goqueue-1.goqueue-headless.goqueue.svc.cluster.local:7000,goqueue-2.goqueue-headless.goqueue.svc.cluster.local:7000"
+        - name: GOQUEUE_CLUSTER_ADVERTISE
+          value: "$(POD_NAME).goqueue-headless.$(POD_NAMESPACE).svc.cluster.local:7000"
+        - name: GOQUEUE_CLUSTER_QUORUM
+          value: "2"
+        volumeMounts:
+        - name: data
+          mountPath: /data
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        resources:
+          limits:
+            cpu: "3"
+            memory: 5Gi
+          requests:
+            cpu: "2"
+            memory: 4Gi
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                - goqueue
+            topologyKey: kubernetes.io/hostname
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      storageClassName: gp3
+      resources:
+        requests:
+          storage: 50Gi

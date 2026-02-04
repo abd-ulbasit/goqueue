@@ -1,0 +1,14 @@
+{
+  "name": "goqueue-benchmark",
+  "version": "1.0.0",
+  "description": "Benchmark suite for GoQueue",
+  "type": "module",
+  "scripts": {
+    "benchmark": "tsx benchmark.ts",
+    "benchmark:local": "GOQUEUE_URL=http://localhost:8080 tsx benchmark.ts"
+  },
+  "dependencies": {
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.0"
+  }
+}

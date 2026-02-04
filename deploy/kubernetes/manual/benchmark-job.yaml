@@ -1,0 +1,99 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: goqueue-benchmark
+  namespace: goqueue
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: benchmark
+          image: golang:1.24-alpine
+          command:
+            - /bin/sh
+            - -c
+            - |
+              apk add --no-cache curl git
+              
+              echo "=== GoQueue Cluster Benchmark ==="
+              echo "Running from within EKS cluster"
+              echo ""
+              
+              # Test connectivity
+              echo "Testing connectivity to goqueue-lb..."
+              curl -s http://goqueue-lb.goqueue.svc.cluster.local:8080/health
+              echo ""
+              
+              # Create benchmark topics
+              echo "Creating benchmark topics..."
+              curl -s http://goqueue-lb.goqueue.svc.cluster.local:8080/topics -X POST \
+                -H "Content-Type: application/json" \
+                -d '{"name":"bench-small","num_partitions":3}'
+              echo ""
+              curl -s http://goqueue-lb.goqueue.svc.cluster.local:8080/topics -X POST \
+                -H "Content-Type: application/json" \
+                -d '{"name":"bench-batch","num_partitions":6}'
+              echo ""
+              
+              # Benchmark: Sequential publish (1000 messages)
+              echo ""
+              echo "=== Sequential Publish Benchmark (1000 msgs) ==="
+              START=$(date +%s%N)
+              for i in $(seq 1 1000); do
+                curl -s http://goqueue-lb.goqueue.svc.cluster.local:8080/topics/bench-small/messages \
+                  -X POST -H "Content-Type: application/json" \
+                  -d "{\"key\":\"key-$i\",\"value\":\"message-$i-$(date +%s)\"}" > /dev/null
+              done
+              END=$(date +%s%N)
+              ELAPSED=$(echo "scale=3; ($END - $START) / 1000000000" | bc)
+              THROUGHPUT=$(echo "scale=2; 1000 / $ELAPSED" | bc)
+              echo "Sequential publish: 1000 msgs in ${ELAPSED}s = ${THROUGHPUT} msgs/sec"
+              
+              # Benchmark: Batch publish (10 batches of 100)
+              echo ""
+              echo "=== Batch Publish Benchmark (10 x 100 msgs) ==="
+              START=$(date +%s%N)
+              for batch in $(seq 1 10); do
+                MESSAGES="["
+                for i in $(seq 1 100); do
+                  MESSAGES="${MESSAGES}{\"key\":\"batch-$batch-key-$i\",\"value\":\"batch-$batch-msg-$i\"}"
+                  if [ $i -lt 100 ]; then MESSAGES="${MESSAGES},"; fi
+                done
+                MESSAGES="${MESSAGES}]"
+                curl -s http://goqueue-lb.goqueue.svc.cluster.local:8080/topics/bench-batch/messages/batch \
+                  -X POST -H "Content-Type: application/json" \
+                  -d "{\"messages\":$MESSAGES}" > /dev/null
+              done
+              END=$(date +%s%N)
+              ELAPSED=$(echo "scale=3; ($END - $START) / 1000000000" | bc)
+              THROUGHPUT=$(echo "scale=2; 1000 / $ELAPSED" | bc)
+              echo "Batch publish: 1000 msgs in ${ELAPSED}s = ${THROUGHPUT} msgs/sec"
+              
+              # Benchmark: Consume
+              echo ""
+              echo "=== Consume Benchmark ==="
+              START=$(date +%s%N)
+              CONSUMED=0
+              for p in 0 1 2; do
+                while true; do
+                  RESULT=$(curl -s "http://goqueue-lb.goqueue.svc.cluster.local:8080/topics/bench-small/partitions/$p/messages")
+                  if echo "$RESULT" | grep -q '"messages":\[\]'; then
+                    break
+                  fi
+                  COUNT=$(echo "$RESULT" | grep -o '"value"' | wc -l)
+                  CONSUMED=$((CONSUMED + COUNT))
+                done
+              done
+              END=$(date +%s%N)
+              ELAPSED=$(echo "scale=3; ($END - $START) / 1000000000" | bc)
+              THROUGHPUT=$(echo "scale=2; $CONSUMED / $ELAPSED" | bc)
+              echo "Consumed: $CONSUMED msgs in ${ELAPSED}s = ${THROUGHPUT} msgs/sec"
+              
+              echo ""
+              echo "=== Cluster Status ==="
+              curl -s http://goqueue-0.goqueue.goqueue.svc.cluster.local:8080/stats | head -50
+              
+              echo ""
+              echo "=== Benchmark Complete ==="

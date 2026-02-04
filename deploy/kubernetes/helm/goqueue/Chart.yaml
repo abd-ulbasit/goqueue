@@ -1,131 +1,16 @@
-# =============================================================================
-# GOQUEUE HELM CHART
-# =============================================================================
-#
-# This is the main Helm chart for deploying GoQueue on Kubernetes.
-#
-# WHAT IS HELM?
-# ┌─────────────────────────────────────────────────────────────────────────────┐
-# │ Helm is the "package manager for Kubernetes". It allows you to:             │
-# │                                                                             │
-# │   1. PACKAGE: Bundle all K8s manifests into a single deployable unit        │
-# │   2. TEMPLATE: Use Go templating to customize deployments                   │
-# │   3. VERSION: Track releases and rollback if needed                         │
-# │   4. SHARE: Publish charts to repositories for others to use                │
-# │                                                                             │
-# │ COMPARISON TO OTHER PACKAGE MANAGERS:                                       │
-# │   - apt/yum: Install binaries on a single machine                           │
-# │   - Helm: Deploy complex apps across a Kubernetes cluster                   │
-# │   - Kustomize: Alternative, uses overlays instead of templates              │
-# └─────────────────────────────────────────────────────────────────────────────┘
-#
-# USAGE:
-#   # Add the repository (when published)
-#   helm repo add goqueue https://abd-ulbasit.github.io/goqueue
-#
-#   # Install with defaults
-#   helm install my-goqueue goqueue/goqueue
-#
-#   # Install with custom values
-#   helm install my-goqueue goqueue/goqueue -f my-values.yaml
-#
-#   # Install specific version
-#   helm install my-goqueue goqueue/goqueue --version 1.0.0
-#
-#   # Upgrade existing release
-#   helm upgrade my-goqueue goqueue/goqueue
-#
-#   # Uninstall
-#   helm uninstall my-goqueue
-#
-# =============================================================================
-
 apiVersion: v2
 name: goqueue
 description: A production-grade message queue built in Go
-
-# Chart type: application (deployable) vs library (reusable templates)
 type: application
-
-# Chart version (for the chart itself, not the app)
-# Increment this when changing chart templates
 version: 0.1.0
-
-# App version (the version of GoQueue being deployed)
-# This should match the Docker image tag
 appVersion: "0.2.0"
-
-# Kubernetes version requirements
-kubeVersion: ">=1.25.0-0"
-
-# Chart maintainers
-maintainers:
-  - name: Basit
-    email: abd.ulbasit@example.com
-    url: https://github.com/abd-ulbasit
-
-# Source code location
+keywords:
+  - message-queue
+  - go
+  - kafka-alternative
 home: https://github.com/abd-ulbasit/goqueue
 sources:
   - https://github.com/abd-ulbasit/goqueue
-
-# Keywords for chart discovery
-keywords:
-  - message-queue
-  - messaging
-  - streaming
-  - kafka-alternative
-  - golang
-  - distributed-systems
-
-# Annotations for additional metadata
-annotations:
-  # Artifact Hub annotations (for publishing)
-  artifacthub.io/license: MIT
-  artifacthub.io/category: streaming-messaging
-  artifacthub.io/operator: "false"
-  artifacthub.io/prerelease: "true"
-  artifacthub.io/containsSecurityUpdates: "false"
-  
-  # Links shown in Artifact Hub
-  artifacthub.io/links: |
-    - name: Documentation
-      url: https://github.com/abd-ulbasit/goqueue/docs
-    - name: Support
-      url: https://github.com/abd-ulbasit/goqueue/issues
-
-# =============================================================================
-# DEPENDENCIES (Optional Sub-Charts)
-# =============================================================================
-#
-# WHY OPTIONAL DEPENDENCIES?
-# ┌─────────────────────────────────────────────────────────────────────────────┐
-# │ Users often have existing monitoring stacks. We provide two modes:          │
-# │                                                                             │
-# │ 1. BUNDLED (default): Everything included, one-command deploy               │
-# │    - Great for: Getting started, demos, small deployments                   │
-# │    - Trade-off: May conflict with existing monitoring                       │
-# │                                                                             │
-# │ 2. EXTERNAL: BYO monitoring stack                                           │
-# │    - Great for: Production with existing Prometheus/Grafana                 │
-# │    - Requires: Configure ServiceMonitor to point to existing Prometheus     │
-# │                                                                             │
-# │ Toggle via values.yaml:                                                     │
-# │   prometheus.enabled: true/false                                            │
-# │   grafana.enabled: true/false                                               │
-# └─────────────────────────────────────────────────────────────────────────────┘
-#
-dependencies:
-  # Prometheus for metrics collection
-  - name: kube-prometheus-stack
-    version: "55.0.0"
-    repository: https://prometheus-community.github.io/helm-charts
-    condition: prometheus.enabled
-    alias: prometheus
-  
-  # Traefik for ingress/load balancing
-  - name: traefik
-    version: "26.0.0"
-    repository: https://traefik.github.io/charts
-    condition: traefik.enabled
-    alias: traefik
+maintainers:
+  - name: basit
+    email: abd-ulbasit@example.com

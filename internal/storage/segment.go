@@ -600,6 +600,100 @@ func (s *Segment) Append(msg *Message) (int64, error) {
 	return offset, nil
 }
 
+// =============================================================================
+// FAST APPEND - FOR BATCHED WRITES (HIGH THROUGHPUT)
+// =============================================================================
+//
+// AppendFast writes a message without flushing the buffer.
+// CALLER MUST call FlushBuffer() after a batch of AppendFast calls!
+//
+// WHY:
+//   - Regular Append() flushes buffer after every write
+//   - For batched writes, we want to write many messages to buffer first
+//   - Then flush once at the end (100x fewer syscalls)
+//
+// USAGE:
+//
+//	for _, msg := range batch {
+//	    offset, _ := segment.AppendFast(msg)
+//	}
+//	segment.FlushBuffer() // Single flush for entire batch
+//
+// WARNING: Data is NOT durable until FlushBuffer() is called!
+func (s *Segment) AppendFast(msg *Message) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Check state
+	if s.closed {
+		return 0, ErrSegmentClosed
+	}
+	if s.readonly {
+		return 0, ErrSegmentReadOnly
+	}
+
+	// Assign offset
+	msg.Offset = s.currentOffset
+
+	// Encode message
+	data, err := msg.Encode()
+	if err != nil {
+		return 0, fmt.Errorf("failed to encode message: %w", err)
+	}
+
+	// Check if this write would exceed segment size
+	newPosition := s.currentPosition + int64(len(data))
+	if newPosition > MaxSegmentSize {
+		return 0, ErrSegmentFull
+	}
+
+	// Write to buffer (NO FLUSH - that's the key difference!)
+	if _, err := s.writer.Write(data); err != nil {
+		return 0, fmt.Errorf("failed to write message: %w", err)
+	}
+
+	// Update index (sparse indexing - every 4KB)
+	if s.currentOffset == s.baseOffset {
+		if err := s.index.ForceAppend(msg.Offset, s.currentPosition); err != nil {
+			return 0, fmt.Errorf("failed to index first message: %w", err)
+		}
+	} else {
+		if _, err := s.index.MaybeAppend(msg.Offset, s.currentPosition); err != nil {
+			return 0, fmt.Errorf("failed to update index: %w", err)
+		}
+	}
+
+	// Update time index (sparse - every 4KB)
+	if _, err := s.timeIndex.MaybeAppend(msg.Timestamp, msg.Offset, s.currentPosition); err != nil {
+		return 0, fmt.Errorf("failed to update time index: %w", err)
+	}
+
+	// Update position and offset
+	offset := s.currentOffset
+	s.currentOffset++
+	s.currentPosition = newPosition
+
+	// NO maybeSync() - caller must call FlushBuffer()
+
+	return offset, nil
+}
+
+// FlushBuffer flushes the write buffer to OS page cache.
+// Call this after a batch of AppendFast() calls.
+//
+// NOTE: This only flushes to OS page cache, not necessarily to disk.
+// For durability guarantee, call Sync() after FlushBuffer().
+func (s *Segment) FlushBuffer() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closed {
+		return ErrSegmentClosed
+	}
+
+	return s.writer.Flush()
+}
+
 // maybeSync flushes buffer and fsyncs if enough time has passed.
 // Called after every write. Actual sync happens based on syncInterval.
 func (s *Segment) maybeSync() error {

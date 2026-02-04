@@ -290,18 +290,98 @@ client.Publish("notifications", &Message{
 
 ---
 
+## Performance
+
+### Cluster Benchmark Results
+
+Benchmarks run from **within** a 3-node EKS cluster (c5.xlarge instances, 4 vCPU, 8GB RAM each):
+
+| Mode | Configuration | Throughput |
+|------|--------------|------------|
+| **Sequential** | Single message at a time | **~320 msgs/sec** |
+| **Concurrent** | 8 parallel threads | **~1,300 msgs/sec** |
+| **Batch** | 100 msgs/batch | **~30,000 msgs/sec** |
+| **Large Batch** | 1000 msgs/batch | **~220,000 msgs/sec** |
+
+### Scaling with Batch Size
+
+```
+Batch Size    Throughput       Improvement
+─────────────────────────────────────────
+     1        ~320/s           baseline
+    10        ~3,000/s         ~10x
+    50        ~15,000/s        ~50x
+   100        ~30,000/s        ~100x
+   200        ~60,000/s        ~200x
+   500        ~130,000/s       ~400x
+  1000        ~220,000/s       ~700x
+```
+
+**Key Insight**: Batch publishing amortizes per-request overhead, enabling massive throughput improvements.
+
+### Remote Client Benchmarks
+
+Benchmarks from remote client (network latency ~150ms RTT to ap-south-1):
+
+| Test | Go Client | Python Client | TypeScript Client |
+|------|-----------|---------------|-------------------|
+| **Single message** | 6.3 msg/s | - | - |
+| **Batch 100 × 1KB** | 112 msg/s | 331 msg/s | 284 msg/s |
+| **8 Concurrent** | 152 msg/s | 567 msg/s | 571 msg/s |
+
+> **Note:** Remote throughput is network-bound. Deploy producers close to GoQueue nodes for best performance.
+
+### Performance Comparison
+
+| System | Sequential | Batch (100) | Notes |
+|--------|-----------|-------------|-------|
+| **GoQueue** | ~320/s | ~30,000/s | Single binary, no dependencies |
+| Kafka | ~100K/s | ~1M/s | Requires ZooKeeper/KRaft, JVM |
+| RabbitMQ | ~10K/s | ~50K/s | Erlang-based |
+| SQS | ~300/s | ~3,000/s | AWS managed, 10 msg batch limit |
+
+For detailed benchmarks, see [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+
+---
+
 ## Quick Start
 
-### Using Docker
+### Using Docker (Local Development)
 
 ```bash
-# Single node (development)
+# Single node
 docker run -p 8080:8080 -p 9000:9000 \
   -v goqueue-data:/var/lib/goqueue \
   ghcr.io/abd-ulbasit/goqueue:latest
 
-# 3-node cluster
-docker-compose -f deployments/docker-compose.yaml up -d
+# Verify it's running
+curl http://localhost:8080/health
+```
+
+### Deploy to Kubernetes (AWS EKS)
+
+```bash
+# One-command deployment (creates EKS cluster + GoQueue)
+cd deploy
+./deploy.sh deploy dev
+
+# Or deploy to existing cluster
+./deploy.sh goqueue dev
+
+# Get the LoadBalancer URL
+./deploy.sh url dev
+
+# Run benchmarks
+./deploy.sh benchmark dev
+```
+
+### Using Helm (Custom Cluster)
+
+```bash
+# Add GoQueue to your cluster
+helm install goqueue ./deploy/kubernetes/helm/goqueue \
+  --set replicaCount=3 \
+  --set service.type=LoadBalancer
 ```
 
 ### Using Go

@@ -1,0 +1,76 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: goqueue-bench-v2
+  namespace: goqueue
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: benchmark
+          image: curlimages/curl:latest
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              echo "=== GoQueue Cluster Benchmark ==="
+              BASE_URL="http://goqueue-lb.goqueue.svc.cluster.local:8080"
+              
+              curl -sf "$BASE_URL/health" || exit 1
+              echo "Health check passed"
+              
+              curl -sf "$BASE_URL/topics" -X POST -H "Content-Type: application/json" -d '{"name":"bench-v2","num_partitions":6}' 2>/dev/null || true
+              echo "Topic created"
+              
+              echo ""
+              echo "=== Sequential Publish Test (5000 messages) ==="
+              START=$(date +%s)
+              COUNT=0
+              while [ $COUNT -lt 5000 ]; do
+                curl -sf "$BASE_URL/topics/bench-v2/messages" -X POST -H "Content-Type: application/json" -d "{\"key\":\"k$COUNT\",\"value\":\"msg-$COUNT\"}" > /dev/null 2>&1 && COUNT=$((COUNT + 1))
+              done
+              END=$(date +%s)
+              ELAPSED=$((END - START))
+              ELAPSED=$((ELAPSED > 0 ? ELAPSED : 1))
+              RATE=$((5000 / ELAPSED))
+              echo "Published: 5000 messages"
+              echo "Duration: ${ELAPSED} seconds"
+              echo "Throughput: ${RATE} msgs/sec"
+              
+              echo ""
+              echo "=== Batch Publish Test (50 batches x 100 messages) ==="
+              START=$(date +%s)
+              BATCH=0
+              while [ $BATCH -lt 50 ]; do
+                MSGS="["
+                I=0
+                while [ $I -lt 100 ]; do
+                  MSGS="${MSGS}{\"key\":\"b${BATCH}k${I}\",\"value\":\"data\"}"
+                  I=$((I + 1))
+                  [ $I -lt 100 ] && MSGS="${MSGS},"
+                done
+                MSGS="${MSGS}]"
+                curl -sf "$BASE_URL/topics/bench-v2/messages/batch" -X POST -H "Content-Type: application/json" -d "{\"messages\":$MSGS}" > /dev/null 2>&1
+                BATCH=$((BATCH + 1))
+              done
+              END=$(date +%s)
+              ELAPSED=$((END - START))
+              ELAPSED=$((ELAPSED > 0 ? ELAPSED : 1))
+              RATE=$((5000 / ELAPSED))
+              echo "Published: 5000 messages (50 batches)"
+              echo "Duration: ${ELAPSED} seconds"
+              echo "Throughput: ${RATE} msgs/sec"
+              
+              echo ""
+              echo "=== Stats ==="
+              curl -sf "$BASE_URL/stats"
+              echo ""
+              echo "=== Benchmark Complete ==="
+          resources:
+            limits:
+              cpu: "2"
+              memory: 1Gi
+            requests:
+              cpu: "1"
+              memory: 512Mi

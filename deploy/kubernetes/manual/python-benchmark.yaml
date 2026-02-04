@@ -1,0 +1,169 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: goqueue-python-bench
+  namespace: goqueue
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: benchmark
+          image: python:3.12-alpine
+          command: ["python3", "-c"]
+          args:
+            - |
+              import time
+              import json
+              import urllib.request
+              import urllib.error
+              from concurrent.futures import ThreadPoolExecutor, as_completed
+              import threading
+
+              BASE_URL = "http://goqueue-lb.goqueue.svc.cluster.local:8080"
+              TOPIC = "python-bench"
+              
+              def make_request(url, data=None, method="GET"):
+                  try:
+                      req = urllib.request.Request(
+                          url,
+                          data=json.dumps(data).encode() if data else None,
+                          headers={"Content-Type": "application/json"},
+                          method=method
+                      )
+                      with urllib.request.urlopen(req, timeout=30) as resp:
+                          return resp.status, resp.read().decode()
+                  except Exception as e:
+                      return None, str(e)
+
+              print("=" * 60)
+              print("GoQueue Python Benchmark")
+              print("Running from within EKS cluster")
+              print("=" * 60)
+              print()
+
+              # Health check
+              status, body = make_request(f"{BASE_URL}/health")
+              print(f"Health check: {body}")
+
+              # Create topic
+              status, body = make_request(f"{BASE_URL}/topics", {"name": TOPIC, "num_partitions": 6}, "POST")
+              print(f"Topic creation: {body}")
+              print()
+
+              # Sequential publish benchmark
+              print("=" * 60)
+              print("Sequential Publish Benchmark (1000 messages)")
+              print("=" * 60)
+              
+              successes = 0
+              start = time.time()
+              for i in range(1000):
+                  status, _ = make_request(
+                      f"{BASE_URL}/topics/{TOPIC}/messages",
+                      {"key": f"seq-{i}", "value": f"message-{i}"},
+                      "POST"
+                  )
+                  if status == 200 or status == 201:
+                      successes += 1
+                  if (i + 1) % 200 == 0:
+                      print(f"  Published {i + 1} messages...")
+              
+              elapsed = time.time() - start
+              rate = 1000 / elapsed if elapsed > 0 else 0
+              print(f"Results:")
+              print(f"  Messages: 1000")
+              print(f"  Successful: {successes}")
+              print(f"  Duration: {elapsed:.2f}s")
+              print(f"  Throughput: {rate:.1f} msgs/sec")
+              print()
+
+              # Concurrent publish benchmark
+              print("=" * 60)
+              print("Concurrent Publish Benchmark (8 threads x 500 msgs)")
+              print("=" * 60)
+
+              counter = [0]
+              lock = threading.Lock()
+
+              def publish_messages(thread_id, count):
+                  local_success = 0
+                  for i in range(count):
+                      status, _ = make_request(
+                          f"{BASE_URL}/topics/{TOPIC}/messages",
+                          {"key": f"t{thread_id}-{i}", "value": f"concurrent-{i}"},
+                          "POST"
+                      )
+                      if status == 200 or status == 201:
+                          local_success += 1
+                  with lock:
+                      counter[0] += local_success
+                  return local_success
+
+              start = time.time()
+              with ThreadPoolExecutor(max_workers=8) as executor:
+                  futures = [executor.submit(publish_messages, t, 500) for t in range(8)]
+                  for f in as_completed(futures):
+                      pass
+              
+              elapsed = time.time() - start
+              total_msgs = 4000
+              rate = total_msgs / elapsed if elapsed > 0 else 0
+              print(f"Results:")
+              print(f"  Threads: 8")
+              print(f"  Messages per thread: 500")
+              print(f"  Total messages: {total_msgs}")
+              print(f"  Successful: {counter[0]}")
+              print(f"  Duration: {elapsed:.2f}s")
+              print(f"  Throughput: {rate:.1f} msgs/sec")
+              print()
+
+              # Batch publish benchmark
+              print("=" * 60)
+              print("Batch Publish Benchmark (20 batches x 100 messages)")
+              print("=" * 60)
+              
+              successes = 0
+              start = time.time()
+              for batch in range(20):
+                  messages = [{"key": f"batch-{batch}-{i}", "value": f"batch-msg-{i}"} for i in range(100)]
+                  status, _ = make_request(
+                      f"{BASE_URL}/topics/{TOPIC}/messages/batch",
+                      {"messages": messages},
+                      "POST"
+                  )
+                  if status == 200 or status == 201:
+                      successes += 1
+                  print(f"  Batch {batch + 1}/20 complete")
+              
+              elapsed = time.time() - start
+              total_msgs = 2000
+              rate = total_msgs / elapsed if elapsed > 0 else 0
+              print(f"Results:")
+              print(f"  Batches: 20")
+              print(f"  Messages per batch: 100")
+              print(f"  Total messages: {total_msgs}")
+              print(f"  Successful batches: {successes}")
+              print(f"  Duration: {elapsed:.2f}s")
+              print(f"  Throughput: {rate:.1f} msgs/sec")
+              print()
+
+              # Summary
+              print("=" * 60)
+              print("BENCHMARK COMPLETE")
+              print("=" * 60)
+              
+              status, body = make_request(f"{BASE_URL}/stats")
+              if status:
+                  stats = json.loads(body)
+                  print(f"Node: {stats.get('node_id', 'unknown')}")
+                  print(f"Uptime: {stats.get('uptime', 'unknown')}")
+                  print(f"Topics: {stats.get('topics', 0)}")
+          resources:
+            limits:
+              cpu: "1"
+              memory: 512Mi
+            requests:
+              cpu: "500m"
+              memory: 256Mi

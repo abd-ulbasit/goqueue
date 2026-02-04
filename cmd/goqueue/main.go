@@ -25,8 +25,10 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -55,11 +57,59 @@ func main() {
 	// │ COMPARISON:                                                             │
 	// │   - Kafka: Broker is a JVM process, typically 3+ in a cluster           │
 	// │   - RabbitMQ: Broker = the entire RabbitMQ node                         │
-	// │   - goqueue: Single broker for now (clustering in M10-M11)              │
+	// │   - goqueue: Cluster mode enabled via GOQUEUE_CLUSTER_ENABLED           │
 	// └─────────────────────────────────────────────────────────────────────────┘
 	fmt.Println("📦 Starting broker...")
 	config := broker.DefaultBrokerConfig()
-	config.DataDir = "./data" // Store data in ./data directory
+
+	// Read data directory from environment variable (for Kubernetes deployments)
+	// Falls back to ./data for local development
+	if dataDir := os.Getenv("GOQUEUE_BROKER_DATADIR"); dataDir != "" {
+		config.DataDir = dataDir
+	} else {
+		config.DataDir = "./data" // Default for local development
+	}
+
+	// ┌─────────────────────────────────────────────────────────────────────────┐
+	// │ CLUSTER MODE CONFIGURATION                                              │
+	// │                                                                         │
+	// │ When GOQUEUE_CLUSTER_ENABLED=true, the broker runs in cluster mode:     │
+	// │   - Joins other brokers via GOQUEUE_CLUSTER_PEERS                       │
+	// │   - Participates in leader election                                     │
+	// │   - Replicates data across nodes                                        │
+	// │   - Synchronizes metadata (topics, partitions)                          │
+	// │                                                                         │
+	// │ KUBERNETES DEPLOYMENT:                                                  │
+	// │   Each pod gets a stable DNS name via headless service:                 │
+	// │     goqueue-0.goqueue-headless.namespace.svc.cluster.local:7000         │
+	// │     goqueue-1.goqueue-headless.namespace.svc.cluster.local:7000         │
+	// │     goqueue-2.goqueue-headless.namespace.svc.cluster.local:7000         │
+	// │                                                                         │
+	// │ COMPARISON:                                                             │
+	// │   - Kafka: ZooKeeper (old) or KRaft (new) for coordination              │
+	// │   - RabbitMQ: Erlang distribution for clustering                        │
+	// │   - goqueue: Gossip-based membership + controller election              │
+	// └─────────────────────────────────────────────────────────────────────────┘
+	if os.Getenv("GOQUEUE_CLUSTER_ENABLED") == "true" {
+		fmt.Println("🔗 Cluster mode enabled")
+		config.ClusterEnabled = true
+		config.ClusterConfig = &broker.ClusterModeConfig{
+			// normalizeAddr ensures we have a valid :port format
+			// Handles both "8080" and ":8080" input formats
+			ClientAddress:    normalizeAddr(getEnvOrDefault("GOQUEUE_LISTENERS_HTTP", "8080")),
+			ClusterAddress:   normalizeAddr(getEnvOrDefault("GOQUEUE_LISTENERS_INTERNAL", "7000")),
+			AdvertiseAddress: os.Getenv("GOQUEUE_CLUSTER_ADVERTISE"),
+			Peers:            splitPeers(os.Getenv("GOQUEUE_CLUSTER_PEERS")),
+			QuorumSize:       getEnvIntOrDefault("GOQUEUE_CLUSTER_QUORUM", 2),
+		}
+		fmt.Printf("   ✓ Peers: %v\n", config.ClusterConfig.Peers)
+		fmt.Printf("   ✓ Advertise: %s\n", config.ClusterConfig.AdvertiseAddress)
+	}
+
+	// Read node ID from environment (for Kubernetes, this is the pod name)
+	if nodeID := os.Getenv("GOQUEUE_BROKER_NODEID"); nodeID != "" {
+		config.NodeID = nodeID
+	}
 
 	b, err := broker.NewBroker(config)
 	if err != nil {
@@ -314,7 +364,13 @@ func main() {
 	// └─────────────────────────────────────────────────────────────────────────┘
 	fmt.Println("🌐 Starting HTTP API server...")
 	serverConfig := api.DefaultServerConfig()
-	serverConfig.Addr = "127.0.0.1:8080"
+
+	// Read HTTP listener address from environment variable (for Kubernetes)
+	if httpAddr := os.Getenv("GOQUEUE_LISTENERS_HTTP"); httpAddr != "" {
+		serverConfig.Addr = httpAddr
+	} else {
+		serverConfig.Addr = "127.0.0.1:8080" // Default for local development
+	}
 
 	server := api.NewServer(b, serverConfig)
 	if err := server.Start(); err != nil {
@@ -350,15 +406,106 @@ func main() {
 	fmt.Println("🔌 Starting gRPC server...")
 
 	grpcConfig := grpc.DefaultServerConfig()
-	grpcConfig.Address = "127.0.0.1:9000"
+
+	// Read gRPC listener address from environment variable (for Kubernetes)
+	if grpcAddr := os.Getenv("GOQUEUE_LISTENERS_GRPC"); grpcAddr != "" {
+		grpcConfig.Address = grpcAddr
+	} else {
+		grpcConfig.Address = "127.0.0.1:9000" // Default for local development
+	}
 	grpcConfig.EnableReflection = true // Enable for debugging with grpcurl
 
 	grpcServer := grpc.NewServer(b, grpcConfig)
-	if err := grpcServer.Start(); err != nil {
-		log.Fatalf("Failed to start gRPC server: %v", err)
-	}
+
+	// Start gRPC server in a goroutine (it blocks until Stop() is called)
+	go func() {
+		if err := grpcServer.Start(); err != nil {
+			log.Fatalf("Failed to start gRPC server: %v", err)
+		}
+	}()
+
+	// Small delay to ensure gRPC server is listening before marking as ready
+	time.Sleep(100 * time.Millisecond)
 
 	fmt.Printf("   ✓ gRPC API listening on %s\n", grpcConfig.Address)
+	fmt.Println()
+
+	// -------------------------------------------------------------------------
+	// STEP 6c: Start Cluster HTTP Server (if cluster mode enabled)
+	// -------------------------------------------------------------------------
+	// ┌─────────────────────────────────────────────────────────────────────────┐
+	// │ CLUSTER INTER-NODE COMMUNICATION                                        │
+	// │                                                                         │
+	// │ WHY SEPARATE HTTP SERVER:                                               │
+	// │   - Cluster traffic is internal (between nodes), not client-facing      │
+	// │   - Separate port (7000) allows network policies to isolate traffic     │
+	// │   - Uses Go 1.22 http.ServeMux (simpler than chi for internal API)      │
+	// │   - Must be running BEFORE coordinator tries to join cluster            │
+	// │                                                                         │
+	// │ ENDPOINTS (port 7000):                                                  │
+	// │   POST /cluster/heartbeat  - Health check between nodes                 │
+	// │   POST /cluster/join       - Node requesting to join cluster            │
+	// │   POST /cluster/leave      - Node gracefully departing                  │
+	// │   GET  /cluster/state      - Get cluster membership state               │
+	// │   POST /cluster/vote       - Controller election vote request           │
+	// │   POST /cluster/metadata   - Sync topic metadata from controller        │
+	// │   GET  /cluster/health     - Cluster health status                      │
+	// │                                                                         │
+	// │ STARTUP ORDER (CRITICAL):                                               │
+	// │   1. Main HTTP server starts (port 8080) ✓                              │
+	// │   2. gRPC server starts (port 9000) ✓                                   │
+	// │   3. Cluster HTTP server starts (port 7000) <- WE ARE HERE              │
+	// │   4. Coordinator bootstrap (joins/forms cluster)                        │
+	// │   5. Mark as ready                                                      │
+	// │                                                                         │
+	// │ This order ensures peers can receive join requests before anyone tries  │
+	// │ to join, preventing the deadlock where all pods fail to connect.        │
+	// └─────────────────────────────────────────────────────────────────────────┘
+	if b.IsClusterEnabled() {
+		// Get cluster address from config (default :7000)
+		clusterAddr := getEnvOrDefault("GOQUEUE_LISTENERS_INTERNAL", ":7000")
+		clusterAddr = normalizeAddr(clusterAddr)
+
+		fmt.Printf("🔗 Starting cluster HTTP server on %s...\n", clusterAddr)
+
+		// Create a separate http.ServeMux for cluster endpoints
+		clusterMux := http.NewServeMux()
+		b.RegisterClusterRoutes(clusterMux)
+
+		// Create and start the cluster HTTP server
+		clusterServer := &http.Server{
+			Addr:         clusterAddr,
+			Handler:      clusterMux,
+			ReadTimeout:  30 * time.Second,
+			WriteTimeout: 30 * time.Second,
+			IdleTimeout:  60 * time.Second,
+		}
+
+		// Start cluster server in a goroutine
+		go func() {
+			if err := clusterServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Printf("Cluster HTTP server error: %v", err)
+			}
+		}()
+
+		// Give the listener time to start
+		time.Sleep(100 * time.Millisecond)
+		fmt.Printf("   ✓ Cluster HTTP server listening on %s\n", clusterAddr)
+
+		// Now that HTTP is listening, start the cluster coordinator
+		fmt.Println("   ✓ Starting cluster coordinator...")
+		if err := b.StartCluster(); err != nil {
+			log.Fatalf("Failed to start cluster: %v", err)
+		}
+		fmt.Println("   ✓ Cluster coordinator started")
+		fmt.Println()
+	}
+
+	// -------------------------------------------------------------------------
+	// Mark server as ready for Kubernetes readiness probe
+	// -------------------------------------------------------------------------
+	api.GetHealthState().SetReady(true)
+	fmt.Println("   ✓ Server marked as ready")
 	fmt.Println()
 
 	fmt.Println("   Try these commands:")
@@ -420,4 +567,101 @@ func main() {
 	fmt.Println("   ✓ HTTP server stopped")
 
 	fmt.Println("   ✓ Shutdown complete")
+}
+
+// =============================================================================
+// HELPER FUNCTIONS FOR ENVIRONMENT CONFIGURATION
+// =============================================================================
+
+// getEnvOrDefault returns the environment variable value or a default.
+func getEnvOrDefault(key, defaultValue string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return defaultValue
+}
+
+// getEnvIntOrDefault returns the environment variable as int or a default.
+func getEnvIntOrDefault(key string, defaultValue int) int {
+	if v := os.Getenv(key); v != "" {
+		if i, err := parseIntSafe(v); err == nil {
+			return i
+		}
+	}
+	return defaultValue
+}
+
+// parseIntSafe parses a string to int safely.
+func parseIntSafe(s string) (int, error) {
+	var i int
+	_, err := fmt.Sscanf(s, "%d", &i)
+	return i, err
+}
+
+// splitPeers splits a comma-separated list of peers into a slice.
+// Empty string returns empty slice (single-node mode).
+func splitPeers(peers string) []string {
+	if peers == "" {
+		return nil
+	}
+	var result []string
+	for _, p := range splitString(peers, ",") {
+		p = trimSpace(p)
+		if p != "" {
+			result = append(result, p)
+		}
+	}
+	return result
+}
+
+// splitString splits a string by separator (simple implementation).
+func splitString(s, sep string) []string {
+	if s == "" {
+		return nil
+	}
+	var result []string
+	start := 0
+	for i := 0; i <= len(s)-len(sep); i++ {
+		if s[i:i+len(sep)] == sep {
+			result = append(result, s[start:i])
+			start = i + len(sep)
+			i += len(sep) - 1
+		}
+	}
+	result = append(result, s[start:])
+	return result
+}
+
+// trimSpace removes leading and trailing whitespace.
+func trimSpace(s string) string {
+	start := 0
+	end := len(s)
+	for start < end && (s[start] == ' ' || s[start] == '\t' || s[start] == '\n' || s[start] == '\r') {
+		start++
+	}
+	for end > start && (s[end-1] == ' ' || s[end-1] == '\t' || s[end-1] == '\n' || s[end-1] == '\r') {
+		end--
+	}
+	return s[start:end]
+}
+
+// normalizeAddr ensures address is in :port format.
+// Handles these input formats:
+//   - "8080"         → ":8080"
+//   - ":8080"        → ":8080"
+//   - "0.0.0.0:8080" → ":8080" (extracts port from full address)
+//   - "host:8080"    → ":8080" (extracts port from host:port)
+func normalizeAddr(addr string) string {
+	addr = trimSpace(addr)
+	if addr == "" {
+		return ""
+	}
+	// Check if it contains a colon (could be host:port or just :port)
+	if colonIdx := strings.LastIndex(addr, ":"); colonIdx >= 0 {
+		// Extract just the port part
+		port := addr[colonIdx:]
+		return port
+	}
+	// No colon, assume it's just a port number
+	return ":" + addr
 }
