@@ -3,11 +3,83 @@
 ## Overall Status
 
 **Phase**: 4 of 4
-**Milestones**: 19/26 complete
+**Milestones**: 20/26 complete (M11: Leader Election & Replication - IN PROGRESS)
 **Tests**: 640+ passing (storage: 50+, broker: 470+, api: 24, grpc: 16, client: 14, cluster: 50+)
 **Started**: Session 1
 
-## Latest Session - 3-Node Cluster Deployment & High-Throughput Benchmarks
+## Latest Session - Cluster Formation Fix & Failover Detection
+
+### What Was Accomplished
+
+**CRITICAL BUG FIX: Coordinator Context Lifecycle**:
+- **Root Cause**: Bootstrap used `context.WithTimeout(context.Background(), 60s)` 
+- The coordinator's `c.ctx` was derived from this timeout context
+- When bootstrap completed and `defer cancel()` ran, it cancelled the coordinator's context
+- This caused `heartbeatLoop` to exit immediately (context cancelled)
+- **Fix**: Use `context.Background()` for coordinator's long-running context
+
+**Fixed Heartbeat Loop**:
+- Previously: Heartbeat loop started then immediately stopped (context cancelled)
+- Now: Heartbeat loop runs continuously, sending heartbeats every 3s
+- Verified: Nodes stay alive without being marked dead
+
+**Failure Detection Working**:
+- Failure detector correctly identifies nodes that stop heartbeating
+- Suspect timeout: 6s (2 missed heartbeats)
+- Dead timeout: 9s (3 missed heartbeats)
+- Tested: Killed pod, node was marked suspect→dead correctly
+
+**Controller Election on Death**:
+- When controller dies, remaining nodes trigger new election
+- Log observed: "controller died, triggering election"
+- New controller elected successfully
+
+**Partition Failover Code**:
+- Added `ElectLeadersForNode()` call in `handleMembershipEvent`
+- Triggers partition leader election when a node dies
+- Only runs on controller node
+
+### Code Changes
+
+**`internal/cluster/coordinator.go`**:
+- Fixed context lifecycle: `c.ctx, c.cancel = context.WithCancel(context.Background())`
+- Added `partitionElector *PartitionLeaderElector` field
+- `handleMembershipEvent` triggers partition failover on `EventNodeDied`
+
+**`internal/cluster/cluster_server.go`**:
+- `handleJoin` now calls `RecordHeartbeat` for joining nodes
+- `BroadcastHeartbeats` uses `GetOtherNodes()` (includes suspect, skips dead)
+
+**`internal/cluster/failure_detector.go`**:
+- `Start()` seeds initial heartbeats for existing nodes
+- Added membership listener for newly joined nodes
+- Detection loop correctly marks nodes as suspect→dead
+
+**`internal/cluster/membership.go`**:
+- Fixed `ApplyState` version comparison for Version=0 case
+
+### Test Results
+
+- 3-node EKS cluster running stable
+- All nodes remain alive with continuous heartbeats
+- Failure detection tested: killed node detected as dead within 9s
+- Controller re-election verified
+- Cluster recovers when killed pod restarts
+
+### Docker Images Built
+
+- `v0.5.0-failover` through `v0.5.0-failover9`
+- Latest stable: `v0.5.0-failover9`
+
+### Known Issues
+
+1. **Topic Sync**: Topics created on one node not immediately visible on others
+2. **Partition Leader API**: No endpoint to view partition leaders
+3. **Kubernetes restart**: When pod restarts quickly, failover partially executes
+
+---
+
+## Previous Session - 3-Node Cluster Deployment & High-Throughput Benchmarks
 
 ### What Was Built
 

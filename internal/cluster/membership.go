@@ -486,8 +486,13 @@ func (m *Membership) ApplyState(state *ClusterState) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Only apply if version is newer
-	if state.Version <= m.state.Version {
+	// Only apply if version is newer OR if we have no nodes yet (fresh start)
+	// The fresh start case handles bootstrap where both versions are 0
+	if state.Version < m.state.Version {
+		return nil
+	}
+	// If versions are equal, apply if we have fewer nodes (we're joining)
+	if state.Version == m.state.Version && len(m.state.Nodes) >= len(state.Nodes) {
 		return nil
 	}
 

@@ -242,6 +242,26 @@ func (cs *ClusterServer) handleJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// =========================================================================
+	// RECORD INITIAL HEARTBEAT FOR FAILURE DETECTION
+	// =========================================================================
+	//
+	// WHY: The failure detector only tracks nodes that have sent heartbeats.
+	// Without this initial heartbeat, a node that joins but crashes immediately
+	// (before sending any heartbeats) would never be detected as dead.
+	//
+	// FLOW:
+	//   1. Node joins cluster → AddNode() adds to membership
+	//   2. Record initial heartbeat → failure detector starts tracking
+	//   3. If node crashes before first real heartbeat → still detected after timeout
+	//
+	// COMPARISON:
+	//   - Kafka: Uses session timeout from group membership
+	//   - RabbitMQ: Cluster peer discovery tracks connection state
+	//   - goqueue: We seed the failure detector on join
+	//
+	cs.failureDetector.RecordHeartbeat(req.NodeID)
+
 	// Return success with current cluster state
 	state := cs.membership.State()
 	resp := JoinResponse{
@@ -498,8 +518,15 @@ func NewClusterClient(node *Node, membership *Membership, logger *slog.Logger) *
 func (cc *ClusterClient) SendHeartbeat(ctx context.Context, targetID NodeID) (*HeartbeatResponse, error) {
 	targetInfo := cc.membership.GetNode(targetID)
 	if targetInfo == nil {
+		cc.logger.Warn("heartbeat target not found in membership",
+			"target_id", targetID)
 		return nil, fmt.Errorf("node %s not found", targetID)
 	}
+
+	targetAddr := targetInfo.ClusterAddress.String()
+	cc.logger.Debug("sending heartbeat",
+		"to", targetID,
+		"addr", targetAddr)
 
 	state := cc.membership.State()
 	req := HeartbeatRequest{
@@ -510,10 +537,18 @@ func (cc *ClusterClient) SendHeartbeat(ctx context.Context, targetID NodeID) (*H
 	}
 
 	var resp HeartbeatResponse
-	err := cc.doRequest(ctx, targetInfo.ClusterAddress.String(), "/cluster/heartbeat", req, &resp)
+	err := cc.doRequest(ctx, targetAddr, "/cluster/heartbeat", req, &resp)
 	if err != nil {
+		cc.logger.Warn("heartbeat request failed",
+			"to", targetID,
+			"addr", targetAddr,
+			"error", err)
 		return nil, err
 	}
+
+	cc.logger.Debug("heartbeat response received",
+		"from", targetID,
+		"controller", resp.ControllerID)
 
 	return &resp, nil
 }
@@ -861,13 +896,45 @@ func (cc *ClusterClient) doRequest(ctx context.Context, addr string, path string
 // BroadcastHeartbeats sends heartbeats to all known nodes.
 // Called periodically by the heartbeat sender.
 // Implements gossip-style membership propagation by merging responses.
+//
+// =============================================================================
+// WHY USE GetOtherNodes() INSTEAD OF AliveNodes()?
+// =============================================================================
+//
+// PROBLEM:
+//
+//	If we only send heartbeats to AliveNodes(), we create a race condition:
+//	1. Node joins, initial heartbeat seeded for new node
+//	2. Failure detector starts with 6s/9s timeouts
+//	3. First heartbeat might not arrive in 6s due to timing
+//	4. New node marked suspect → removed from AliveNodes()
+//	5. No more heartbeats sent → permanently marked dead
+//
+// SOLUTION:
+//
+//	Send heartbeats to ALL known nodes (except dead ones) to recover
+//	nodes that were incorrectly marked suspect. When heartbeat succeeds,
+//	the node is recovered to alive status.
+//
+// COMPARISON:
+//   - Kafka: Controller probes all brokers regardless of state
+//   - Cassandra/SWIM: Gossip to random nodes including suspect
+//   - goqueue: We probe all non-dead nodes to allow recovery
 func (cc *ClusterClient) BroadcastHeartbeats(ctx context.Context) {
-	nodes := cc.membership.AliveNodes()
+	// Use GetOtherNodes() to include suspect nodes (allows recovery)
+	// Dead nodes are excluded as they've passed the final timeout
+	nodes := cc.membership.GetOtherNodes()
 	myID := cc.node.ID()
 
 	for _, node := range nodes {
 		if node.ID == myID {
 			continue // Don't heartbeat ourselves
+		}
+
+		// Skip only dead nodes - allow suspect nodes to recover
+		if node.Status == NodeStatusDead {
+			cc.logger.Debug("skipping dead node", "node", node.ID)
+			continue
 		}
 
 		go func(nodeID NodeID) {

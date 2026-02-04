@@ -114,6 +114,19 @@ func NewFailureDetector(membership *Membership, config *ClusterConfig) *FailureD
 // │    DeadTimeout = 9s (3 missed heartbeats)                       │
 // └─────────────────────────────────────────────────────────────────┘
 func (fd *FailureDetector) Start() {
+	// =========================================================================
+	// SEED INITIAL HEARTBEATS FOR ALL EXISTING NODES
+	// =========================================================================
+	//
+	// WHY: When failure detector starts, there may already be nodes in the
+	// cluster (learned from bootstrap). We seed initial heartbeats for them
+	// so they can be properly detected if they fail before sending a heartbeat.
+	//
+	// ALSO: Register a listener to seed heartbeats for newly discovered nodes.
+	//
+	fd.seedExistingNodes()
+	fd.membership.AddListener(fd.handleMembershipEvent)
+
 	fd.wg.Add(1)
 	go fd.detectionLoop()
 
@@ -122,6 +135,29 @@ func (fd *FailureDetector) Start() {
 		"suspect_timeout", fd.config.SuspectTimeout,
 		"dead_timeout", fd.config.DeadTimeout,
 	)
+}
+
+// seedExistingNodes records initial heartbeats for all nodes already in membership.
+func (fd *FailureDetector) seedExistingNodes() {
+	fd.mu.Lock()
+	defer fd.mu.Unlock()
+
+	for _, node := range fd.membership.GetOtherNodes() {
+		if _, ok := fd.lastHeartbeats[node.ID]; !ok {
+			fd.lastHeartbeats[node.ID] = time.Now()
+		}
+	}
+}
+
+// handleMembershipEvent seeds heartbeats for newly joined nodes.
+func (fd *FailureDetector) handleMembershipEvent(event MembershipEvent) {
+	if event.Type == EventNodeJoined {
+		fd.mu.Lock()
+		if _, ok := fd.lastHeartbeats[event.NodeID]; !ok {
+			fd.lastHeartbeats[event.NodeID] = time.Now()
+		}
+		fd.mu.Unlock()
+	}
 }
 
 // Stop gracefully shuts down the failure detector.
