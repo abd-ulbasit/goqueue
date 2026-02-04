@@ -387,6 +387,36 @@ type Broker struct {
 	clusterCoordinator *clusterCoordinator
 
 	// ==========================================================================
+	// MILESTONE 11: REPLICATION COORDINATOR
+	// ==========================================================================
+	//
+	// The replication coordinator manages synchronous replication in cluster mode.
+	// It ensures durability by waiting for ISR (In-Sync Replicas) before ACK.
+	//
+	// SYNCHRONOUS REPLICATION FLOW:
+	//   ┌──────────┐  publish  ┌─────────┐  replicate  ┌──────────────┐
+	//   │ Producer │─────────►│ Leader  │────────────►│ ISR Followers │
+	//   └──────────┘          │ Broker  │◄────────────│ (wait for ACK)│
+	//        ▲                └────┬────┘             └──────────────┘
+	//        │                     │
+	//        │    ACK after ISR    │
+	//        │◄────────────────────┘
+	//
+	// COMPARISON:
+	//   - Kafka: acks=all waits for all ISR replicas before ACK
+	//   - RabbitMQ: Publisher confirms wait for mirrored queue sync
+	//   - goqueue: WaitForReplication() blocks until ISR ack
+	//
+	// WHY ISR (not all replicas)?
+	//   - If a replica is slow/dead, writes would block indefinitely
+	//   - ISR = replicas that are "caught up" (within lag threshold)
+	//   - If replica falls behind, it's removed from ISR
+	//   - Writes only wait for ISR members (fast, alive replicas)
+	//
+	// ==========================================================================
+	replicationCoordinator *replicationCoordinator
+
+	// ==========================================================================
 	// MILESTONE 12: COOPERATIVE REBALANCING
 	// ==========================================================================
 	//
@@ -689,6 +719,30 @@ func NewBroker(config BrokerConfig) (*Broker, error) {
 		broker.clusterCoordinator = cc
 
 		// ======================================================================
+		// MILESTONE 11: CREATE REPLICATION COORDINATOR
+		// ======================================================================
+		//
+		// The replication coordinator manages synchronous replication:
+		//   - Tracks replica state (leader/follower, ISR)
+		//   - Handles WaitForReplication() for synchronous writes
+		//   - Manages snapshot creation/recovery
+		//
+		// Created here but started in StartCluster() after HTTP server is up.
+		//
+		// ======================================================================
+		rc, err := newReplicationCoordinator(broker, logger)
+		if err != nil {
+			cc.Stop(context.Background())
+			transactionCoordinator.Close()
+			schemaRegistry.Close()
+			tracer.Shutdown()
+			scheduler.Close()
+			groupCoordinator.Close()
+			return nil, fmt.Errorf("failed to create replication coordinator: %w", err)
+		}
+		broker.replicationCoordinator = rc
+
+		// ======================================================================
 		// IMPORTANT: Cluster coordinator created but NOT started yet!
 		// ======================================================================
 		// The cluster coordinator uses HTTP for peer communication. However,
@@ -926,6 +980,32 @@ func (b *Broker) StartCluster() error {
 		"node_id", b.clusterCoordinator.NodeID(),
 		"is_controller", b.clusterCoordinator.IsController())
 
+	// =========================================================================
+	// MILESTONE 11: START REPLICATION COORDINATOR
+	// =========================================================================
+	//
+	// The replication coordinator provides synchronous replication.
+	// It must be started AFTER the cluster coordinator is ready because:
+	//   - It uses cluster membership info to find peers
+	//   - It registers replicas based on partition assignments
+	//   - It needs the cluster client for fetching from leaders
+	//
+	// SYNCHRONOUS REPLICATION FLOW:
+	//   1. Producer publishes message to leader
+	//   2. Leader writes to local log
+	//   3. Leader calls WaitForReplication() → blocks
+	//   4. Followers fetch and ACK
+	//   5. Leader returns ACK to producer
+	//
+	// =========================================================================
+	if b.replicationCoordinator != nil {
+		b.logger.Info("starting replication coordinator")
+		if err := b.replicationCoordinator.Start(startCtx); err != nil {
+			return fmt.Errorf("failed to start replication coordinator: %w", err)
+		}
+		b.logger.Info("replication coordinator started")
+	}
+
 	return nil
 }
 
@@ -947,6 +1027,25 @@ func (b *Broker) RegisterClusterRoutes(mux *http.ServeMux) {
 		return
 	}
 	b.clusterCoordinator.RegisterRoutes(mux)
+
+	// =========================================================================
+	// REPLICATION ENDPOINTS (M11)
+	// =========================================================================
+	//
+	// These endpoints handle data replication between nodes:
+	//   - POST /replication/fetch    - Followers fetch messages from leader
+	//   - GET  /replication/leo      - Get log end offset for partition
+	//   - POST /replication/ack      - Follower acknowledges replication
+	//   - GET  /replication/snapshot - Request snapshot for recovery
+	//
+	// Used by:
+	//   - ReplicaManager on followers to pull data
+	//   - ISRManager to track replication lag
+	//
+	// =========================================================================
+	if b.replicationCoordinator != nil {
+		b.replicationCoordinator.RegisterRoutes(mux)
+	}
 }
 
 // IsClusterEnabled returns true if this broker is running in cluster mode.
@@ -988,6 +1087,24 @@ func (b *Broker) Close() error {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		if err := b.clusterCoordinator.Stop(shutdownCtx); err != nil {
 			errs = append(errs, fmt.Errorf("cluster coordinator: %w", err))
+		}
+		cancel()
+	}
+
+	// ==========================================================================
+	// REPLICATION SHUTDOWN (M11)
+	// ==========================================================================
+	// Stop replication AFTER cluster departure but BEFORE closing topics.
+	// This ensures:
+	//   1. No new replication requests come in
+	//   2. Pending replication ACKs are handled
+	//   3. Topics still accessible for final replication
+	// ==========================================================================
+	if b.replicationCoordinator != nil {
+		b.logger.Info("stopping replication coordinator")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := b.replicationCoordinator.Stop(shutdownCtx); err != nil {
+			errs = append(errs, fmt.Errorf("replication coordinator: %w", err))
 		}
 		cancel()
 	}
@@ -1091,6 +1208,47 @@ func (b *Broker) CreateTopic(config TopicConfig) error {
 		return fmt.Errorf("%w: %s", ErrTopicExists, config.Name)
 	}
 
+	// =========================================================================
+	// CLUSTER MODE: REGISTER WITH CLUSTER METADATA
+	// =========================================================================
+	//
+	// In cluster mode, topic metadata must be registered with the controller
+	// so that partition assignments are created and synced to all nodes.
+	//
+	// WHO CAN CREATE TOPICS?
+	//   - Controller: Creates metadata directly and syncs to followers
+	//   - Follower: Forwards request to controller (future: redirect API)
+	//
+	// CURRENT BEHAVIOR:
+	//   - Only controller can create topic metadata
+	//   - Non-controllers create topic locally but no cluster metadata
+	//   - This is temporary until we implement request forwarding
+	//
+	// PARTITION ASSIGNMENT FLOW:
+	//   1. Controller creates topic metadata
+	//   2. Controller assigns partitions using round-robin
+	//   3. Controller syncs metadata to all followers
+	//   4. Followers receive metadata via /cluster/metadata endpoint
+	//   5. All nodes now know about partition assignments
+	//
+	// =========================================================================
+	if b.clusterCoordinator != nil {
+		// Default replication factor: min(cluster size, 3)
+		replicationFactor := 3
+		clusterSize := b.clusterCoordinator.ClusterSize()
+		if clusterSize < replicationFactor {
+			replicationFactor = clusterSize
+		}
+
+		if err := b.clusterCoordinator.CreateTopicMeta(config.Name, config.NumPartitions, replicationFactor); err != nil {
+			// Log warning but don't fail - topic creation succeeds locally
+			// This allows non-controllers to create topics (local only)
+			b.logger.Warn("failed to register topic with cluster metadata",
+				"topic", config.Name,
+				"error", err)
+		}
+	}
+
 	// Create topic
 	topic, err := NewTopic(b.logsDir, config)
 	if err != nil {
@@ -1103,6 +1261,56 @@ func (b *Broker) CreateTopic(config TopicConfig) error {
 	b.groupCoordinator.RegisterTopic(config.Name, config.NumPartitions)
 
 	b.logger.Info("created topic",
+		"topic", config.Name,
+		"partitions", config.NumPartitions)
+
+	return nil
+}
+
+// CreateTopicLocal creates a topic locally without registering with cluster metadata.
+//
+// WHY THIS METHOD EXISTS:
+//
+//	When followers receive metadata sync from controller, they need to
+//	create topics locally to:
+//	1. Accept replication requests from leaders
+//	2. Store replicated messages
+//	3. Be ready to serve as leader if elected
+//
+// DIFFERENCE FROM CreateTopic:
+//   - CreateTopic: Creates locally + registers with cluster metadata
+//   - CreateTopicLocal: Creates locally ONLY (cluster metadata already exists)
+//
+// WHEN TO USE:
+//   - Cluster metadata sync: Follower creating topic from synced metadata
+//   - Topic recovery: Recreating topic from stored metadata
+//
+// IDEMPOTENT: Returns nil if topic already exists (unlike CreateTopic which errors)
+func (b *Broker) CreateTopicLocal(config TopicConfig) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.closed {
+		return ErrBrokerClosed
+	}
+
+	// Skip if already exists (idempotent for cluster sync)
+	if _, exists := b.topics[config.Name]; exists {
+		return nil
+	}
+
+	// Create topic locally - NO cluster metadata registration
+	topic, err := NewTopic(b.logsDir, config)
+	if err != nil {
+		return fmt.Errorf("failed to create topic: %w", err)
+	}
+
+	b.topics[config.Name] = topic
+
+	// Register with group coordinator for consumer group partition assignment
+	b.groupCoordinator.RegisterTopic(config.Name, config.NumPartitions)
+
+	b.logger.Info("created local topic (from metadata sync)",
 		"topic", config.Name,
 		"partitions", config.NumPartitions)
 
@@ -1176,6 +1384,70 @@ func (b *Broker) TopicExists(name string) bool {
 
 	_, exists := b.topics[name]
 	return exists
+}
+
+// =============================================================================
+// PARTITION INFO API
+// =============================================================================
+//
+// WHY: Clients and operators need visibility into partition assignments.
+// This enables:
+//   - Debugging routing issues (which node handles which partition?)
+//   - Monitoring ISR health (are replicas in sync?)
+//   - Client optimization (direct connect to leader)
+//
+// COMPARISON:
+//   - Kafka: AdminClient.describeTopics() returns PartitionInfo
+//   - RabbitMQ: Management API /api/queues shows node ownership
+//   - goqueue: GET /topics/{name}/partitions
+//
+// =============================================================================
+
+// GetPartitionInfo returns partition assignment info for a specific partition.
+// Returns nil if topic doesn't exist or cluster mode is disabled.
+func (b *Broker) GetPartitionInfo(topic string, partition int) *PartitionInfo {
+	if b.clusterCoordinator == nil {
+		// Single-node mode - no cluster metadata
+		return &PartitionInfo{
+			Topic:     topic,
+			Partition: partition,
+			Leader:    b.config.NodeID,
+			Replicas:  []string{b.config.NodeID},
+			ISR:       []string{b.config.NodeID},
+			Version:   0,
+		}
+	}
+	return b.clusterCoordinator.GetPartitionInfo(topic, partition)
+}
+
+// GetTopicPartitions returns partition info for all partitions of a topic.
+// Returns empty slice if topic doesn't exist in cluster metadata.
+func (b *Broker) GetTopicPartitions(topic string) []*PartitionInfo {
+	if b.clusterCoordinator == nil {
+		// Single-node mode - check if topic exists locally
+		b.mu.RLock()
+		t, exists := b.topics[topic]
+		b.mu.RUnlock()
+
+		if !exists {
+			return nil
+		}
+
+		// Return single partition for single-node mode
+		infos := make([]*PartitionInfo, t.config.NumPartitions)
+		for i := 0; i < t.config.NumPartitions; i++ {
+			infos[i] = &PartitionInfo{
+				Topic:     topic,
+				Partition: i,
+				Leader:    b.config.NodeID,
+				Replicas:  []string{b.config.NodeID},
+				ISR:       []string{b.config.NodeID},
+				Version:   0,
+			}
+		}
+		return infos
+	}
+	return b.clusterCoordinator.GetTopicPartitions(topic)
 }
 
 // =============================================================================
@@ -1293,6 +1565,72 @@ func (b *Broker) PublishWithTrace(topic string, key, value []byte, traceCtx Trac
 	if !ctx.TraceID.IsZero() {
 		span := NewSpan(ctx.TraceID, SpanEventPublishPersisted, topic, partition, offset)
 		b.tracer.RecordSpan(span)
+	}
+
+	// =========================================================================
+	// MILESTONE 11: SYNCHRONOUS REPLICATION (wait for ISR)
+	// =========================================================================
+	//
+	// WHY: In cluster mode, waiting for ISR replication before ACK ensures
+	// durability. If the leader crashes immediately after ACK, followers
+	// have the message and can become leader without data loss.
+	//
+	// FLOW:
+	//   ┌──────────┐  publish   ┌─────────┐  replicate  ┌──────────────┐
+	//   │ Producer │──────────►│ Leader  │────────────►│ ISR Replicas │
+	//   └──────────┘           │         │◄────────────│ (send ACK)   │
+	//        ▲                 └────┬────┘             └──────────────┘
+	//        │                      │
+	//        │    ACK after ISR     │
+	//        │◄─────────────────────┘
+	//
+	// COMPARISON:
+	//   - Kafka acks=1:   ACK after leader writes (fast, less durable)
+	//   - Kafka acks=all: ACK after all ISR replicate (slower, durable)
+	//   - goqueue:        Always acks=all in cluster mode (safer default)
+	//
+	// TIMEOUT:
+	//   - Default 10 seconds (configurable via ReplicationConfig)
+	//   - If ISR replicas don't ACK in time, publish still succeeds
+	//     (message is durable on leader) but logs warning
+	//
+	// SINGLE-NODE MODE:
+	//   - No replication coordinator → skip wait
+	//   - Message is durable on local disk
+	//
+	// =========================================================================
+	if b.replicationCoordinator != nil {
+		// Create timeout context for replication wait
+		replicationCtx, replicationCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer replicationCancel()
+
+		// Wait for followers in ISR to acknowledge
+		if err := b.replicationCoordinator.WaitForReplication(replicationCtx, topic, partition, offset); err != nil {
+			// Replication timeout/failure - message is on leader but ISR didn't ack
+			// Log warning but don't fail the publish (message is durable on leader)
+			b.logger.Warn("replication wait failed",
+				"topic", topic,
+				"partition", partition,
+				"offset", offset,
+				"error", err)
+
+			// Record replication timeout span
+			if !ctx.TraceID.IsZero() {
+				span := NewSpan(ctx.TraceID, SpanEventReplicationTimeout, topic, partition, offset)
+				span.WithError(err)
+				b.tracer.RecordSpan(span)
+			}
+
+			// Note: We continue and return success because the message IS durable
+			// on the leader. The ISR timeout just means followers are slow.
+			// This matches Kafka's behavior with acks=all when ISR shrinks.
+		} else {
+			// Record successful replication span
+			if !ctx.TraceID.IsZero() {
+				span := NewSpan(ctx.TraceID, SpanEventReplicationComplete, topic, partition, offset)
+				b.tracer.RecordSpan(span)
+			}
+		}
 	}
 
 	// =========================================================================

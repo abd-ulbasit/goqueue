@@ -4,60 +4,54 @@
 
 **Phase**: 4 - Operations
 **Milestone**: 11/12 - Leader Election & Replication / Automatic Failover - IN PROGRESS
-**Status**: Cluster formation fixed, failover detection working, partition failover code added
+**Status**: Topic metadata sync fixed, partition API added, failover tested
 
-## Recent Session: Cluster Formation Fix & Failover Detection
+## Recent Session: Topic Metadata Sync & Partition API
 
-### Critical Bug Fixed: Coordinator Context Lifecycle
+### What Was Fixed
 
-**The Bug**:
-```go
-// In broker.go StartCluster():
-startCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-defer cancel()  // <-- This cancels immediately when StartCluster() returns!
+**Topic Metadata Sync**:
+- Problem: Topics created on controller weren't visible on followers
+- Root Cause: `handleMetadataChange()` was a stub that only logged
+- Fix: Now creates topics locally when metadata is synced from controller
+- Added `CreateTopicLocal()` to broker for cluster sync
 
-if err := b.clusterCoordinator.Start(startCtx); err != nil { ... }
-
-// In coordinator.go Start():
-c.ctx, c.cancel = context.WithCancel(ctx)  // <-- Derived from cancelled parent!
-```
-
-When `StartCluster()` returned (even on success), `defer cancel()` cancelled `startCtx`, 
-which cancelled `c.ctx`, which caused `heartbeatLoop()` to exit immediately.
-
-**The Fix**:
-```go
-// coordinator.go Start():
-c.ctx, c.cancel = context.WithCancel(context.Background())  // Independent context
-```
+**Partition Leader API**:
+- Added `GET /topics/{topicName}/partitions`
+- Returns leader, replicas, ISR, version for each partition
+- Enables visibility into cluster partition assignments
 
 ### What's Working Now
 
-1. **Cluster Formation**: 3 nodes join and stay alive
-2. **Heartbeats**: Sent every 3s, received and recorded
-3. **Failure Detection**: Nodes marked suspect (6s) then dead (9s)
-4. **Controller Election**: Triggered when controller dies
-5. **Partition Failover Code**: `ElectLeadersForNode()` called on node death
+1. **Topic Metadata Sync**: ✅ Topics created on controller propagate to all followers
+2. **Partition API**: ✅ Can query leader/replica/ISR for any topic
+3. **Cluster Formation**: ✅ 3 nodes join and stay alive
+4. **Heartbeats**: ✅ Sent every 3s, received and recorded
+5. **Failure Detection**: ✅ Nodes marked suspect (6s) then dead (9s)
+6. **Controller Election**: ✅ Triggered when controller dies
+7. **Partition Leader Election**: ✅ New leaders elected when nodes fail/return
+8. **ISR Tracking**: ✅ All healthy nodes in ISR
+9. **Epoch/Version**: ✅ Increments on leadership changes
+10. **Unclean Election Prevention**: ✅ Blocks election without ISR
 
 ### What Still Needs Work
 
-1. **Topic Sync**: Topics created on one node not visible on others (metadata sync issue)
-2. **Partition Leader API**: No way to query which node leads which partition
-3. **Full Failover Test**: Hard to test because K8s restarts killed pods quickly
+1. **Request Routing**: Writes go to local node, not partition leader
+2. **Synchronous ISR Replication**: WaitForReplication called but may not wait for ISR ack
+3. **Full failover with data verification**: Need to verify no message loss
 
 ### EKS Cluster Details
 
 - **Cluster**: goqueue-dev (ap-south-1)
 - **Nodes**: 3x c5.xlarge (4 vCPU, 8 GB)
 - **LoadBalancer**: ab822e00193ff46f7ab447e128ecd3a8-1415729494.ap-south-1.elb.amazonaws.com:8080
-- **Image**: ghcr.io/abd-ulbasit/goqueue:v0.5.0-failover9
+- **Image**: ghcr.io/abd-ulbasit/goqueue:v0.5.0-isr3
 
 ### Next Steps
 
-1. Fix topic metadata sync so topics propagate to all nodes
-2. Add endpoint to view partition leader assignments
-3. Implement replication (followers fetch from leader)
-4. Test complete failover scenario with partition leader reassignment
+1. Implement request routing (forward writes to partition leader)
+2. Verify synchronous ISR replication works end-to-end
+3. Add data verification to failover test (consume messages after failover)
 
 ---
 

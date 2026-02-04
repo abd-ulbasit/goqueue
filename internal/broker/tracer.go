@@ -407,6 +407,26 @@ const (
 
 	// SpanEventRebalanceComplete - consumer group rebalancing completed
 	SpanEventRebalanceComplete SpanEventType = "rebalance.complete"
+
+	// === REPLICATION EVENTS (M11) ===
+	//
+	// These track synchronous replication in cluster mode.
+	// When a message is published to a leader, it waits for ISR replicas
+	// to acknowledge before ACKing the producer.
+	//
+	// FLOW:
+	//   publish.persisted → replication.pending → replication.complete
+	//                                         or → replication.timeout
+	//
+
+	// SpanEventReplicationPending - waiting for ISR to replicate
+	SpanEventReplicationPending SpanEventType = "replication.pending"
+
+	// SpanEventReplicationComplete - ISR replicas acknowledged
+	SpanEventReplicationComplete SpanEventType = "replication.complete"
+
+	// SpanEventReplicationTimeout - ISR wait timed out (message still durable on leader)
+	SpanEventReplicationTimeout SpanEventType = "replication.timeout"
 )
 
 // =============================================================================

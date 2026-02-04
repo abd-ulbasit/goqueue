@@ -687,6 +687,22 @@ func (c *Coordinator) stateSyncLoop() {
 	}
 }
 
+// SyncMetadataNow immediately pushes metadata to all followers.
+// Called when metadata changes that need immediate propagation (e.g., topic creation).
+//
+// WHY IMMEDIATE SYNC?
+//   - Background sync runs every 9s (3x heartbeat)
+//   - Topic creation should be visible immediately
+//   - Clients may route to any node right after create
+//
+// COMPARISON:
+//   - Kafka: Controller pushes UpdateMetadataRequest immediately
+//   - etcd: Raft replicates writes synchronously
+//   - goqueue: Async push to all followers (best effort)
+func (c *Coordinator) SyncMetadataNow() {
+	c.syncMetadataToFollowers()
+}
+
 // syncMetadataToFollowers pushes current metadata to all followers.
 func (c *Coordinator) syncMetadataToFollowers() {
 	meta := c.metadataStore.Meta()
