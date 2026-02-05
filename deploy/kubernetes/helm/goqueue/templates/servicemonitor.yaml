@@ -54,6 +54,18 @@ spec:
       path: {{ .Values.metrics.serviceMonitor.path }}
       interval: {{ .Values.metrics.serviceMonitor.interval }}
       scrapeTimeout: {{ .Values.metrics.serviceMonitor.scrapeTimeout }}
+      {{- if .Values.security.tls.enabled }}
+      # ═══════════════════════════════════════════════════════════════════════
+      # TLS CONFIGURATION FOR PROMETHEUS SCRAPING
+      # ═══════════════════════════════════════════════════════════════════════
+      #
+      # When TLS is enabled on GoQueue, Prometheus must use HTTPS to scrape.
+      # We skip cert verification since we use self-signed certs in dev.
+      #
+      scheme: https
+      tlsConfig:
+        insecureSkipVerify: true
+      {{- end }}
       {{- with .Values.metrics.serviceMonitor.metricRelabelings }}
       metricRelabelings:
         {{- toYaml . | nindent 8 }}

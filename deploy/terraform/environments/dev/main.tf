@@ -55,6 +55,66 @@ terraform {
   }
 }
 
+provider "aws" {
+  region = "ap-south-1"
+}
+
+# ============================================================================
+# PROVIDER CONFIGURATION FOR KUBERNETES/HELM
+# ============================================================================
+#
+# NOTE: These providers require the EKS cluster to exist first.
+# On initial deploy, run: terraform apply -target=module.goqueue_aws.module.eks
+# Then run: terraform apply (for the full deployment)
+#
+# This is a common terraform chicken-and-egg problem with EKS.
+# The Helm/K8s providers need cluster endpoint, but the cluster doesn't
+# exist yet on first run.
+#
+# WORKAROUND: The tf.sh script handles this by:
+# 1. First apply: Create EKS cluster only
+# 2. Second apply: Deploy Helm charts
+#
+# OR use a separate terraform configuration for the cluster and workloads.
+#
+# For now, we reference module outputs which will fail on first run.
+# The tf.sh script handles this gracefully.
+# ============================================================================
+
+# These data sources will fail on first run - this is expected behavior
+# The tf.sh script handles the two-phase deployment
+data "aws_eks_cluster" "cluster" {
+  name       = "goqueue-dev"
+  depends_on = [module.goqueue_aws]
+}
+
+data "aws_eks_cluster_auth" "cluster" {
+  name       = "goqueue-dev"
+  depends_on = [module.goqueue_aws]
+}
+
+provider "kubernetes" {
+  host                   = try(data.aws_eks_cluster.cluster.endpoint, "")
+  cluster_ca_certificate = try(base64decode(data.aws_eks_cluster.cluster.certificate_authority[0].data), "")
+  exec {
+    api_version = "client.authentication.k8s.io/v1beta1"
+    args        = ["eks", "get-token", "--cluster-name", "goqueue-dev"]
+    command     = "aws"
+  }
+}
+
+provider "helm" {
+  kubernetes {
+    host                   = try(data.aws_eks_cluster.cluster.endpoint, "")
+    cluster_ca_certificate = try(base64decode(data.aws_eks_cluster.cluster.certificate_authority[0].data), "")
+    exec {
+      api_version = "client.authentication.k8s.io/v1beta1"
+      args        = ["eks", "get-token", "--cluster-name", "goqueue-dev"]
+      command     = "aws"
+    }
+  }
+}
+
 # Use the AWS module
 module "goqueue_aws" {
   source = "../../modules/aws"
@@ -63,10 +123,14 @@ module "goqueue_aws" {
   # │ CLUSTER CONFIGURATION                                                   │
   # │                                                                         │
   # │ Region: ap-south-1 (Mumbai) - low latency for India-based testing      │
+  # │                                                                         │
+  # │ K8S VERSION: 1.31 (Standard Support)                                    │
+  # │   - 1.29 is in Extended Support (6x cost!)                              │
+  # │   - 1.31 is current stable with standard support pricing                │
   # └─────────────────────────────────────────────────────────────────────────┘
   region          = "ap-south-1"
   cluster_name    = "goqueue-dev"
-  cluster_version = "1.29"
+  cluster_version = "1.31"
   environment     = "dev"
 
   # ┌─────────────────────────────────────────────────────────────────────────┐
@@ -96,16 +160,37 @@ module "goqueue_aws" {
   # ┌─────────────────────────────────────────────────────────────────────────┐
   # │ GOQUEUE IMAGE CONFIGURATION                                             │
   # │                                                                         │
-  # │ Using 'latest' tag which includes cluster support (v0.4.0+):            │
-  # │   - Cluster mode is now the default behavior                            │
-  # │   - HTTP server starts before cluster coordinator joins                 │
-  # │   - Bootstrap mode allows joins without controller                      │
-  # │   - Quorum retry mechanism for peer discovery                           │
+  # │ Using v0.7.0-security-schemas tag which includes:                       │
+  # │   - Cluster mode with distributed consensus                             │
+  # │   - Security features (TLS, mTLS, API Key Auth, RBAC)                   │
+  # │   - Schema Registry for message validation                              │
+  # │   - Transaction support for exactly-once semantics                      │
   # └─────────────────────────────────────────────────────────────────────────┘
   goqueue_image_repository = "ghcr.io/abd-ulbasit/goqueue"
-  goqueue_image_tag        = "latest"
+  goqueue_image_tag        = "v0.7.0-security-schemas"
 
-  # Monitoring
+  # ┌─────────────────────────────────────────────────────────────────────────┐
+  # │ SECURITY CONFIGURATION (M21)                                            │
+  # │                                                                         │
+  # │ Enables:                                                                 │
+  # │   - TLS for client connections (HTTPS)                                  │
+  # │   - mTLS for inter-node cluster communication                           │
+  # │   - API Key authentication with RBAC                                    │
+  # │   - Self-signed certificates (dev environment)                          │
+  # └─────────────────────────────────────────────────────────────────────────┘
+  security_enabled         = true
+  security_tls_self_signed = true
+  security_root_api_key    = "3c78bc92f544273a7772dbcf5bbd8bfc872b103acbf5750ea2b4daf96330a1e2"
+
+  # ┌─────────────────────────────────────────────────────────────────────────┐
+  # │ MONITORING - PROMETHEUS OPERATOR                                        │
+  # │                                                                         │
+  # │ The previous agent INCORRECTLY disabled Prometheus to fix the error.    │
+  # │ The ROOT CAUSE was: ServiceMonitor/PrometheusRule CRDs were missing.    │
+  # │                                                                         │
+  # │ PROPER FIX: Install kube-prometheus-stack BEFORE GoQueue.               │
+  # │ This installs Prometheus Operator which provides the CRDs.              │
+  # └─────────────────────────────────────────────────────────────────────────┘
   install_prometheus = true
   install_traefik    = false  # Use LoadBalancer directly for benchmarks
 

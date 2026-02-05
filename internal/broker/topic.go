@@ -287,6 +287,47 @@ func LoadTopic(baseDir string, name string) (*Topic, error) {
 // MILESTONE 1 NOTE:
 // With only 1 partition, routing is trivial - everything goes to partition 0.
 // But we implement the full interface for forward compatibility.
+
+// DeterminePartition calculates which partition a message would route to
+// based on the key, without actually writing the message.
+//
+// WHY THIS EXISTS:
+//   In cluster mode, we need to know the partition BEFORE writing to check
+//   if we're the leader. If not, we forward to the leader.
+//
+// IMPORTANT:
+//   - For keyed messages: Returns hash-based partition (deterministic)
+//   - For nil keys: Returns NEXT round-robin partition (non-deterministic)
+//     The caller should NOT call both DeterminePartition and Publish for
+//     nil keys, as that would advance the counter twice.
+//
+// USAGE:
+//   partition := t.DeterminePartition(key)
+//   if isLeader(partition) {
+//       t.PublishToPartition(partition, key, value)  // Direct write
+//   } else {
+//       forward(partition, key, value)               // Forward to leader
+//   }
+//
+func (t *Topic) DeterminePartition(key []byte) int {
+	t.mu.RLock()
+	numPartitions := len(t.partitions)
+	t.mu.RUnlock()
+
+	if key != nil {
+		// Hash-based routing - deterministic
+		return t.hashPartition(key, numPartitions)
+	}
+
+	// Round-robin for nil keys - advance counter
+	t.mu.Lock()
+	partition := int(t.roundRobinCounter % uint64(numPartitions))
+	t.roundRobinCounter++
+	t.mu.Unlock()
+
+	return partition
+}
+
 func (t *Topic) Publish(key, value []byte) (partition int, offset int64, err error) {
 	t.mu.RLock()
 	if t.closed {

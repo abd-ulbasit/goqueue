@@ -1,36 +1,6 @@
-# Patterns to ignore when building packages.
-# This supports shell glob matching, relative path matching, and
-# temporary file exclusion.
-
-# VCS
 .git/
 .gitignore
-.gitattributes
-
-# IDE
 .idea/
 .vscode/
 *.swp
-*.swo
-*~
-
-# CI/CD
-.github/
-.gitlab/
-.circleci/
-
-# Testing
-tests/
-*_test.yaml
-test-*.yaml
-
-# Documentation (keep README.md)
-docs/
-*.md
-!README.md
-
-# Development
-Makefile
-Taskfile.yaml
-.editorconfig
-.pre-commit-config.yaml
+.DS_Store

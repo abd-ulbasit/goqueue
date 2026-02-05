@@ -93,10 +93,18 @@ func main() {
 	if os.Getenv("GOQUEUE_CLUSTER_ENABLED") == "true" {
 		fmt.Println("🔗 Cluster mode enabled")
 		config.ClusterEnabled = true
+
+		// ClientAdvertiseAddress is used for inter-node forwarding (where producers
+		// should connect when forwarded). Falls back to listener address if not set.
+		clientAdvertise := os.Getenv("GOQUEUE_CLUSTER_CLIENT_ADVERTISE")
+		if clientAdvertise == "" {
+			clientAdvertise = normalizeAddr(getEnvOrDefault("GOQUEUE_LISTENERS_HTTP", "8080"))
+		}
+
 		config.ClusterConfig = &broker.ClusterModeConfig{
 			// normalizeAddr ensures we have a valid :port format
 			// Handles both "8080" and ":8080" input formats
-			ClientAddress:    normalizeAddr(getEnvOrDefault("GOQUEUE_LISTENERS_HTTP", "8080")),
+			ClientAddress:    clientAdvertise, // Use advertised address for forwarding
 			ClusterAddress:   normalizeAddr(getEnvOrDefault("GOQUEUE_LISTENERS_INTERNAL", "7000")),
 			AdvertiseAddress: os.Getenv("GOQUEUE_CLUSTER_ADVERTISE"),
 			Peers:            splitPeers(os.Getenv("GOQUEUE_CLUSTER_PEERS")),
@@ -104,6 +112,7 @@ func main() {
 		}
 		fmt.Printf("   ✓ Peers: %v\n", config.ClusterConfig.Peers)
 		fmt.Printf("   ✓ Advertise: %s\n", config.ClusterConfig.AdvertiseAddress)
+		fmt.Printf("   ✓ Client Advertise: %s\n", config.ClusterConfig.ClientAddress)
 	}
 
 	// Read node ID from environment (for Kubernetes, this is the pod name)

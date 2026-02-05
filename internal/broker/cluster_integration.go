@@ -20,8 +20,11 @@
 package broker
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"time"
@@ -169,6 +172,30 @@ func (cc *clusterCoordinator) GetLeader(topic string, partition int) cluster.Nod
 		return cc.coordinator.Node().ID() // Self is leader if no assignment
 	}
 	return assign.Leader
+}
+
+// GetLeaderClientAddress returns the client-facing address of the partition leader.
+//
+// WHY CLIENT ADDRESS (not cluster address)?
+//   The client address is where producers/consumers connect. When we forward
+//   a publish request, we're acting as a proxy for the producer, so we need
+//   to hit the same HTTP API port they would use.
+//
+// RETURNS:
+//   - Empty string if leader not found or is self
+//   - Format: "host:port" (e.g., "goqueue-0.goqueue.svc:8080")
+//
+func (cc *clusterCoordinator) GetLeaderClientAddress(topic string, partition int) string {
+	leaderID := cc.GetLeader(topic, partition)
+	if leaderID == cc.coordinator.Node().ID() {
+		return "" // We are the leader
+	}
+
+	nodeInfo := cc.coordinator.Membership().GetNode(leaderID)
+	if nodeInfo == nil {
+		return ""
+	}
+	return nodeInfo.ClientAddress.String()
 }
 
 // GetReplicas returns the replica node IDs for a partition.
@@ -449,6 +476,126 @@ func (cc *clusterCoordinator) handleCoordinatorEvent(event cluster.CoordinatorEv
 	case cluster.EventQuorumLost:
 		cc.logger.Warn("cluster lost quorum - some operations may fail")
 	}
+}
+
+// =============================================================================
+// REQUEST FORWARDING
+// =============================================================================
+//
+// WHY FORWARD REQUESTS?
+//   In a partitioned queue system, each partition has exactly ONE leader.
+//   Writes must go to the leader to maintain ordering and consistency.
+//
+// FLOW:
+//   ┌──────────┐  publish   ┌───────────────┐  not leader  ┌───────────────┐
+//   │ Producer │───────────►│ goqueue-1     │─────────────►│ goqueue-0     │
+//   └──────────┘            │ (any node)    │              │ (leader)      │
+//        ▲                  └───────────────┘              └───────┬───────┘
+//        │                                                         │
+//        │◄────────────────────────────────────────────────────────┘
+//                            forwarded response
+//
+// COMPARISON:
+//   - Kafka: Clients get metadata and connect directly to leaders
+//   - RabbitMQ: Queue mirrors have one master, requests forwarded
+//   - Redis Cluster: MOVED error tells client where to go
+//   - goqueue: Transparent forwarding (client doesn't need to know)
+//
+// TRANSPARENCY:
+//   The producer doesn't know their request was forwarded. This simplifies
+//   client implementation but adds one network hop for non-leader requests.
+//
+// =============================================================================
+
+// ForwardPublishRequest is the request format for forwarded publishes.
+type ForwardPublishRequest struct {
+	Key       []byte `json:"key,omitempty"`
+	Value     []byte `json:"value"`
+	Partition int    `json:"partition"`
+}
+
+// ForwardPublishResponse is the response from a forwarded publish.
+type ForwardPublishResponse struct {
+	Partition int    `json:"partition"`
+	Offset    int64  `json:"offset"`
+	Error     string `json:"error,omitempty"`
+}
+
+// ForwardPublish forwards a publish request to the partition leader.
+//
+// WHY THIS EXISTS:
+//   When a producer publishes to a partition we don't lead, we forward
+//   the request to the actual leader rather than failing.
+//
+// PARAMETERS:
+//   - ctx: Context for timeout/cancellation
+//   - leaderAddr: The leader's client address (host:port)
+//   - topic: Topic name
+//   - partition: Target partition number
+//   - key: Message routing key
+//   - value: Message payload
+//
+// RETURNS:
+//   - offset: The offset assigned by the leader
+//   - error: If forwarding fails or leader returns error
+//
+func (cc *clusterCoordinator) ForwardPublish(ctx context.Context, leaderAddr string, topic string, partition int, key, value []byte) (int64, error) {
+	// Build request
+	reqBody := ForwardPublishRequest{
+		Key:       key,
+		Value:     value,
+		Partition: partition,
+	}
+
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return 0, fmt.Errorf("marshal request: %w", err)
+	}
+
+	// Build URL: POST /topics/{topic}/messages/forward
+	url := fmt.Sprintf("http://%s/topics/%s/messages/forward", leaderAddr, topic)
+
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return 0, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	// Execute request
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("forward request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Read response
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, fmt.Errorf("read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("leader returned %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	// Parse response
+	var result ForwardPublishResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return 0, fmt.Errorf("parse response: %w", err)
+	}
+
+	if result.Error != "" {
+		return 0, fmt.Errorf("leader error: %s", result.Error)
+	}
+
+	cc.logger.Debug("forwarded publish to leader",
+		"topic", topic,
+		"partition", partition,
+		"leader", leaderAddr,
+		"offset", result.Offset)
+
+	return result.Offset, nil
 }
 
 // =============================================================================

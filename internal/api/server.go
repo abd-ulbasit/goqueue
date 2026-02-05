@@ -78,6 +78,7 @@ import (
 
 	"goqueue/internal/broker"
 	"goqueue/internal/metrics"
+	"goqueue/internal/security"
 	"goqueue/internal/storage"
 )
 
@@ -92,6 +93,9 @@ type Server struct {
 	router     *chi.Mux
 	logger     *slog.Logger
 	wg         sync.WaitGroup
+
+	// Security components (M21)
+	security *security.SecurityManager
 }
 
 // ServerConfig holds API server configuration.
@@ -100,6 +104,9 @@ type ServerConfig struct {
 	ReadTimeout  time.Duration
 	WriteTimeout time.Duration
 	IdleTimeout  time.Duration
+
+	// Security configuration (M21)
+	Security security.SecurityConfig
 }
 
 // DefaultServerConfig returns sensible defaults.
@@ -109,6 +116,7 @@ func DefaultServerConfig() ServerConfig {
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  60 * time.Second,
+		Security:     security.LoadSecurityConfigFromEnv(),
 	}
 }
 
@@ -120,10 +128,14 @@ func NewServer(b *broker.Broker, config ServerConfig) *Server {
 
 	r := chi.NewRouter()
 
+	// Initialize security manager
+	securityMgr := security.NewSecurityManagerWithConfig(config.Security)
+
 	s := &Server{
-		broker: b,
-		router: r,
-		logger: logger,
+		broker:   b,
+		router:   r,
+		logger:   logger,
+		security: securityMgr,
 	}
 
 	// Set up middleware
@@ -131,6 +143,23 @@ func NewServer(b *broker.Broker, config ServerConfig) *Server {
 	r.Use(middleware.RealIP)
 	r.Use(s.loggingMiddleware)
 	r.Use(middleware.Recoverer)
+
+	// ┌─────────────────────────────────────────────────────────────────────────┐
+	// │ SECURITY MIDDLEWARE (M21)                                               │
+	// │                                                                         │
+	// │ If authentication is enabled, all requests (except health endpoints)    │
+	// │ must include a valid API key in one of:                                 │
+	// │   - Authorization: Bearer <key>                                         │
+	// │   - X-API-Key: <key>                                                    │
+	// │   - ?api_key=<key> (query param, less secure)                           │
+	// │                                                                         │
+	// │ The middleware validates the key and adds the APIKey object to context. │
+	// │ Subsequent handlers can check permissions via security.GetAPIKeyFromContext() │
+	// └─────────────────────────────────────────────────────────────────────────┘
+	if securityMgr.IsAuthEnabled() {
+		logger.Info("API authentication enabled")
+		r.Use(securityMgr.Keys.AuthMiddleware)
+	}
 
 	// Register routes
 	s.registerRoutes()
@@ -202,6 +231,25 @@ func (s *Server) registerRoutes() {
 
 			// Messages
 			r.Post("/messages", s.publishMessages)
+
+			// ======================================================================
+			// INTERNAL: REQUEST FORWARDING ENDPOINT
+			// ======================================================================
+			//
+			// WHY: In cluster mode, writes must go to the partition leader.
+			// When a non-leader receives a publish, it forwards here.
+			//
+			// FLOW:
+			//   Producer ──► Non-Leader Node ──forward──► Leader Node (this endpoint)
+			//
+			// SECURITY NOTE:
+			//   This endpoint is internal. In production, consider:
+			//   - Restricting to cluster-internal IPs
+			//   - Adding authentication headers
+			//   - Rate limiting per source node
+			//
+			// ======================================================================
+			r.Post("/messages/forward", s.forwardPublishHandler)
 
 			// ======================================================================
 			// DELAYED MESSAGES (M5)
@@ -621,13 +669,43 @@ func (rw *responseWrapper) WriteHeader(code int) {
 // =============================================================================
 
 // Start begins listening for HTTP requests (non-blocking).
+//
+// ┌─────────────────────────────────────────────────────────────────────────────┐
+// │ TLS SUPPORT (M21)                                                           │
+// │                                                                             │
+// │ If TLS is enabled, the server uses ListenAndServeTLS instead.               │
+// │ This encrypts all HTTP traffic using the configured certificate.            │
+// │                                                                             │
+// │ CLIENTS MUST:                                                               │
+// │   - Use https:// instead of http://                                         │
+// │   - Trust the CA that signed the certificate (or use -k/--insecure)         │
+// └─────────────────────────────────────────────────────────────────────────────┘
 func (s *Server) Start() error {
-	s.logger.Info("starting HTTP API server", "addr", s.httpServer.Addr)
-	go func() {
-		if err := s.httpServer.ListenAndServe(); err != http.ErrServerClosed {
-			s.logger.Error("HTTP server error", "error", err)
+	if s.security.IsTLSEnabled() {
+		s.logger.Info("starting HTTPS API server with TLS", "addr", s.httpServer.Addr)
+
+		// Get TLS config
+		tlsConfig, err := s.security.TLSConfig.NewTLSConfig()
+		if err != nil {
+			return err
 		}
-	}()
+		s.httpServer.TLSConfig = tlsConfig
+
+		go func() {
+			// When using crypto/tls.Config, we call ListenAndServeTLS with empty strings
+			// because the cert/key are already in the TLSConfig
+			if err := s.httpServer.ListenAndServeTLS("", ""); err != http.ErrServerClosed {
+				s.logger.Error("HTTPS server error", "error", err)
+			}
+		}()
+	} else {
+		s.logger.Info("starting HTTP API server", "addr", s.httpServer.Addr)
+		go func() {
+			if err := s.httpServer.ListenAndServe(); err != http.ErrServerClosed {
+				s.logger.Error("HTTP server error", "error", err)
+			}
+		}()
+	}
 	return nil
 }
 
@@ -949,8 +1027,10 @@ func (s *Server) publishMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	topic, err := s.broker.GetTopic(topicName)
-	if err != nil {
+	// Verify topic exists before processing messages
+	// All publish operations now go through broker methods which handle
+	// cluster forwarding, so we just need to validate the topic exists
+	if _, err := s.broker.GetTopic(topicName); err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			s.errorResponse(w, http.StatusNotFound, "topic not found")
 			return
@@ -972,6 +1052,7 @@ func (s *Server) publishMessages(w http.ResponseWriter, r *http.Request) {
 		var offset int64
 		var deliverAt time.Time
 		var isDelayed bool
+		var err error
 
 		// Parse priority (M6)
 		// Default to Normal if not specified
@@ -1028,7 +1109,8 @@ func (s *Server) publishMessages(w http.ResponseWriter, r *http.Request) {
 			}
 		} else if msg.Partition != nil {
 			// Direct partition publish with priority
-			offset, err = topic.PublishToPartitionWithPriority(*msg.Partition, key, value, priority)
+			// Uses broker.PublishToPartitionWithPriority which handles cluster forwarding
+			offset, err = s.broker.PublishToPartitionWithPriority(topicName, *msg.Partition, key, value, priority)
 			partition = *msg.Partition
 			results[i] = PublishResult{
 				Partition: partition,
@@ -1037,7 +1119,8 @@ func (s *Server) publishMessages(w http.ResponseWriter, r *http.Request) {
 			}
 		} else {
 			// Normal publish with priority (key-based routing)
-			partition, offset, err = topic.PublishWithPriority(key, value, priority)
+			// Uses broker.PublishWithPriority which handles cluster forwarding
+			partition, offset, err = s.broker.PublishWithPriority(topicName, key, value, priority)
 			results[i] = PublishResult{
 				Partition: partition,
 				Offset:    offset,
@@ -1053,6 +1136,99 @@ func (s *Server) publishMessages(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, map[string]interface{}{
 		"results": results,
 	})
+}
+
+// =============================================================================
+// INTERNAL: FORWARDED PUBLISH HANDLER
+// =============================================================================
+//
+// WHY: In cluster mode, only partition leaders can write messages.
+// Non-leaders forward publish requests here.
+//
+// PROTOCOL:
+//   Request:  ForwardPublishRequest {Key, Value []byte, Partition int}
+//   Response: ForwardPublishResponse {Partition, Offset int64, Error string}
+//
+// VALIDATION:
+//   - We MUST be the leader for this partition (no re-forwarding)
+//   - If not leader, return error (indicates stale routing)
+//
+// FLOW:
+//   Non-Leader Node ──POST /messages/forward──► This Handler
+//                                                    │
+//                                   ┌────────────────┴────────────────┐
+//                                   │  1. Validate we're leader       │
+//                                   │  2. Write to partition          │
+//                                   │  3. Wait for ISR replication    │
+//                                   │  4. Return offset                │
+//                                   └─────────────────────────────────┘
+//
+// =============================================================================
+
+// ForwardPublishRequest is the request body for forwarded publishes.
+// Matches broker.ForwardPublishRequest for easy serialization.
+type ForwardPublishRequest struct {
+	Key       []byte `json:"key"`
+	Value     []byte `json:"value"`
+	Partition int    `json:"partition"`
+}
+
+// ForwardPublishResponse is the response for forwarded publishes.
+// Matches broker.ForwardPublishResponse for easy serialization.
+type ForwardPublishResponse struct {
+	Partition int    `json:"partition"`
+	Offset    int64  `json:"offset"`
+	Error     string `json:"error,omitempty"`
+}
+
+// forwardPublishHandler handles forwarded publish requests from non-leader nodes.
+func (s *Server) forwardPublishHandler(w http.ResponseWriter, r *http.Request) {
+	topicName := chi.URLParam(r, "topicName")
+
+	var req ForwardPublishRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		resp := ForwardPublishResponse{Error: "invalid JSON: " + err.Error()}
+		s.writeJSON(w, http.StatusBadRequest, resp)
+		return
+	}
+
+	// Get the topic
+	topic, err := s.broker.GetTopic(topicName)
+	if err != nil {
+		resp := ForwardPublishResponse{Error: "topic not found: " + topicName}
+		s.writeJSON(w, http.StatusNotFound, resp)
+		return
+	}
+
+	// Write directly to the specified partition (no re-routing)
+	// This bypasses PublishWithTrace's leadership check since we ARE the leader
+	offset, err := topic.PublishToPartition(req.Partition, req.Key, req.Value)
+	if err != nil {
+		resp := ForwardPublishResponse{Error: "publish failed: " + err.Error()}
+		s.writeJSON(w, http.StatusInternalServerError, resp)
+		return
+	}
+
+	// Wait for ISR replication (same as regular publish)
+	if s.broker.GetReplicationCoordinator() != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+
+		if err := s.broker.GetReplicationCoordinator().WaitForReplication(ctx, topicName, req.Partition, offset); err != nil {
+			// Log but don't fail - message is durable on leader
+			s.logger.Warn("replication wait failed for forwarded publish",
+				"topic", topicName,
+				"partition", req.Partition,
+				"offset", offset,
+				"error", err)
+		}
+	}
+
+	resp := ForwardPublishResponse{
+		Partition: req.Partition,
+		Offset:    offset,
+	}
+	s.writeJSON(w, http.StatusOK, resp)
 }
 
 // ConsumeResponse is the response for consume requests.

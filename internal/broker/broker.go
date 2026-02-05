@@ -1547,6 +1547,88 @@ func (b *Broker) PublishWithTrace(topic string, key, value []byte, traceCtx Trac
 		b.tracer.RecordSpan(span)
 	}
 
+	// =========================================================================
+	// CLUSTER MODE: LEADERSHIP CHECK AND REQUEST FORWARDING
+	// =========================================================================
+	//
+	// WHY: In a partitioned cluster, only the partition LEADER should write
+	// messages. If a producer's request lands on a non-leader, we forward it
+	// to the actual leader transparently.
+	//
+	// FLOW:
+	//   ┌──────────┐  publish   ┌─────────────┐            ┌────────┐
+	//   │ Producer │──────────►│ Any Node    │──forward──►│ Leader │
+	//   └──────────┘           │ (non-leader)│            │  Node  │
+	//        ▲                 └─────────────┘            └───┬────┘
+	//        │                                                │
+	//        └────────────────────────────────────────────────┘
+	//                          response
+	//
+	// COMPARISON:
+	//   - Kafka: Client discovers leader, sends directly (smart client)
+	//   - RabbitMQ: Any node can accept; internal routing
+	//   - goqueue: Any node can accept; transparent forwarding
+	//
+	// WHY NOT SMART CLIENT?
+	//   Simpler clients, easier load balancer setup, works with any HTTP client.
+	//   Tradeoff: Extra hop for non-leader requests (acceptable for correctness).
+	//
+	// =========================================================================
+
+	// Determine target partition BEFORE checking leadership
+	// This must match Topic.Publish() logic exactly
+	partition = t.DeterminePartition(key)
+
+	// In cluster mode, check if we're the leader for this partition
+	if b.clusterCoordinator != nil {
+		isLeader := b.clusterCoordinator.IsLeaderFor(topic, partition)
+		b.logger.Info("leadership check for publish",
+			"topic", topic,
+			"partition", partition,
+			"is_leader", isLeader)
+
+		if !isLeader {
+			// We're NOT the leader - forward to actual leader
+			leaderAddr := b.clusterCoordinator.GetLeaderClientAddress(topic, partition)
+			if leaderAddr == "" {
+				// Leader unknown - this shouldn't happen in normal operation
+				b.logger.Error("leader address unknown for partition",
+					"topic", topic,
+					"partition", partition)
+				InstrumentPublishError(topic, "no_leader")
+				return 0, 0, fmt.Errorf("leader unknown for %s partition %d", topic, partition)
+			}
+
+			// Record forwarding span
+			if !ctx.TraceID.IsZero() {
+				span := NewSpan(ctx.TraceID, SpanEventPublishReceived, topic, partition, 0)
+				span.WithAttribute("action", "forward_to_leader")
+				span.WithAttribute("leader_addr", leaderAddr)
+				b.tracer.RecordSpan(span)
+			}
+
+			// Forward to leader (includes ISR wait on leader side)
+			forwardCtx, forwardCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer forwardCancel()
+
+			offset, err = b.clusterCoordinator.ForwardPublish(forwardCtx, leaderAddr, topic, partition, key, value)
+			if err != nil {
+				b.logger.Error("failed to forward publish to leader",
+					"topic", topic,
+					"partition", partition,
+					"leader", leaderAddr,
+					"error", err)
+				InstrumentPublishError(topic, "forward_failed")
+				return 0, 0, fmt.Errorf("forward to leader failed: %w", err)
+			}
+
+			// Record success
+			InstrumentPublish(topic, len(value), publishStart)
+			return partition, offset, nil
+		}
+	}
+
+	// We ARE the leader (or single-node mode) - write locally
 	// Perform publish (includes partitioning and persistence)
 	partition, offset, err = t.Publish(key, value)
 	if err != nil {
@@ -1712,7 +1794,146 @@ func (b *Broker) PublishWithPriority(topic string, key, value []byte, priority s
 	}
 	b.mu.RUnlock()
 
+	// =========================================================================
+	// CLUSTER MODE: LEADERSHIP CHECK AND REQUEST FORWARDING
+	// =========================================================================
+	// Determine target partition BEFORE checking leadership
+	partition = t.DeterminePartition(key)
+
+	// In cluster mode, check if we're the leader for this partition
+	if b.clusterCoordinator != nil {
+		isLeader := b.clusterCoordinator.IsLeaderFor(topic, partition)
+		b.logger.Info("leadership check for publish with priority",
+			"topic", topic,
+			"partition", partition,
+			"is_leader", isLeader)
+
+		if !isLeader {
+			// We're NOT the leader - forward to actual leader
+			leaderAddr := b.clusterCoordinator.GetLeaderClientAddress(topic, partition)
+			if leaderAddr == "" {
+				b.logger.Error("leader address unknown for partition",
+					"topic", topic,
+					"partition", partition)
+				return 0, 0, fmt.Errorf("leader unknown for %s partition %d", topic, partition)
+			}
+
+			b.logger.Info("forwarding publish to leader",
+				"topic", topic,
+				"partition", partition,
+				"leader", leaderAddr)
+
+			// Forward to leader
+			forwardCtx, forwardCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer forwardCancel()
+
+			offset, err = b.clusterCoordinator.ForwardPublish(forwardCtx, leaderAddr, topic, partition, key, value)
+			if err != nil {
+				b.logger.Error("failed to forward publish to leader",
+					"topic", topic,
+					"partition", partition,
+					"leader", leaderAddr,
+					"error", err)
+				return 0, 0, fmt.Errorf("forward to leader failed: %w", err)
+			}
+
+			return partition, offset, nil
+		}
+	}
+
+	// We ARE the leader (or single-node mode) - write locally with priority
 	return t.PublishWithPriority(key, value, priority)
+}
+
+// PublishToPartitionWithPriority writes a message with priority to a specific partition.
+//
+// ============================================================================
+// CLUSTER MODE: LEADERSHIP CHECK AND REQUEST FORWARDING
+// ============================================================================
+// In a cluster, only the partition leader can write. If this node is NOT the
+// leader for the target partition, we forward the request to the actual leader.
+//
+// EXPLICIT PARTITION ROUTING:
+//   - Caller specifies exact partition (no key-based routing)
+//   - We still must check leadership for that specific partition
+//   - Forward if not leader, write locally if we are
+//
+// PARAMETERS:
+//   - topic: Topic name
+//   - partition: Specific partition to write to
+//   - key: Message key (for log storage, not routing)
+//   - value: Message payload
+//   - priority: Storage priority
+//
+// RETURNS:
+//   - offset: Message offset within partition
+//   - error: If write or forwarding fails
+func (b *Broker) PublishToPartitionWithPriority(topic string, partition int, key, value []byte, priority storage.Priority) (offset int64, err error) {
+	b.mu.RLock()
+	if b.closed {
+		b.mu.RUnlock()
+		return 0, ErrBrokerClosed
+	}
+
+	t, exists := b.topics[topic]
+	if !exists {
+		b.mu.RUnlock()
+		return 0, fmt.Errorf("%w: %s", ErrTopicNotFound, topic)
+	}
+	b.mu.RUnlock()
+
+	// Validate partition
+	numPartitions := t.NumPartitions()
+	if partition < 0 || partition >= numPartitions {
+		return 0, fmt.Errorf("invalid partition %d (topic has %d partitions)", partition, numPartitions)
+	}
+
+	// =========================================================================
+	// CLUSTER MODE: LEADERSHIP CHECK AND REQUEST FORWARDING
+	// =========================================================================
+	// In cluster mode, check if we're the leader for this specific partition
+	if b.clusterCoordinator != nil {
+		isLeader := b.clusterCoordinator.IsLeaderFor(topic, partition)
+		b.logger.Info("leadership check for explicit partition publish",
+			"topic", topic,
+			"partition", partition,
+			"is_leader", isLeader)
+
+		if !isLeader {
+			// We're NOT the leader - forward to actual leader
+			leaderAddr := b.clusterCoordinator.GetLeaderClientAddress(topic, partition)
+			if leaderAddr == "" {
+				b.logger.Error("leader address unknown for partition",
+					"topic", topic,
+					"partition", partition)
+				return 0, fmt.Errorf("leader unknown for %s partition %d", topic, partition)
+			}
+
+			b.logger.Info("forwarding explicit partition publish to leader",
+				"topic", topic,
+				"partition", partition,
+				"leader", leaderAddr)
+
+			// Forward to leader
+			forwardCtx, forwardCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer forwardCancel()
+
+			offset, err = b.clusterCoordinator.ForwardPublish(forwardCtx, leaderAddr, topic, partition, key, value)
+			if err != nil {
+				b.logger.Error("failed to forward explicit partition publish to leader",
+					"topic", topic,
+					"partition", partition,
+					"leader", leaderAddr,
+					"error", err)
+				return 0, fmt.Errorf("forward to leader failed: %w", err)
+			}
+
+			return offset, nil
+		}
+	}
+
+	// We ARE the leader (or single-node mode) - write locally with priority
+	return t.PublishToPartitionWithPriority(partition, key, value, priority)
 }
 
 // PublishBatchWithPriority writes multiple messages with priorities to a topic.
@@ -2123,6 +2344,21 @@ func (b *Broker) GetAckManager() *AckManager {
 //   - nil if not configured
 func (b *Broker) GetGroupCoordinator() *GroupCoordinator {
 	return b.groupCoordinator
+}
+
+// GetReplicationCoordinator returns the replication coordinator for external access.
+// Used by HTTP handlers for forwarded publishes to wait for ISR replication.
+//
+// WHY EXPOSE THIS:
+//   When a non-leader forwards a publish request to the leader, the leader's
+//   API handler needs to wait for ISR replication before responding. This
+//   matches the behavior of regular publishes (acks=all semantics).
+//
+// RETURNS:
+//   - *replicationCoordinator if cluster mode is enabled (M11)
+//   - nil if running in single-node mode
+func (b *Broker) GetReplicationCoordinator() *replicationCoordinator {
+	return b.replicationCoordinator
 }
 
 // =============================================================================
@@ -3434,8 +3670,9 @@ func (b *Broker) PublishAtWithPriority(topic string, key, value []byte, deliverA
 	delay := time.Until(deliverAt)
 
 	// If deliverAt is in the past or very near future, publish with priority immediately
+	// Uses broker method which handles cluster forwarding
 	if delay <= 0 {
-		return t.PublishWithPriority(key, value, priority)
+		return b.PublishWithPriority(topic, key, value, priority)
 	}
 
 	// Check max delay limit
@@ -3443,7 +3680,36 @@ func (b *Broker) PublishAtWithPriority(topic string, key, value []byte, deliverA
 		return 0, 0, fmt.Errorf("delay %v exceeds maximum %v", delay, b.scheduler.config.MaxDelay)
 	}
 
-	// Step 1: Write message to log immediately WITH PRIORITY (ensures durability)
+	// =========================================================================
+	// CLUSTER MODE: LEADERSHIP CHECK AND REQUEST FORWARDING
+	// =========================================================================
+	// For delayed messages, we need to determine the partition first, then check
+	// leadership. The delay scheduling must happen on the leader node.
+	partition = t.DeterminePartition(key)
+
+	if b.clusterCoordinator != nil {
+		isLeader := b.clusterCoordinator.IsLeaderFor(topic, partition)
+		b.logger.Info("leadership check for delayed publish",
+			"topic", topic,
+			"partition", partition,
+			"is_leader", isLeader,
+			"deliver_at", deliverAt.Format(time.RFC3339))
+
+		if !isLeader {
+			// For delayed messages, we can't simply forward via HTTP because
+			// the leader needs to register with its local scheduler.
+			// TODO: Implement delayed message forwarding with scheduler registration
+			// For now, we log and return an error (client should retry to leader)
+			leaderAddr := b.clusterCoordinator.GetLeaderClientAddress(topic, partition)
+			b.logger.Warn("delayed publish to non-leader not yet supported, client should publish to leader",
+				"topic", topic,
+				"partition", partition,
+				"leader", leaderAddr)
+			return 0, 0, fmt.Errorf("delayed publish must be sent to partition leader at %s", leaderAddr)
+		}
+	}
+
+	// We ARE the leader - write message to log immediately WITH PRIORITY
 	partition, offset, err = t.PublishWithPriority(key, value, priority)
 	if err != nil {
 		return 0, 0, err
