@@ -80,9 +80,9 @@ variable "cluster_name" {
 }
 
 variable "cluster_version" {
-  description = "Kubernetes version for EKS"
+  description = "Kubernetes version for EKS (use 1.31+ for standard support pricing)"
   type        = string
-  default     = "1.29"
+  default     = "1.31"
 }
 
 variable "vpc_cidr" {
@@ -236,7 +236,24 @@ module "eks" {
   cluster_name    = var.cluster_name
   cluster_version = var.cluster_version
 
-  # Cluster access
+  # ┌─────────────────────────────────────────────────────────────────────────┐
+  # │ CLUSTER ACCESS CONFIGURATION                                            │
+  # │                                                                         │
+  # │ With EKS 1.28+, AWS uses the EKS Access Entry API by default.           │
+  # │ This replaces the old aws-auth ConfigMap approach.                      │
+  # │                                                                         │
+  # │ enable_cluster_creator_admin_permissions = true:                        │
+  # │   Automatically grants the IAM user/role that creates the cluster       │
+  # │   full admin access. Without this, even the cluster creator can't       │
+  # │   access Kubernetes APIs!                                               │
+  # │                                                                         │
+  # │ COMPARISON:                                                             │
+  # │   - Old way (pre-1.28): aws-auth ConfigMap in kube-system               │
+  # │   - New way (1.28+): EKS Access Entry API (more secure, auditable)      │
+  # └─────────────────────────────────────────────────────────────────────────┘
+  enable_cluster_creator_admin_permissions = true
+
+  # Cluster endpoint access
   cluster_endpoint_public_access  = true
   cluster_endpoint_private_access = true
 
@@ -432,13 +449,143 @@ resource "kubernetes_namespace" "goqueue" {
   depends_on = [module.eks]
 }
 
+# Create namespace for monitoring
+resource "kubernetes_namespace" "monitoring" {
+  count = var.install_prometheus ? 1 : 0
+
+  metadata {
+    name = "monitoring"
+    labels = {
+      name = "monitoring"
+    }
+  }
+
+  depends_on = [module.eks]
+}
+
+# =============================================================================
+# PROMETHEUS OPERATOR (kube-prometheus-stack)
+# =============================================================================
+#
+# ┌─────────────────────────────────────────────────────────────────────────────┐
+# │ WHY PROMETHEUS OPERATOR?                                                    │
+# │                                                                             │
+# │ The Prometheus Operator provides:                                           │
+# │   1. CRDs: ServiceMonitor, PrometheusRule, PodMonitor                       │
+# │   2. Automatic Prometheus config updates (no manual prometheus.yml)         │
+# │   3. Grafana with pre-built dashboards                                      │
+# │   4. Alertmanager for alerting                                              │
+# │                                                                             │
+# │ WITHOUT THIS: GoQueue's ServiceMonitor/PrometheusRule resources will fail   │
+# │ with "no matches for kind ServiceMonitor in version monitoring.coreos.com"  │
+# │                                                                             │
+# │ PREVIOUS BUG: The agent disabled metrics instead of installing this first!  │
+# └─────────────────────────────────────────────────────────────────────────────┘
+
+resource "helm_release" "prometheus_operator" {
+  count = var.install_prometheus ? 1 : 0
+
+  name       = "kube-prometheus-stack"
+  namespace  = kubernetes_namespace.monitoring[0].metadata[0].name
+  repository = "https://prometheus-community.github.io/helm-charts"
+  chart      = "kube-prometheus-stack"
+  version    = "65.1.0"  # Latest stable as of 2026
+
+  # Reduced resource footprint for dev environment
+  values = [
+    yamlencode({
+      # Prometheus
+      prometheus = {
+        prometheusSpec = {
+          retention = "7d"
+          resources = {
+            limits = {
+              cpu    = "500m"
+              memory = "1Gi"
+            }
+            requests = {
+              cpu    = "200m"
+              memory = "512Mi"
+            }
+          }
+          # Scrape GoQueue namespace
+          serviceMonitorSelectorNilUsesHelmValues = false
+          podMonitorSelectorNilUsesHelmValues     = false
+          ruleSelectorNilUsesHelmValues           = false
+        }
+      }
+
+      # Grafana
+      grafana = {
+        enabled = true
+        adminPassword = "admin"  # Change in production!
+        resources = {
+          limits = {
+            cpu    = "200m"
+            memory = "256Mi"
+          }
+          requests = {
+            cpu    = "100m"
+            memory = "128Mi"
+          }
+        }
+      }
+
+      # Alertmanager (minimal for dev)
+      alertmanager = {
+        enabled = true
+        alertmanagerSpec = {
+          resources = {
+            limits = {
+              cpu    = "100m"
+              memory = "128Mi"
+            }
+            requests = {
+              cpu    = "50m"
+              memory = "64Mi"
+            }
+          }
+        }
+      }
+
+      # Disable unused exporters for dev
+      kubeStateMetrics = {
+        enabled = true
+      }
+      nodeExporter = {
+        enabled = true
+      }
+      kubeEtcd = {
+        enabled = false
+      }
+      kubeControllerManager = {
+        enabled = false
+      }
+      kubeScheduler = {
+        enabled = false
+      }
+      kubeProxy = {
+        enabled = false
+      }
+    })
+  ]
+
+  timeout = 600  # 10 minutes for CRD installation
+  wait    = true
+
+  depends_on = [
+    kubernetes_namespace.monitoring,
+    module.eks
+  ]
+}
+
 # GoQueue Helm release
 resource "helm_release" "goqueue" {
   name      = "goqueue"
   namespace = kubernetes_namespace.goqueue.metadata[0].name
   # path.module is the directory containing this .tf file
-  # From deploy/terraform/modules/aws, we go to deploy/kubernetes/helm/goqueue
-  chart     = "${path.module}/../../kubernetes/helm/goqueue"
+  # From deploy/terraform/modules/aws, we go up 3 levels to deploy/kubernetes/helm/goqueue
+  chart     = abspath("${path.module}/../../../kubernetes/helm/goqueue")
 
   # ┌─────────────────────────────────────────────────────────────────────────┐
   # │ HELM VALUES CONFIGURATION                                               │
@@ -533,17 +680,24 @@ resource "helm_release" "goqueue" {
       # Metrics - enable Prometheus scraping
       metrics = {
         enabled = var.install_prometheus
+        serviceMonitor = {
+          enabled = var.install_prometheus
+        }
+        prometheusRule = {
+          enabled = var.install_prometheus
+        }
       }
     })
   ]
 
-  # Wait for storage class and EKS to be ready
+  # Wait for storage class, EKS, and Prometheus Operator (if enabled) to be ready
   timeout = 600 # 10 minutes for initial deployment
   wait    = true
 
   depends_on = [
     kubernetes_storage_class.gp3,
-    module.eks
+    module.eks,
+    helm_release.prometheus_operator  # CRITICAL: Wait for Prometheus Operator CRDs!
   ]
 }
 
