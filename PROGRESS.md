@@ -1090,42 +1090,6 @@ Refactor the HTTP SERVERs and generate the POST MAN documentation and anyother t
 
 
 
-3. M20: Production Metrics (MEDIUM PRIORITY)
-Why: Can't operate what you can't observe
-Work:
-- Consumer lag metrics (critical for alerting)
-- Replication lag metrics
-- Partition leader distribution
-- Request latency histograms
-- Grafana dashboard
-
-Time: 1 session
-Complexity: Low
-
- M21: Security (TLS + Auth)
- Work:
-- TLS for HTTP and gRPC APIs
-- TLS for inter-node communication
-- API key authentication
-- RBAC for topics/consumer groups
-
-Time: 1-2 sessions
-Complexity: Medium
-
- M23: Schema Registry (NICE TO HAVE)
-Why: Data governance for production use
-Work:
-- Schema storage and versioning
-- Compatibility checks (forward/backward)
-- Integration with serialization
-
-Time: 1 session
-Complexity: Medium
-
-
-
-
-
 # Deploy everything
 ./deploy/tf.sh up        # ~15-20 min, configures kubectl automatically
 

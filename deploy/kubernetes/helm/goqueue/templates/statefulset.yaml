@@ -195,6 +195,87 @@ spec:
               value: {{ .Values.config.logging.level | quote }}
             - name: GOQUEUE_LOG_FORMAT
               value: {{ .Values.config.logging.format | quote }}
+            
+            # ═══════════════════════════════════════════════════════════════════
+            # SECURITY CONFIGURATION (M21)
+            # ═══════════════════════════════════════════════════════════════════
+            {{- if .Values.security.tls.enabled }}
+            # TLS for HTTP/gRPC APIs
+            - name: GOQUEUE_TLS_ENABLED
+              value: "true"
+            {{- if .Values.security.tls.selfSigned }}
+            - name: GOQUEUE_TLS_CERT_FILE
+              value: "/certs/tls/tls.crt"
+            - name: GOQUEUE_TLS_KEY_FILE
+              value: "/certs/tls/tls.key"
+            - name: GOQUEUE_TLS_CA_FILE
+              value: "/certs/tls/ca.crt"
+            {{- else if .Values.security.tls.existingSecret }}
+            - name: GOQUEUE_TLS_CERT_FILE
+              value: "/certs/tls/tls.crt"
+            - name: GOQUEUE_TLS_KEY_FILE
+              value: "/certs/tls/tls.key"
+            {{- else if .Values.security.tls.certFile }}
+            - name: GOQUEUE_TLS_CERT_FILE
+              value: {{ .Values.security.tls.certFile | quote }}
+            - name: GOQUEUE_TLS_KEY_FILE
+              value: {{ .Values.security.tls.keyFile | quote }}
+            {{- end }}
+            - name: GOQUEUE_TLS_MIN_VERSION
+              value: {{ .Values.security.tls.minVersion | quote }}
+            {{- end }}
+            
+            {{- if .Values.security.clusterTls.enabled }}
+            # mTLS for inter-node communication
+            - name: GOQUEUE_CLUSTER_TLS_ENABLED
+              value: "true"
+            {{- if .Values.security.clusterTls.selfSigned }}
+            - name: GOQUEUE_CLUSTER_TLS_CERT_FILE
+              value: "/certs/cluster-tls/tls.crt"
+            - name: GOQUEUE_CLUSTER_TLS_KEY_FILE
+              value: "/certs/cluster-tls/tls.key"
+            - name: GOQUEUE_CLUSTER_TLS_CA_FILE
+              value: "/certs/cluster-tls/ca.crt"
+            {{- else if .Values.security.clusterTls.existingSecret }}
+            - name: GOQUEUE_CLUSTER_TLS_CERT_FILE
+              value: "/certs/cluster-tls/tls.crt"
+            - name: GOQUEUE_CLUSTER_TLS_KEY_FILE
+              value: "/certs/cluster-tls/tls.key"
+            - name: GOQUEUE_CLUSTER_TLS_CA_FILE
+              value: "/certs/cluster-tls/ca.crt"
+            {{- end }}
+            {{- if .Values.security.clusterTls.requireClientCert }}
+            - name: GOQUEUE_CLUSTER_TLS_CLIENT_AUTH
+              value: "require-verify"
+            {{- end }}
+            {{- end }}
+            
+            {{- if .Values.security.auth.enabled }}
+            # API Key authentication
+            - name: GOQUEUE_AUTH_ENABLED
+              value: "true"
+            - name: GOQUEUE_AUTH_ALLOW_HEALTH
+              value: {{ .Values.security.auth.allowHealthWithoutAuth | quote }}
+            {{- if .Values.security.auth.rootKey }}
+            - name: GOQUEUE_API_ROOT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.apiKeySecret.name | default (printf "%s-api-keys" (include "goqueue.fullname" .)) }}
+                  key: root-api-key
+            {{- else if .Values.security.auth.existingSecret }}
+            - name: GOQUEUE_API_ROOT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.security.auth.existingSecret }}
+                  key: api-key
+            {{- end }}
+            {{- end }}
+            
+            {{- if .Values.security.rbac.enabled }}
+            # RBAC
+            - name: GOQUEUE_ACL_ENABLED
+              value: "true"
+            {{- end }}
           
           # Volume mounts
           volumeMounts:
@@ -206,8 +287,59 @@ spec:
             # Tmp directory for read-only root filesystem
             - name: tmp
               mountPath: /tmp
+            {{- if .Values.security.tls.enabled }}
+            {{- if or .Values.security.tls.selfSigned .Values.security.tls.existingSecret }}
+            - name: tls-certs
+              mountPath: /certs/tls
+              readOnly: true
+            {{- end }}
+            {{- end }}
+            {{- if .Values.security.clusterTls.enabled }}
+            {{- if or .Values.security.clusterTls.selfSigned .Values.security.clusterTls.existingSecret }}
+            - name: cluster-tls-certs
+              mountPath: /certs/cluster-tls
+              readOnly: true
+            {{- end }}
+            {{- end }}
           
-          # Health probes
+          # ═══════════════════════════════════════════════════════════════════
+          # HEALTH PROBES
+          # ═══════════════════════════════════════════════════════════════════
+          #
+          # When TLS is enabled, probes must use HTTPS scheme.
+          # Kubernetes will skip TLS certificate verification for probes.
+          #
+          {{- if .Values.security.tls.enabled }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.livenessProbe.httpGet.path }}
+              port: {{ .Values.livenessProbe.httpGet.port }}
+              scheme: HTTPS
+            initialDelaySeconds: {{ .Values.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.livenessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.livenessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.livenessProbe.failureThreshold }}
+          
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.readinessProbe.httpGet.path }}
+              port: {{ .Values.readinessProbe.httpGet.port }}
+              scheme: HTTPS
+            initialDelaySeconds: {{ .Values.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.readinessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.readinessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.readinessProbe.failureThreshold }}
+          
+          startupProbe:
+            httpGet:
+              path: {{ .Values.startupProbe.httpGet.path }}
+              port: {{ .Values.startupProbe.httpGet.port }}
+              scheme: HTTPS
+            initialDelaySeconds: {{ .Values.startupProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.startupProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.startupProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.startupProbe.failureThreshold }}
+          {{- else }}
           livenessProbe:
             {{- toYaml .Values.livenessProbe | nindent 12 }}
           
@@ -216,6 +348,7 @@ spec:
           
           startupProbe:
             {{- toYaml .Values.startupProbe | nindent 12 }}
+          {{- end }}
           
           # Resource limits
           resources:
@@ -228,6 +361,28 @@ spec:
             name: {{ include "goqueue.configMapName" . }}
         - name: tmp
           emptyDir: {}
+        {{- if .Values.security.tls.enabled }}
+        {{- if .Values.security.tls.selfSigned }}
+        - name: tls-certs
+          secret:
+            secretName: {{ include "goqueue.fullname" . }}-tls
+        {{- else if .Values.security.tls.existingSecret }}
+        - name: tls-certs
+          secret:
+            secretName: {{ .Values.security.tls.existingSecret }}
+        {{- end }}
+        {{- end }}
+        {{- if .Values.security.clusterTls.enabled }}
+        {{- if .Values.security.clusterTls.selfSigned }}
+        - name: cluster-tls-certs
+          secret:
+            secretName: {{ include "goqueue.fullname" . }}-cluster-tls
+        {{- else if .Values.security.clusterTls.existingSecret }}
+        - name: cluster-tls-certs
+          secret:
+            secretName: {{ .Values.security.clusterTls.existingSecret }}
+        {{- end }}
+        {{- end }}
       
       # Node selection and affinity
       {{- with .Values.nodeSelector }}

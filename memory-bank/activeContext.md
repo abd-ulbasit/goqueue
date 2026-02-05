@@ -3,81 +3,75 @@
 ## Current Focus
 
 **Phase**: 4 - Operations
-**Milestone**: 11/12 - Leader Election & Replication / Automatic Failover - IN PROGRESS
-**Status**: Topic metadata sync fixed, partition API added, failover tested
+**Status**: M21 Security + M23 Schema Registry DEPLOYED to EKS
+**Next**: M22 Admin Tools, M24 Priority + Delay Queues, M25 Transactions
 
-## Recent Session: Topic Metadata Sync & Partition API
+## Recent Session: Security & Schema Registry Deployment
 
-### What Was Fixed
+### What Was Deployed
 
-**Topic Metadata Sync**:
-- Problem: Topics created on controller weren't visible on followers
-- Root Cause: `handleMetadataChange()` was a stub that only logged
-- Fix: Now creates topics locally when metadata is synced from controller
-- Added `CreateTopicLocal()` to broker for cluster sync
+**Security Features (M21)**:
+- ✅ **TLS for Client APIs**: HTTPS on port 8080, self-signed certs via Helm
+- ✅ **mTLS for Cluster**: Inter-node encryption with client cert verification
+- ✅ **API Key Auth**: Root key required for all API calls (except health)
+- ✅ **RBAC**: Role-based access control enabled
 
-**Partition Leader API**:
-- Added `GET /topics/{topicName}/partitions`
-- Returns leader, replicas, ISR, version for each partition
-- Enables visibility into cluster partition assignments
+**Schema Registry (M23)**:
+- ✅ **Already Integrated**: Discovered full implementation in codebase
+- ✅ **Deployed & Verified**: Registered test schema, confirmed working
 
-### What's Working Now
+**Infrastructure**:
+- **Docker Image**: `ghcr.io/abd-ulbasit/goqueue:v0.7.0-security-schemas`
+- **Root API Key**: `3c78bc92f544273a7772dbcf5bbd8bfc872b103acbf5750ea2b4daf96330a1e2`
 
-1. **Topic Metadata Sync**: ✅ Topics created on controller propagate to all followers
-2. **Partition API**: ✅ Can query leader/replica/ISR for any topic
-3. **Cluster Formation**: ✅ 3 nodes join and stay alive
-4. **Heartbeats**: ✅ Sent every 3s, received and recorded
-5. **Failure Detection**: ✅ Nodes marked suspect (6s) then dead (9s)
-6. **Controller Election**: ✅ Triggered when controller dies
-7. **Partition Leader Election**: ✅ New leaders elected when nodes fail/return
-8. **ISR Tracking**: ✅ All healthy nodes in ISR
-9. **Epoch/Version**: ✅ Increments on leadership changes
-10. **Unclean Election Prevention**: ✅ Blocks election without ISR
+### Helm/Terraform Updates Made
 
-### What Still Needs Work
+1. **values.yaml**: Enabled `security.tls`, `security.clusterTls`, `security.auth`, `security.rbac`
+2. **statefulset.yaml**: Added HTTPS scheme for probes when TLS enabled
+3. **servicemonitor.yaml**: Added HTTPS scheme + tlsConfig.insecureSkipVerify
+4. **terraform module**: Added security_enabled, security_root_api_key variables
 
-1. **Request Routing**: Writes go to local node, not partition leader
-2. **Synchronous ISR Replication**: WaitForReplication called but may not wait for ISR ack
-3. **Full failover with data verification**: Need to verify no message loss
+### EKS Cluster Status
 
-### EKS Cluster Details
+```
+NAME        READY   STATUS    RESTARTS   AGE
+goqueue-0   1/1     Running   0          4m
+goqueue-1   1/1     Running   0          4m
+goqueue-2   1/1     Running   0          4m
+```
 
-- **Cluster**: goqueue-dev (ap-south-1)
-- **Nodes**: 3x c5.xlarge (4 vCPU, 8 GB)
+**Cluster Details**:
+- **Name**: goqueue-dev (ap-south-1)
+- **K8s Version**: 1.31
+- **Image**: ghcr.io/abd-ulbasit/goqueue:v0.7.0-security-schemas
 - **LoadBalancer**: ab822e00193ff46f7ab447e128ecd3a8-1415729494.ap-south-1.elb.amazonaws.com:8080
-- **Image**: ghcr.io/abd-ulbasit/goqueue:v0.5.0-isr3
 
-### Next Steps
+### Verification Commands
 
-1. Implement request routing (forward writes to partition leader)
-2. Verify synchronous ISR replication works end-to-end
-3. Add data verification to failover test (consume messages after failover)
+```bash
+# Health (no auth)
+curl -sk https://localhost:8443/healthz
+
+# Topics (with auth)
+curl -sk -H "X-API-Key: 3c78bc92..." https://localhost:8443/topics
+
+# Register schema
+curl -sk -X POST -H "X-API-Key: ..." -d '{"schema": "..."}' \
+  https://localhost:8443/schemas/subjects/demo-orders-value/versions
+```
+
+### Remaining Milestones
+
+| ID | Name | Status |
+|----|------|--------|
+| M22 | Admin Tools | Not Started |
+| M24 | Priority + Delay Queues | Not Started |
+| M25 | Transactions | Not Started |
+| M26 | Advanced Observability | Not Started |
 
 ---
 
-## Previous Focus: Multi-Tenancy & Quotas
-
-**Solution**: Unified error handling across both CLIs
-- Added `handleError()` to goqueue-admin (matches goqueue-cli pattern)
-- Updated all 15 API error handlers in tenant.go, quota.go, usage.go
-- Consistent user-facing error output using `cli.PrintError()`
-
-### Milestone 18 - Multi-Tenancy & Quotas ⭐
-
-**Optional Multi-Tenancy** (`internal/broker/broker.go`):
-- ✅ `EnableMultiTenancy bool` config flag (default: false)
-- ✅ TenantManager initialized only when enabled
-- ✅ Startup log includes multi-tenancy status
-
-**Tenant Management** (`internal/broker/tenant.go`):
-- ✅ Tenant entity with ID, name, status, quotas, metadata
-- ✅ TenantManager CRUD with file-based persistence
-- ✅ Namespace isolation via topic prefix (`{tenantID}.{topicName}`)
-- ✅ System tenant (`__system`) for internal topics
-- ✅ Tenant lifecycle: active → suspended → active → disabled
-- ✅ Usage tracking: messages, bytes, topics, partitions
-
-**Token Bucket Rate Limiting** (`internal/broker/quota.go`):
+## Previous Focus: EKS Deployment & Cluster Validation
 - ✅ Industry-standard token bucket algorithm
 - ✅ Per-tenant rate limiting for publish/consume
 - ✅ Configurable capacity and refill rate

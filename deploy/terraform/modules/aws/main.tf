@@ -82,7 +82,7 @@ variable "cluster_name" {
 variable "cluster_version" {
   description = "Kubernetes version for EKS (use 1.31+ for standard support pricing)"
   type        = string
-  default     = "1.31"
+  default     = "1.34"
 }
 
 variable "vpc_cidr" {
@@ -164,6 +164,38 @@ variable "tags" {
     Project   = "goqueue"
     ManagedBy = "terraform"
   }
+}
+
+# =============================================================================
+# SECURITY CONFIGURATION (M21)
+# =============================================================================
+#
+# ┌─────────────────────────────────────────────────────────────────────────────┐
+# │ SECURITY FEATURES                                                           │
+# │                                                                             │
+# │ 1. TLS: Encrypt all HTTP/gRPC traffic (self-signed for dev)                │
+# │ 2. mTLS: Encrypt inter-node cluster communication                           │
+# │ 3. API Key Auth: Require authentication for API access                      │
+# │ 4. RBAC: Role-based access control for topics/groups                        │
+# └─────────────────────────────────────────────────────────────────────────────┘
+#
+variable "security_enabled" {
+  description = "Enable security features (TLS, Auth, RBAC)"
+  type        = bool
+  default     = false
+}
+
+variable "security_tls_self_signed" {
+  description = "Use self-signed TLS certificates (dev only)"
+  type        = bool
+  default     = true
+}
+
+variable "security_root_api_key" {
+  description = "Root API key for admin access (generate with: openssl rand -hex 32)"
+  type        = string
+  default     = ""
+  sensitive   = true
 }
 
 # =============================================================================
@@ -687,6 +719,37 @@ resource "helm_release" "goqueue" {
           enabled = var.install_prometheus
         }
       }
+
+      # ═══════════════════════════════════════════════════════════════════════
+      # SECURITY CONFIGURATION (M21)
+      # ═══════════════════════════════════════════════════════════════════════
+      #
+      # When security_enabled is true, this configures:
+      #   - TLS for client connections (HTTPS/gRPC)
+      #   - mTLS for inter-node cluster communication
+      #   - API Key authentication with RBAC
+      #
+      security = var.security_enabled ? {
+        tls = {
+          enabled    = true
+          selfSigned = var.security_tls_self_signed
+          minVersion = "1.2"
+        }
+        clusterTls = {
+          enabled           = true
+          selfSigned        = var.security_tls_self_signed
+          requireClientCert = true
+        }
+        auth = {
+          enabled                = true
+          allowHealthWithoutAuth = true
+          rootKey                = var.security_root_api_key
+        }
+        rbac = {
+          enabled     = true
+          defaultRole = "readonly"
+        }
+      } : {}
     })
   ]
 
