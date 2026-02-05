@@ -177,14 +177,14 @@ func (cc *clusterCoordinator) GetLeader(topic string, partition int) cluster.Nod
 // GetLeaderClientAddress returns the client-facing address of the partition leader.
 //
 // WHY CLIENT ADDRESS (not cluster address)?
-//   The client address is where producers/consumers connect. When we forward
-//   a publish request, we're acting as a proxy for the producer, so we need
-//   to hit the same HTTP API port they would use.
+//
+//	The client address is where producers/consumers connect. When we forward
+//	a publish request, we're acting as a proxy for the producer, so we need
+//	to hit the same HTTP API port they would use.
 //
 // RETURNS:
 //   - Empty string if leader not found or is self
 //   - Format: "host:port" (e.g., "goqueue-0.goqueue.svc:8080")
-//
 func (cc *clusterCoordinator) GetLeaderClientAddress(topic string, partition int) string {
 	leaderID := cc.GetLeader(topic, partition)
 	if leaderID == cc.coordinator.Node().ID() {
@@ -524,8 +524,9 @@ type ForwardPublishResponse struct {
 // ForwardPublish forwards a publish request to the partition leader.
 //
 // WHY THIS EXISTS:
-//   When a producer publishes to a partition we don't lead, we forward
-//   the request to the actual leader rather than failing.
+//
+//	When a producer publishes to a partition we don't lead, we forward
+//	the request to the actual leader rather than failing.
 //
 // PARAMETERS:
 //   - ctx: Context for timeout/cancellation
@@ -538,7 +539,6 @@ type ForwardPublishResponse struct {
 // RETURNS:
 //   - offset: The offset assigned by the leader
 //   - error: If forwarding fails or leader returns error
-//
 func (cc *clusterCoordinator) ForwardPublish(ctx context.Context, leaderAddr string, topic string, partition int, key, value []byte) (int64, error) {
 	// Build request
 	reqBody := ForwardPublishRequest{

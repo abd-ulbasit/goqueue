@@ -103,11 +103,10 @@ func SetAdminDependencies(deps *AdminDependencies) {
 //   - goqueue: RequirePermission("admin:*") on all admin routes
 //
 // SECURITY LAYERS:
-//   1. TLS encryption (transport security)
-//   2. API key authentication (identity)
-//   3. Permission check (authorization)
-//   4. Audit logging (accountability)
-//
+//  1. TLS encryption (transport security)
+//  2. API key authentication (identity)
+//  3. Permission check (authorization)
+//  4. Audit logging (accountability)
 func (s *Server) RegisterAdminRoutes(r chi.Router) {
 	r.Route("/admin", func(r chi.Router) {
 		// ====================================================================
@@ -125,8 +124,8 @@ func (s *Server) RegisterAdminRoutes(r chi.Router) {
 			if s.security != nil {
 				r.Use(s.security.RequirePermission("admin:keys"))
 			}
-			r.Post("/", s.createAPIKey)    // Create new API key
-			r.Get("/", s.listAPIKeys)      // List all keys (hashed)
+			r.Post("/", s.createAPIKey)          // Create new API key
+			r.Get("/", s.listAPIKeys)            // List all keys (hashed)
 			r.Delete("/{keyID}", s.revokeAPIKey) // Revoke specific key
 		})
 
@@ -143,8 +142,8 @@ func (s *Server) RegisterAdminRoutes(r chi.Router) {
 			if s.security != nil {
 				r.Use(s.security.RequirePermission("admin:acls"))
 			}
-			r.Post("/", s.addACL)          // Add ACL rule
-			r.Get("/", s.listACLs)         // List all ACL rules
+			r.Post("/", s.addACL)             // Add ACL rule
+			r.Get("/", s.listACLs)            // List all ACL rules
 			r.Delete("/{aclID}", s.removeACL) // Remove ACL rule
 		})
 

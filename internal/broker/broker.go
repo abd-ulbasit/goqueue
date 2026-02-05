@@ -2350,9 +2350,10 @@ func (b *Broker) GetGroupCoordinator() *GroupCoordinator {
 // Used by HTTP handlers for forwarded publishes to wait for ISR replication.
 //
 // WHY EXPOSE THIS:
-//   When a non-leader forwards a publish request to the leader, the leader's
-//   API handler needs to wait for ISR replication before responding. This
-//   matches the behavior of regular publishes (acks=all semantics).
+//
+//	When a non-leader forwards a publish request to the leader, the leader's
+//	API handler needs to wait for ISR replication before responding. This
+//	matches the behavior of regular publishes (acks=all semantics).
 //
 // RETURNS:
 //   - *replicationCoordinator if cluster mode is enabled (M11)
