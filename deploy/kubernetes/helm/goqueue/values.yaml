@@ -246,6 +246,22 @@ persistence:
   # Examples: gp3, premium-rwo, standard-rwo
   storageClass: ""
   
+  # Create a custom StorageClass with specific settings
+  # This is useful for setting reclaimPolicy: Delete to auto-cleanup volumes
+  createStorageClass:
+    enabled: false
+    name: goqueue-storage
+    provisioner: "ebs.csi.aws.com"
+    parameters:
+      type: gp3
+      encrypted: "true"
+    # IMPORTANT: Set to Delete to prevent orphaned EBS volumes on uninstall
+    # Retain: Volume persists after PVC deletion (orphaned volumes accumulate charges)
+    # Delete: Volume deleted when PVC is deleted (clean teardown)
+    reclaimPolicy: Delete
+    volumeBindingMode: WaitForFirstConsumer
+    allowVolumeExpansion: true
+  
   # Access mode
   # ReadWriteOnce: Can only be mounted by one pod (standard for StatefulSet)
   accessMode: ReadWriteOnce
@@ -622,6 +638,10 @@ security:
     # Use auto-generated self-signed certificates (dev/testing only)
     selfSigned: true
     
+    # Keep TLS secrets when Helm release is deleted (prevents cert loss)
+    # Set to false for dev environments to allow clean teardown
+    keepOnDelete: false
+    
     # Use existing secret containing tls.crt and tls.key
     # Created via: kubectl create secret tls goqueue-tls --cert=cert.pem --key=key.pem
     existingSecret: ""
@@ -643,6 +663,10 @@ security:
     
     # Use auto-generated self-signed certificates (dev/testing only)
     selfSigned: true
+    
+    # Keep cluster TLS secrets when Helm release is deleted
+    # Set to false for dev environments to allow clean teardown
+    keepOnDelete: false
     
     # Use existing secret for cluster TLS
     existingSecret: ""
@@ -678,3 +702,118 @@ security:
 apiKeySecret:
   create: true
   name: goqueue-api-keys
+
+# -----------------------------------------------------------------------------
+# BACKUP & RESTORE CONFIGURATION (M23)
+# -----------------------------------------------------------------------------
+# ┌─────────────────────────────────────────────────────────────────────────────┐
+# │ KUBERNETES-FIRST BACKUP STRATEGY                                            │
+# │                                                                             │
+# │ GoQueue uses a two-tier backup approach:                                    │
+# │                                                                             │
+# │ 1. VOLUME SNAPSHOTS (PVC-level)                                             │
+# │    - Uses CSI VolumeSnapshots for consistent point-in-time backups          │
+# │    - EBS snapshots on AWS, Persistent Disk snapshots on GCP                 │
+# │    - Fast restore: Create new PVC from snapshot                             │
+# │                                                                             │
+# │ 2. APPLICATION-LEVEL EXPORT                                                 │
+# │    - Topics, consumer groups, offsets, schemas exported to JSON             │
+# │    - Uploaded to S3/GCS for cross-region disaster recovery                  │
+# │    - Enables migration between clusters                                     │
+# │                                                                             │
+# │ COMPARISON:                                                                 │
+# │   - Kafka: MirrorMaker 2 for cross-cluster replication                      │
+# │   - RabbitMQ: Shovel/Federation + mnesia backup                             │
+# │   - goqueue: VolumeSnapshot + JSON export                                   │
+# └─────────────────────────────────────────────────────────────────────────────┘
+
+backup:
+  # Enable backup functionality
+  enabled: true
+  
+  # Volume Snapshot Configuration
+  volumeSnapshot:
+    # Enable VolumeSnapshot-based backups
+    enabled: true
+    
+    # VolumeSnapshotClass name (must exist in cluster)
+    # AWS EBS: ebs-csi-snapclass (installed with EBS CSI driver)
+    # GCP: standard-rwo-snapshot
+    snapshotClassName: ""
+    
+    # Retention: number of snapshots to keep per PVC
+    retentionCount: 7
+  
+  # Scheduled Backup (CronJob)
+  schedule:
+    # Enable scheduled backups
+    enabled: true
+    
+    # Cron schedule (default: daily at 2 AM UTC)
+    cron: "0 2 * * *"
+    
+    # Timezone for schedule
+    timezone: "UTC"
+    
+    # Suspend scheduled backups (for maintenance)
+    suspend: false
+    
+    # Number of successful jobs to keep
+    successfulJobsHistoryLimit: 3
+    
+    # Number of failed jobs to keep
+    failedJobsHistoryLimit: 1
+  
+  # Application-level backup to object storage
+  objectStorage:
+    # Enable S3/GCS backup
+    enabled: false
+    
+    # Storage provider: s3, gcs, azure
+    provider: "s3"
+    
+    # Bucket name
+    bucket: ""
+    
+    # Bucket prefix/path
+    prefix: "goqueue-backups"
+    
+    # Region (for S3)
+    region: ""
+    
+    # Use existing secret for credentials
+    # Secret should have: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
+    existingSecret: ""
+  
+  # Backup content selection
+  include:
+    # Include topic metadata and logs
+    topics: true
+    
+    # Include consumer group offsets
+    offsets: true
+    
+    # Include registered schemas
+    schemas: true
+    
+    # Include configuration
+    config: true
+
+# -----------------------------------------------------------------------------
+# RESTORE CONFIGURATION
+# -----------------------------------------------------------------------------
+restore:
+  # Restore from a specific VolumeSnapshot
+  # Set to snapshot name to trigger restore on next deployment
+  fromSnapshot: ""
+  
+  # Restore from S3/GCS backup
+  fromObjectStorage:
+    # Enable restore from object storage
+    enabled: false
+    
+    # Backup path to restore from (e.g., s3://bucket/goqueue-backups/2024-01-01-020000)
+    path: ""
+    
+    # Skip topics that already exist
+    skipExisting: true

@@ -199,6 +199,63 @@ variable "security_root_api_key" {
 }
 
 # =============================================================================
+# M23: BACKUP & RESTORE CONFIGURATION
+# =============================================================================
+#
+# KUBERNETES-FIRST BACKUP STRATEGY:
+#   1. VolumeSnapshot (CSI) - Fast point-in-time snapshots of EBS volumes
+#   2. Metadata Backup (CronJob) - Topics, offsets, schemas exported to S3
+#
+# COST CONSIDERATION:
+#   - EBS Snapshots: ~$0.05/GB-month (incremental)
+#   - S3 storage: ~$0.023/GB-month (Standard)
+#   - Backup job CPU: Minimal (runs for seconds)
+#
+# =============================================================================
+
+variable "backup_enabled" {
+  description = "Enable backup CronJob and VolumeSnapshot configuration"
+  type        = bool
+  default     = false
+}
+
+variable "backup_schedule" {
+  description = "Cron schedule for metadata backups (default: 2 AM daily)"
+  type        = string
+  default     = "0 2 * * *"
+}
+
+variable "backup_volume_snapshot_enabled" {
+  description = "Enable VolumeSnapshot-based backups (requires CSI driver)"
+  type        = bool
+  default     = false
+}
+
+variable "backup_volume_snapshot_schedule" {
+  description = "Cron schedule for VolumeSnapshots (default: 3 AM daily)"
+  type        = string
+  default     = "0 3 * * *"
+}
+
+variable "backup_retention_days" {
+  description = "Number of days to retain backups"
+  type        = number
+  default     = 7
+}
+
+variable "backup_s3_bucket" {
+  description = "S3 bucket for backup storage (leave empty to disable S3 upload)"
+  type        = string
+  default     = ""
+}
+
+variable "backup_s3_prefix" {
+  description = "S3 key prefix for backups"
+  type        = string
+  default     = "goqueue/backups"
+}
+
+# =============================================================================
 # DATA SOURCES
 # =============================================================================
 
@@ -660,14 +717,6 @@ resource "helm_release" "goqueue" {
         }
       }
 
-      # Persistence - use gp3 SSD with encryption
-      persistence = {
-        enabled      = true
-        storageClass = "gp3"
-        size         = var.goqueue_storage_size
-        accessMode   = "ReadWriteOnce"
-      }
-
       # Resources - tuned for c5.xlarge (4 vCPU, 8GB RAM)
       # Reserve ~1 CPU and 1.5GB for system/kubelet
       resources = {
@@ -734,11 +783,13 @@ resource "helm_release" "goqueue" {
           enabled    = true
           selfSigned = var.security_tls_self_signed
           minVersion = "1.2"
+          keepOnDelete = false  # Don't persist TLS secrets after helm uninstall
         }
         clusterTls = {
           enabled           = true
           selfSigned        = var.security_tls_self_signed
           requireClientCert = true
+          keepOnDelete      = false  # Don't persist cluster TLS secrets
         }
         auth = {
           enabled                = true
@@ -750,6 +801,53 @@ resource "helm_release" "goqueue" {
           defaultRole = "readonly"
         }
       } : {}
+
+      # ═══════════════════════════════════════════════════════════════════════
+      # BACKUP CONFIGURATION (M23)
+      # ═══════════════════════════════════════════════════════════════════════
+      #
+      # Two-tier backup strategy:
+      #   1. VolumeSnapshot: CSI-level snapshots of EBS volumes (fast, cheap)
+      #   2. Metadata backup: Topics, offsets, schemas to S3 (portable)
+      #
+      backup = var.backup_enabled ? {
+        schedule = {
+          enabled = true
+          cron    = var.backup_schedule
+        }
+        volumeSnapshot = {
+          enabled          = var.backup_volume_snapshot_enabled
+          driver           = "ebs.csi.aws.com"
+          deletionPolicy   = "Delete"
+          schedule         = var.backup_volume_snapshot_schedule
+          retention        = var.backup_retention_days
+        }
+        objectStorage = var.backup_s3_bucket != "" ? {
+          enabled  = true
+          provider = "s3"
+          bucket   = var.backup_s3_bucket
+          prefix   = var.backup_s3_prefix
+          region   = var.region
+        } : {}
+        include = {
+          topics  = true
+          offsets = true
+          schemas = true
+        }
+      } : {}
+
+      # Storage class configuration - use custom StorageClass with Delete policy
+      persistence = {
+        enabled      = true
+        storageClass = "gp3"
+        size         = var.goqueue_storage_size
+        accessMode   = "ReadWriteOnce"
+        createStorageClass = {
+          enabled       = true
+          provisioner   = "ebs.csi.aws.com"
+          reclaimPolicy = "Delete"   # Prevents orphaned EBS volumes
+        }
+      }
     })
   ]
 

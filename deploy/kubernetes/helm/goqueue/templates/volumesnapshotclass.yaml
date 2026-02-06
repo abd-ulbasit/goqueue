@@ -1,0 +1,75 @@
+{{/*
+# =============================================================================
+# VOLUMESNAPSHOTCLASS - CSI Snapshot Configuration
+# =============================================================================
+#
+# WHAT: Defines how volume snapshots are created.
+#
+# WHY SEPARATE CLASS?
+#   - Different deletion policies (Delete vs Retain)
+#   - Different snapshot frequencies
+#   - Cost optimization (same-AZ vs cross-AZ)
+#
+# COMPARISON:
+#   - AWS EBS: Uses ebs.csi.aws.com driver
+#   - GCP PD: Uses pd.csi.storage.gke.io driver
+#   - Azure: Uses disk.csi.azure.com driver
+#
+# REQUIREMENTS:
+#   - CSI driver with snapshot support installed
+#   - snapshot.storage.k8s.io/v1 API available
+#
+# =============================================================================
+*/}}
+{{- if .Values.backup.volumeSnapshot.enabled }}
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshotClass
+metadata:
+  name: {{ include "goqueue.fullname" . }}-snapshots
+  labels:
+    {{- include "goqueue.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+  annotations:
+    {{- if .Values.backup.volumeSnapshot.isDefault }}
+    snapshot.storage.kubernetes.io/is-default-class: "true"
+    {{- end }}
+{{- /*
+# =============================================================================
+# SNAPSHOT DRIVER
+# =============================================================================
+#
+# The driver MUST match your storage provisioner:
+#   AWS EBS:     ebs.csi.aws.com
+#   GCP PD:      pd.csi.storage.gke.io
+#   Azure Disk:  disk.csi.azure.com
+#   Ceph RBD:    rbd.csi.ceph.com
+#   Local:       Not supported (local volumes can't snapshot)
+#
+# =============================================================================
+*/}}
+driver: {{ .Values.backup.volumeSnapshot.driver }}
+{{- /*
+# =============================================================================
+# DELETION POLICY
+# =============================================================================
+#
+# Delete: Snapshot deleted when VolumeSnapshot object is deleted
+#   - Good for: Automated cleanup, dev environments
+#   - Risk: Accidental deletion loses backup
+#
+# Retain: Snapshot preserved even after VolumeSnapshot deleted
+#   - Good for: Production, compliance requirements
+#   - Risk: Orphaned snapshots accumulate costs
+#
+# COST CONSIDERATION:
+#   - EBS snapshots: ~$0.05/GB-month (incremental)
+#   - Keep retention policy aligned with business needs
+#
+# =============================================================================
+*/}}
+deletionPolicy: {{ .Values.backup.volumeSnapshot.deletionPolicy | default "Delete" }}
+{{- if .Values.backup.volumeSnapshot.parameters }}
+parameters:
+  {{- toYaml .Values.backup.volumeSnapshot.parameters | nindent 2 }}
+{{- end }}
+{{- end }}
