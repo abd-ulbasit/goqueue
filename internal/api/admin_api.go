@@ -166,6 +166,23 @@ func (s *Server) RegisterAdminRoutes(r chi.Router) {
 			r.Get("/", s.listCoordinators)
 			r.Get("/groups/{groupID}", s.findGroupCoordinator)
 		})
+
+		// ====================================================================
+		// BACKUP & RESTORE
+		// ====================================================================
+		// Backup and restore broker metadata (topics, offsets, schemas).
+		// For VolumeSnapshot-based data backup, use Kubernetes VolumeSnapshot API.
+		//
+		r.Route("/backup", func(r chi.Router) {
+			if s.security != nil {
+				r.Use(s.security.RequirePermission("admin:backup"))
+			}
+			r.Post("/", s.createBackup)                    // Create new backup
+			r.Get("/", s.listBackups)                      // List all backups
+			r.Get("/{backupID}", s.getBackup)              // Get backup details
+			r.Delete("/{backupID}", s.deleteBackup)        // Delete a backup
+			r.Post("/{backupID}/restore", s.restoreBackup) // Restore from backup
+		})
 	})
 }
 
@@ -1030,5 +1047,236 @@ func (s *Server) removeACL(w http.ResponseWriter, r *http.Request) {
 		"success": true,
 		"message": "ACL removed",
 		"acl_id":  aclID,
+	})
+}
+
+// =============================================================================
+// BACKUP & RESTORE ENDPOINTS
+// =============================================================================
+//
+// KUBERNETES-FIRST BACKUP STRATEGY:
+//   1. VolumeSnapshot (CSI) - Fast point-in-time snapshots of PVC data
+//   2. Metadata Backup (these endpoints) - Topics, offsets, schemas
+//
+// WHY BOTH?
+//   - VolumeSnapshot handles actual message data (fast, storage-level)
+//   - Metadata backup is portable (can restore to different cluster)
+//
+// =============================================================================
+
+// CreateBackupRequest is the request body for creating a backup.
+type CreateBackupRequest struct {
+	IncludeTopics  bool `json:"include_topics"`
+	IncludeOffsets bool `json:"include_offsets"`
+	IncludeSchemas bool `json:"include_schemas"`
+	IncludeConfig  bool `json:"include_config"`
+}
+
+// createBackup handles POST /admin/backup
+// Creates a new backup of broker metadata.
+func (s *Server) createBackup(w http.ResponseWriter, r *http.Request) {
+	// Parse request
+	var req CreateBackupRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		// Default to full backup if no body
+		req = CreateBackupRequest{
+			IncludeTopics:  true,
+			IncludeOffsets: true,
+			IncludeSchemas: true,
+			IncludeConfig:  true,
+		}
+	}
+
+	// Create backup manager
+	config := broker.BackupConfig{
+		IncludeTopics:   req.IncludeTopics,
+		IncludeOffsets:  req.IncludeOffsets,
+		IncludeSchemas:  req.IncludeSchemas,
+		IncludeConfig:   req.IncludeConfig,
+		RetentionCount:  7,
+		CompressBackups: false,
+	}
+	bm := broker.NewBackupManager(s.broker, config)
+
+	// Create backup
+	metadata, err := bm.CreateBackup(r.Context())
+	if err != nil {
+		s.logger.Error("failed to create backup", "error", err)
+		s.errorResponse(w, http.StatusInternalServerError, "failed to create backup: "+err.Error())
+		return
+	}
+
+	// Return backup info
+	s.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"backup_id":  metadata.Timestamp.UTC().Format("2006-01-02-150405"),
+		"timestamp":  metadata.Timestamp,
+		"broker_id":  metadata.BrokerID,
+		"cluster_id": metadata.ClusterID,
+		"stats":      metadata.Stats,
+	})
+}
+
+// listBackups handles GET /admin/backup
+// Lists all available backups.
+func (s *Server) listBackups(w http.ResponseWriter, r *http.Request) {
+	// Create backup manager
+	config := broker.DefaultBackupConfig()
+	bm := broker.NewBackupManager(s.broker, config)
+
+	// List backups
+	backups, err := bm.ListBackups()
+	if err != nil {
+		s.logger.Error("failed to list backups", "error", err)
+		s.errorResponse(w, http.StatusInternalServerError, "failed to list backups: "+err.Error())
+		return
+	}
+
+	// Transform to response format
+	result := make([]map[string]interface{}, len(backups))
+	for i, b := range backups {
+		result[i] = map[string]interface{}{
+			"backup_id":       b.Timestamp.UTC().Format("2006-01-02-150405"),
+			"timestamp":       b.Timestamp,
+			"broker_id":       b.BrokerID,
+			"topics":          b.Stats.TopicCount,
+			"consumer_groups": b.Stats.ConsumerGroupCount,
+			"schemas":         b.Stats.SchemaCount,
+		}
+	}
+
+	s.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"backups": result,
+	})
+}
+
+// getBackup handles GET /admin/backup/{backupID}
+// Returns details for a specific backup.
+func (s *Server) getBackup(w http.ResponseWriter, r *http.Request) {
+	backupID := chi.URLParam(r, "backupID")
+	if backupID == "" {
+		s.errorResponse(w, http.StatusBadRequest, "backup ID is required")
+		return
+	}
+
+	// Create backup manager
+	config := broker.DefaultBackupConfig()
+	bm := broker.NewBackupManager(s.broker, config)
+
+	// Get backup
+	metadata, err := bm.GetBackup(backupID)
+	if err != nil {
+		s.logger.Warn("backup not found", "backup_id", backupID, "error", err)
+		s.errorResponse(w, http.StatusNotFound, "backup not found")
+		return
+	}
+
+	// Transform topics for response
+	topics := make([]map[string]interface{}, len(metadata.Topics))
+	for i, t := range metadata.Topics {
+		topics[i] = map[string]interface{}{
+			"name":           t.Name,
+			"num_partitions": t.NumPartitions,
+		}
+	}
+
+	// Transform consumer groups for response
+	groups := make([]map[string]interface{}, len(metadata.ConsumerGroups))
+	for i, g := range metadata.ConsumerGroups {
+		groups[i] = map[string]interface{}{
+			"group_id": g.GroupID,
+			"state":    g.State,
+		}
+	}
+
+	// Transform schemas for response
+	schemas := make([]map[string]interface{}, len(metadata.Schemas))
+	for i, s := range metadata.Schemas {
+		schemas[i] = map[string]interface{}{
+			"subject": s.Subject,
+			"version": s.Version,
+		}
+	}
+
+	s.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"backup_id":       backupID,
+		"version":         metadata.Version,
+		"timestamp":       metadata.Timestamp,
+		"broker_id":       metadata.BrokerID,
+		"cluster_id":      metadata.ClusterID,
+		"topics":          topics,
+		"consumer_groups": groups,
+		"schemas":         schemas,
+		"stats":           metadata.Stats,
+	})
+}
+
+// deleteBackup handles DELETE /admin/backup/{backupID}
+// Deletes a backup.
+func (s *Server) deleteBackup(w http.ResponseWriter, r *http.Request) {
+	backupID := chi.URLParam(r, "backupID")
+	if backupID == "" {
+		s.errorResponse(w, http.StatusBadRequest, "backup ID is required")
+		return
+	}
+
+	// Create backup manager
+	config := broker.DefaultBackupConfig()
+	bm := broker.NewBackupManager(s.broker, config)
+
+	// Delete backup
+	if err := bm.DeleteBackup(backupID); err != nil {
+		s.logger.Warn("failed to delete backup", "backup_id", backupID, "error", err)
+		s.errorResponse(w, http.StatusNotFound, "backup not found or delete failed")
+		return
+	}
+
+	s.logger.Info("deleted backup", "backup_id", backupID)
+	s.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success":   true,
+		"message":   "backup deleted",
+		"backup_id": backupID,
+	})
+}
+
+// RestoreBackupRequest is the request body for restoring a backup.
+type RestoreBackupRequest struct {
+	SkipExisting bool `json:"skip_existing"`
+}
+
+// restoreBackup handles POST /admin/backup/{backupID}/restore
+// Restores broker state from a backup.
+func (s *Server) restoreBackup(w http.ResponseWriter, r *http.Request) {
+	backupID := chi.URLParam(r, "backupID")
+	if backupID == "" {
+		s.errorResponse(w, http.StatusBadRequest, "backup ID is required")
+		return
+	}
+
+	// Parse request
+	var req RestoreBackupRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		// Default to not skipping existing
+		req = RestoreBackupRequest{SkipExisting: false}
+	}
+
+	// Create backup manager
+	config := broker.DefaultBackupConfig()
+	bm := broker.NewBackupManager(s.broker, config)
+
+	// Get backup path
+	backupPath := bm.GetBackupPath(backupID)
+
+	// Restore from backup
+	if err := bm.RestoreFromBackup(r.Context(), backupPath, req.SkipExisting); err != nil {
+		s.logger.Error("failed to restore backup", "backup_id", backupID, "error", err)
+		s.errorResponse(w, http.StatusInternalServerError, "failed to restore: "+err.Error())
+		return
+	}
+
+	s.logger.Info("restored from backup", "backup_id", backupID)
+	s.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success":   true,
+		"message":   "restore completed",
+		"backup_id": backupID,
 	})
 }

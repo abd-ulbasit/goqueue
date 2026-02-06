@@ -1,0 +1,39 @@
+{{- if .Values.persistence.createStorageClass.enabled }}
+# =============================================================================
+# CUSTOM STORAGE CLASS FOR GOQUEUE
+# =============================================================================
+#
+# ┌─────────────────────────────────────────────────────────────────────────────┐
+# │ WHY CREATE A CUSTOM STORAGE CLASS?                                          │
+# │                                                                             │
+# │ The default gp2/gp3 StorageClass on EKS has:                                │
+# │   reclaimPolicy: Delete  (volumes deleted with PVCs)                        │
+# │                                                                             │
+# │ BUT StatefulSet PVCs are NOT deleted when the StatefulSet is deleted!       │
+# │ You must manually delete them: kubectl delete pvc -l app.kubernetes.io/name=goqueue │
+# │                                                                             │
+# │ This StorageClass allows:                                                   │
+# │   - Explicit control over reclaimPolicy                                     │
+# │   - Custom volume parameters (encryption, IOPS, throughput)                 │
+# │   - VolumeSnapshot support for backups                                      │
+# │                                                                             │
+# │ RECLAIM POLICIES:                                                           │
+# │   Delete: Volume deleted when PVC is deleted (clean teardown)               │
+# │   Retain: Volume persists after PVC deletion (for recovery, but costs $$$)  │
+# │                                                                             │
+# │ IMPORTANT: Even with Delete policy, you must delete the PVCs manually for   │
+# │ StatefulSets. The policy only affects what happens AFTER PVC deletion.      │
+# └─────────────────────────────────────────────────────────────────────────────┘
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ .Values.persistence.createStorageClass.name }}
+  labels:
+    {{- include "goqueue.labels" . | nindent 4 }}
+provisioner: {{ .Values.persistence.createStorageClass.provisioner }}
+parameters:
+  {{- toYaml .Values.persistence.createStorageClass.parameters | nindent 2 }}
+reclaimPolicy: {{ .Values.persistence.createStorageClass.reclaimPolicy }}
+volumeBindingMode: {{ .Values.persistence.createStorageClass.volumeBindingMode }}
+allowVolumeExpansion: {{ .Values.persistence.createStorageClass.allowVolumeExpansion }}
+{{- end }}

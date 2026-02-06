@@ -183,6 +183,24 @@ module "goqueue_aws" {
   security_root_api_key    = "3c78bc92f544273a7772dbcf5bbd8bfc872b103acbf5750ea2b4daf96330a1e2"
 
   # ┌─────────────────────────────────────────────────────────────────────────┐
+  # │ BACKUP CONFIGURATION (M23)                                              │
+  # │                                                                         │
+  # │ Enables:                                                                 │
+  # │   - Scheduled metadata backups (topics, offsets, schemas)               │
+  # │   - VolumeSnapshot-based EBS backups                                    │
+  # │   - StorageClass with Delete policy (prevents orphaned volumes)         │
+  # │                                                                         │
+  # │ COSTS:                                                                   │
+  # │   - EBS Snapshots: ~$0.05/GB-month (incremental)                        │
+  # │   - For 3 x 50GB PVCs = ~$7.50/month in snapshots                       │
+  # └─────────────────────────────────────────────────────────────────────────┘
+  backup_enabled                  = true
+  backup_schedule                 = "0 2 * * *"   # Daily at 2 AM
+  backup_volume_snapshot_enabled  = true
+  backup_volume_snapshot_schedule = "0 3 * * *"   # Daily at 3 AM
+  backup_retention_days           = 7
+
+  # ┌─────────────────────────────────────────────────────────────────────────┐
   # │ MONITORING - PROMETHEUS OPERATOR                                        │
   # │                                                                         │
   # │ The previous agent INCORRECTLY disabled Prometheus to fix the error.    │

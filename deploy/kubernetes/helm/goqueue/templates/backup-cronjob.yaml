@@ -1,0 +1,295 @@
+{{/*
+# =============================================================================
+# BACKUP CRONJOB
+# =============================================================================
+#
+# WHAT: Scheduled backup job for goqueue metadata.
+#
+# TWO-TIER BACKUP STRATEGY:
+#   1. VolumeSnapshot (CSI) - Handles actual message data (PVC snapshots)
+#   2. Metadata Backup (this job) - Topics, offsets, schemas
+#
+# WHY SEPARATE JOB?
+#   - Application-level backup is cluster-aware
+#   - Can backup specific topics/groups
+#   - Exports to S3/GCS for cross-region DR
+#   - VolumeSnapshot only handles single PVC
+#
+# FLOW:
+#   ┌──────────────┐   trigger    ┌────────────────┐   API call   ┌─────────┐
+#   │  CronJob     │─────────────►│  Backup Pod    │─────────────►│ Broker  │
+#   │  (schedule)  │              │  (goqueue-admin│              │ /backup │
+#   └──────────────┘              │   backup)      │              └────┬────┘
+#                                 └────────────────┘                   │
+#                                        │                             │
+#                                        │ upload                      │ export
+#                                        ▼                             ▼
+#                                 ┌────────────────┐          ┌───────────────┐
+#                                 │  S3/GCS        │          │ metadata.json │
+#                                 │  (optional)    │          │ (local/S3)    │
+#                                 └────────────────┘          └───────────────┘
+#
+# =============================================================================
+*/}}
+{{- if .Values.backup.schedule.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "goqueue.fullname" . }}-backup
+  labels:
+    {{- include "goqueue.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+spec:
+  # Schedule uses standard cron format: minute hour day month weekday
+  # Examples: "0 2 * * *" (daily at 2AM), "0 2 * * 0" (weekly Sunday 2AM)
+  schedule: {{ .Values.backup.schedule.cron | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: {{ .Values.backup.schedule.successfulJobsHistoryLimit | default 3 }}
+  failedJobsHistoryLimit: {{ .Values.backup.schedule.failedJobsHistoryLimit | default 3 }}
+  {{- if .Values.backup.schedule.suspend }}
+  suspend: true
+  {{- end }}
+  jobTemplate:
+    spec:
+      {{- if .Values.backup.schedule.ttlSecondsAfterFinished }}
+      ttlSecondsAfterFinished: {{ .Values.backup.schedule.ttlSecondsAfterFinished }}
+      {{- end }}
+      template:
+        metadata:
+          labels:
+            {{- include "goqueue.labels" . | nindent 12 }}
+            app.kubernetes.io/component: backup-job
+        spec:
+          restartPolicy: OnFailure
+          {{- if .Values.serviceAccount.create }}
+          serviceAccountName: {{ include "goqueue.serviceAccountName" . }}
+          {{- end }}
+          {{- with .Values.affinity }}
+          affinity:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          containers:
+            - name: backup
+              image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command:
+                - /usr/bin/goqueue-admin
+              args:
+                - backup
+                - create
+                {{- if .Values.backup.include.topics }}
+                - --topics
+                {{- end }}
+                {{- if .Values.backup.include.offsets }}
+                - --offsets
+                {{- end }}
+                {{- if .Values.backup.include.schemas }}
+                - --schemas
+                {{- end }}
+                {{- if .Values.backup.objectStorage.enabled }}
+                - --upload
+                - --bucket={{ .Values.backup.objectStorage.bucket }}
+                - --prefix={{ .Values.backup.objectStorage.prefix | default "backups" }}
+                {{- end }}
+              env:
+                - name: GOQUEUE_BROKER_ADDRESS
+                  value: "{{ include "goqueue.fullname" . }}-headless:{{ .Values.service.port }}"
+                - name: GOQUEUE_API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "goqueue.fullname" . }}-api-keys
+                      key: root-api-key
+                {{- if .Values.backup.objectStorage.enabled }}
+                {{- if .Values.backup.objectStorage.accessKeySecretRef }}
+                - name: AWS_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.backup.objectStorage.accessKeySecretRef.name }}
+                      key: {{ .Values.backup.objectStorage.accessKeySecretRef.accessKeyKey | default "access-key" }}
+                - name: AWS_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.backup.objectStorage.accessKeySecretRef.name }}
+                      key: {{ .Values.backup.objectStorage.accessKeySecretRef.secretKeyKey | default "secret-key" }}
+                {{- end }}
+                {{- if .Values.backup.objectStorage.region }}
+                - name: AWS_REGION
+                  value: {{ .Values.backup.objectStorage.region | quote }}
+                {{- end }}
+                {{- if .Values.backup.objectStorage.endpoint }}
+                - name: AWS_ENDPOINT_URL
+                  value: {{ .Values.backup.objectStorage.endpoint | quote }}
+                {{- end }}
+                {{- end }}
+              resources:
+                {{- toYaml .Values.backup.schedule.resources | nindent 16 }}
+              {{- if .Values.security.tls.enabled }}
+              volumeMounts:
+                - name: tls-certs
+                  mountPath: /etc/goqueue/certs
+                  readOnly: true
+              {{- end }}
+          {{- if .Values.security.tls.enabled }}
+          volumes:
+            - name: tls-certs
+              secret:
+                secretName: {{ include "goqueue.fullname" . }}-tls
+          {{- end }}
+---
+{{/*
+# =============================================================================
+# VOLUME SNAPSHOT CRONJOB
+# =============================================================================
+#
+# WHAT: Creates VolumeSnapshots on schedule.
+#
+# WHY SEPARATE FROM METADATA BACKUP?
+#   - VolumeSnapshot is CSI-level (captures PVC data)
+#   - Metadata backup is application-level (topics, offsets)
+#   - Different retention policies may apply
+#
+# FLOW:
+#   CronJob → Create VolumeSnapshot manifests → CSI driver snapshots PVC
+#
+# LIMITATION:
+#   - StatefulSets have multiple PVCs (one per replica)
+#   - This job snapshots the first replica only
+#   - For full cluster backup, use object storage upload
+#
+# =============================================================================
+*/}}
+{{- if .Values.backup.volumeSnapshot.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "goqueue.fullname" . }}-snapshot
+  labels:
+    {{- include "goqueue.labels" . | nindent 4 }}
+    app.kubernetes.io/component: snapshot
+spec:
+  schedule: {{ .Values.backup.volumeSnapshot.schedule | default "0 3 * * *" | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            {{- include "goqueue.labels" . | nindent 12 }}
+            app.kubernetes.io/component: snapshot-job
+        spec:
+          restartPolicy: OnFailure
+          serviceAccountName: {{ include "goqueue.fullname" . }}-snapshot-sa
+          containers:
+            - name: snapshot
+              image: bitnami/kubectl:latest
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  set -e
+                  TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+                  SNAPSHOT_NAME="{{ include "goqueue.fullname" . }}-${TIMESTAMP}"
+                  
+                  # Create VolumeSnapshot for each PVC
+                  for i in $(seq 0 {{ sub .Values.replicaCount 1 }}); do
+                    PVC_NAME="data-{{ include "goqueue.fullname" . }}-${i}"
+                    SNAP_NAME="${SNAPSHOT_NAME}-${i}"
+                    
+                    echo "Creating snapshot ${SNAP_NAME} for PVC ${PVC_NAME}..."
+                    
+                    cat <<EOF | kubectl apply -f -
+                  apiVersion: snapshot.storage.k8s.io/v1
+                  kind: VolumeSnapshot
+                  metadata:
+                    name: ${SNAP_NAME}
+                    namespace: {{ .Release.Namespace }}
+                    labels:
+                      app.kubernetes.io/name: {{ include "goqueue.name" . }}
+                      app.kubernetes.io/instance: {{ .Release.Name }}
+                      app.kubernetes.io/component: backup
+                      backup-timestamp: "${TIMESTAMP}"
+                  spec:
+                    volumeSnapshotClassName: {{ include "goqueue.fullname" . }}-snapshots
+                    source:
+                      persistentVolumeClaimName: ${PVC_NAME}
+                  EOF
+                    
+                    echo "Snapshot ${SNAP_NAME} created successfully"
+                  done
+                  
+                  # Cleanup old snapshots beyond retention
+                  RETENTION={{ .Values.backup.volumeSnapshot.retention | default 7 }}
+                  echo "Cleaning up snapshots older than ${RETENTION} days..."
+                  
+                  # List snapshots older than retention, delete them
+                  kubectl get volumesnapshots -n {{ .Release.Namespace }} \
+                    -l app.kubernetes.io/name={{ include "goqueue.name" . }} \
+                    -l app.kubernetes.io/component=backup \
+                    --sort-by=.metadata.creationTimestamp \
+                    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' | \
+                  head -n -$((RETENTION * {{ .Values.replicaCount }})) | \
+                  xargs -r kubectl delete volumesnapshot -n {{ .Release.Namespace }}
+                  
+                  echo "Snapshot cleanup complete"
+              resources:
+                limits:
+                  cpu: 100m
+                  memory: 128Mi
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+---
+{{/*
+# =============================================================================
+# SNAPSHOT SERVICE ACCOUNT & RBAC
+# =============================================================================
+#
+# The snapshot job needs permissions to:
+#   - Create VolumeSnapshot resources
+#   - List and delete old VolumeSnapshots
+#
+# =============================================================================
+*/}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "goqueue.fullname" . }}-snapshot-sa
+  labels:
+    {{- include "goqueue.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "goqueue.fullname" . }}-snapshot-role
+  labels:
+    {{- include "goqueue.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+rules:
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshots"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "goqueue.fullname" . }}-snapshot-binding
+  labels:
+    {{- include "goqueue.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "goqueue.fullname" . }}-snapshot-role
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "goqueue.fullname" . }}-snapshot-sa
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+{{- end }}

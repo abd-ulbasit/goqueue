@@ -3,11 +3,50 @@
 ## Overall Status
 
 **Phase**: 4 of 4
-**Milestones**: 22/26 complete (M21: Security DEPLOYED, M23: Schema Registry DEPLOYED, M20: Metrics DEPLOYED)
+**Milestones**: 23/26 complete (M23: Backup & Restore DEPLOYED, M21: Security DEPLOYED, Schema Registry DEPLOYED, M20: Metrics DEPLOYED)
 **Tests**: 640+ passing (storage: 50+, broker: 470+, api: 24, grpc: 16, client: 14, cluster: 50+)
 **Started**: Session 1
 
-## Latest Session - Security & Schema Registry Deployment
+## Latest Session - M23 Backup & Restore Complete
+
+### What Was Accomplished
+
+**M23: Backup & Restore Deployed to EKS**:
+- ✅ **VolumeSnapshot CRDs**: Installed CSI snapshot controller and CRDs
+- ✅ **VolumeSnapshotClass**: `goqueue-snapshots` with EBS CSI driver
+- ✅ **Backup CronJobs**:
+  - `goqueue-backup`: Metadata backup at 2 AM daily
+  - `goqueue-snapshot`: VolumeSnapshot at 3 AM daily
+- ✅ **Backup RBAC**: ServiceAccount, Role, RoleBinding for snapshot creation
+- ✅ **StorageClass Fix**: All StorageClasses now have `reclaimPolicy: Delete` (fixes EBS orphaning)
+
+**Code Changes**:
+- ✅ **backup_manager.go**: Complete BackupManager with CreateBackup, RestoreFromBackup, ListBackups
+- ✅ **backup-cronjob.yaml**: Helm template with two CronJobs and RBAC
+- ✅ **volumesnapshotclass.yaml**: VolumeSnapshotClass for CSI snapshots
+- ✅ **backup.go CLI**: Commands for create, list, get, delete, restore
+- ✅ **admin_api.go**: API endpoints for /admin/backup
+
+**Infrastructure Fixes**:
+- ✅ **TLS keepOnDelete**: Made configurable (default: false - secrets deleted with release)
+- ✅ **EBS Volumes**: StorageClass with Delete policy prevents orphaned volumes
+- ✅ **VolumeSnapshot CRDs**: Manually installed (not included in EBS CSI addon)
+
+**Deployment Verified**:
+```
+Pods:            3/3 Running
+CronJobs:        goqueue-backup (0 2 * * *), goqueue-snapshot (0 3 * * *)
+VolumeSnapshotClass: goqueue-snapshots (ebs.csi.aws.com)
+StorageClass:    gp3 (Delete), goqueue-storage (Delete)
+PVCs:            3x 50Gi Bound
+RBAC:            goqueue-snapshot-sa, goqueue-snapshot-role, goqueue-snapshot-binding
+```
+
+**Note**: Backup API endpoints require new Docker image build to test (code added but not in running v0.7.0-security-schemas image)
+
+---
+
+## Previous Session - Security & Schema Registry Deployment
 
 ### What Was Accomplished
 
