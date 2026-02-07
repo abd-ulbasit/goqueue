@@ -1,0 +1,197 @@
+# =============================================================================
+# GOQUEUE RELEASE PIPELINE
+# =============================================================================
+#
+# TRIGGERED BY: Pushing a v* tag (e.g., v1.0.0, v1.2.3-rc1)
+#
+# SEPARATION OF CONCERNS:
+# ┌─────────────────────────────────────────────────────────────────────────────┐
+# │ ci.yml handles: "Is this code correct?" (lint, test, build)               │
+# │ release.yml handles: "Ship this code" (GoReleaser, Docker, changelog)     │
+# │                                                                            │
+# │ WHY SEPARATE?                                                              │
+# │   1. Release needs elevated permissions (write packages, create releases) │
+# │   2. Release runs on tags, CI runs on branches — different triggers       │
+# │   3. Failure in release shouldn't block CI, and vice versa                │
+# │   4. Cleaner audit trail: tag → release workflow → artifacts              │
+# │                                                                            │
+# │ COMPARISON:                                                                │
+# │   - Most Go OSS projects (NATS, CockroachDB, minio): Separate release    │
+# │   - Kafka: Uses Jenkins pipelines, separate release job                   │
+# │   - Convention: CI = push/PR, Release = tag push                          │
+# └─────────────────────────────────────────────────────────────────────────────┘
+#
+# RELEASE FLOW:
+#   1. Developer tags: git tag v1.0.0 && git push origin v1.0.0
+#   2. This workflow triggers
+#   3. Runs lint + test first (safety net)
+#   4. GoReleaser builds binaries, creates GitHub release, generates changelog
+#   5. Docker multi-platform image pushed to GHCR with semver tags
+#
+# =============================================================================
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  GO_VERSION: '1.24'
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+# Only one release at a time
+concurrency:
+  group: release
+  cancel-in-progress: false  # Never cancel an in-progress release
+
+permissions:
+  contents: write   # Create GitHub releases
+  packages: write   # Push Docker images to GHCR
+  id-token: write   # Sign artifacts (optional, for sigstore)
+
+jobs:
+  # ============================================================================
+  # Validate — Run tests before releasing
+  # ============================================================================
+  #
+  # SAFETY NET:
+  #   Even though CI should have caught issues before the tag was pushed,
+  #   we re-run tests here because:
+  #     1. Someone might tag directly without PR
+  #     2. The tag commit might differ from what CI tested
+  #     3. Belt-and-suspenders: never ship broken code
+  #
+  # ============================================================================
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # GoReleaser needs full history for changelog
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Run tests
+        run: go test -race -timeout=10m ./...
+
+  # ============================================================================
+  # Release — GoReleaser
+  # ============================================================================
+  #
+  # GORELEASER DOES:
+  #   1. Cross-compile binaries (linux/darwin/windows × amd64/arm64)
+  #   2. Create archives (.tar.gz, .zip for Windows)
+  #   3. Generate checksums (SHA256)
+  #   4. Generate changelog from commits
+  #   5. Create GitHub Release with all artifacts
+  #
+  # WHY GORELEASER?
+  #   De facto standard for Go project releases. Used by Hugo, Terraform,
+  #   Prometheus, and most Go OSS projects. Handles the tedious parts:
+  #   cross-compilation, packaging, checksumming, changelog.
+  #
+  # ============================================================================
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    needs: [validate]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: '~> v2'
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ============================================================================
+  # Docker Release — Push semver-tagged images
+  # ============================================================================
+  #
+  # TAG STRATEGY (semver):
+  #   Tag v1.2.3 produces Docker tags:
+  #     - ghcr.io/abd-ulbasit/goqueue:1.2.3
+  #     - ghcr.io/abd-ulbasit/goqueue:1.2
+  #     - ghcr.io/abd-ulbasit/goqueue:1
+  #     - ghcr.io/abd-ulbasit/goqueue:latest
+  #
+  # WHY ALL FOUR?
+  #   - :1.2.3 — Exact version pinning (production)
+  #   - :1.2   — Latest patch within minor (staging environments)
+  #   - :1     — Latest minor/patch within major (dev environments)
+  #   - :latest — Convenience, always the newest (demos, quick testing)
+  #
+  # COMPARISON:
+  #   - Docker Hub official images: Same strategy
+  #   - Kafka (confluent): major.minor.patch only
+  #   - Redis: major.minor + latest
+  #
+  # ============================================================================
+  docker-release:
+    name: Docker Release
+    runs-on: ubuntu-latest
+    needs: [validate]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            GIT_COMMIT=${{ github.sha }}
+            BUILD_TIME=${{ github.event.head_commit.timestamp }}

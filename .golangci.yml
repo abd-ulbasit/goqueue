@@ -1,40 +1,238 @@
 # =============================================================================
-# GOLANGCI-LINT CONFIGURATION (v1 format)
+# GOLANGCI-LINT CONFIGURATION
 # =============================================================================
 #
-# This configuration enables linters that help maintain code quality.
-# Run locally: golangci-lint run
-# Run with fixes: golangci-lint run --fix
+# WHY LINTING MATTERS:
+# ┌─────────────────────────────────────────────────────────────────────────────┐
+# │ Linters catch bugs BEFORE they reach production:                            │
+# │                                                                             │
+# │   - errcheck:    Unchecked errors → silent failures in production          │
+# │   - govet:       Incorrect printf formats → panics or wrong output         │
+# │   - staticcheck: Dead code, deprecated APIs → maintenance burden           │
+# │   - gocritic:    Performance anti-patterns → unnecessary allocations       │
+# │   - revive:      Style issues → inconsistent codebase                      │
+# │   - gosec:       Security issues → vulnerabilities in production           │
+# │                                                                             │
+# │ COMPARISON:                                                                 │
+# │   - Kafka: Uses Checkstyle + SpotBugs (Java)                              │
+# │   - RabbitMQ: Dialyzer (Erlang static analysis)                            │
+# │   - NATS: Uses golangci-lint (same tool, similar config)                   │
+# │   - CockroachDB: Uses golangci-lint with 30+ linters                      │
+# │                                                                             │
+# │ PHILOSOPHY:                                                                 │
+# │   Enable linters that catch real bugs, not just style preferences.          │
+# │   Every linter here has prevented a real bug in production Go code.        │
+# └─────────────────────────────────────────────────────────────────────────────┘
 #
-# NOTE: We start with lenient settings to avoid blocking CI on existing code.
+# RUN:
+#   make lint                      # Via Makefile
+#   golangci-lint run              # Check all issues
+#   golangci-lint run --fix        # Auto-fix what's possible
+#   golangci-lint run --new        # Only check new/changed code
 #
 # =============================================================================
 
 run:
   timeout: 5m
+  # Skip generated code — linting protobuf output is pointless
   skip-dirs:
     - api/proto/gen
     - vendor
 
+# =============================================================================
+# LINTER SELECTION
+# =============================================================================
+#
+# Linters are grouped by what they catch:
+#
+# CORRECTNESS (catch bugs):
+#   errcheck     - Unchecked error returns
+#   govet        - Suspicious constructs (printf args, struct tags)
+#   staticcheck  - Advanced static analysis (SA* checks)
+#   ineffassign  - Assignments to variables that are never used
+#   unused       - Unused variables, functions, types
+#
+# PERFORMANCE:
+#   prealloc     - Slice pre-allocation suggestions
+#   copyloopvar  - Detects loop variable capture bugs (Go <1.22)
+#
+# STYLE & CONSISTENCY:
+#   gofmt        - Standard Go formatting
+#   goimports    - Import grouping and ordering
+#   revive       - Extensible linter (successor to golint)
+#   misspell     - Catches common typos in comments/strings
+#
+# SECURITY:
+#   gosec        - Security-focused checks (SQL injection, crypto, etc.)
+#
+# CODE QUALITY:
+#   gocritic     - Opinionated but useful code suggestions
+#   noctx        - HTTP requests without context.Context
+#   bodyclose    - Unclosed HTTP response bodies (resource leak)
+#   errname      - Error variables must follow Go naming (ErrFoo)
+#   errorlint    - Proper error wrapping with %w
+# =============================================================================
 linters:
   enable:
+    # --- Correctness ---
     - errcheck
-    - gosimple
     - govet
-    - ineffassign
     - staticcheck
+    - ineffassign
     - unused
+
+    # --- Style ---
     - gofmt
     - goimports
     - misspell
+    - revive
 
+    # --- Performance ---
+    - prealloc
+    - copyloopvar
+
+    # --- Security ---
+    - gosec
+
+    # --- Code Quality ---
+    - gocritic
+    - noctx
+    - bodyclose
+    - errname
+    - errorlint
+
+# =============================================================================
+# LINTER-SPECIFIC SETTINGS
+# =============================================================================
+linters-settings:
+  # errcheck: Catch unchecked errors — the #1 source of silent Go bugs
+  errcheck:
+    # Check type assertions (value, ok := x.(Type))
+    check-type-assertions: true
+    # Don't flag these functions (common to ignore their errors)
+    exclude-functions:
+      - (io.Closer).Close
+      - (*os.File).Close
+      - (net/http.ResponseWriter).Write
+      - fmt.Fprint
+      - fmt.Fprintf
+      - fmt.Fprintln
+
+  # govet: Built-in Go analysis passes
+  govet:
+    enable-all: true
+    disable:
+      # fieldalignment is noisy and the savings are usually trivial
+      - fieldalignment
+
+  # revive: Successor to golint — extensible and configurable
+  revive:
+    rules:
+      - name: blank-imports
+      - name: context-as-argument
+      - name: context-keys-type
+      - name: dot-imports
+      - name: error-return
+      - name: error-strings
+      - name: error-naming
+      - name: exported
+        disabled: true  # Too noisy for learning project with heavy comments
+      - name: increment-decrement
+      - name: var-naming
+      - name: var-declaration
+      - name: range
+      - name: receiver-naming
+      - name: time-naming
+      - name: unexported-return
+      - name: indent-error-flow
+      - name: errorf
+      - name: empty-block
+      - name: superfluous-else
+      - name: unreachable-code
+
+  # gocritic: Opinionated checker with useful diagnostics
+  gocritic:
+    enabled-tags:
+      - diagnostic
+      - style
+      - performance
+    disabled-checks:
+      # These are too opinionated for a learning project
+      - hugeParam
+      - rangeValCopy
+      - unnamedResult
+
+  # gosec: Security checker
+  gosec:
+    excludes:
+      # G104: Audit errors not checked — covered by errcheck
+      - G104
+      # G304: File path from variable — we intentionally use dynamic paths
+      - G304
+      # G401/G501: Weak crypto — not relevant for our use case
+      - G401
+      - G501
+
+  # errorlint: Proper error wrapping
+  errorlint:
+    # Check errors.Is instead of == comparison
+    comparison: true
+    # Check errors.As instead of type assertion
+    asserts: true
+    # Check fmt.Errorf uses %w for wrapping
+    errorf: true
+
+  # misspell: Catch typos
+  misspell:
+    locale: US
+
+# =============================================================================
+# ISSUE FILTERING
+# =============================================================================
+#
+# WHY EXCLUDE RULES?
+# Some linters flag things that are intentional or irrelevant in certain
+# contexts. For example:
+#   - Test files: errcheck is less important (test failures are visible)
+#   - Generated code: We don't control proto-gen output
+#   - Main files: Complex main() is expected in a broker
+# =============================================================================
 issues:
+  # Report all issues, don't cap per-linter
   max-issues-per-linter: 0
   max-same-issues: 0
+
   exclude-rules:
+    # Test files: relax errcheck and gosec (test code is less strict)
     - path: _test\.go
       linters:
         - errcheck
+        - gosec
+        - gocritic
+        - bodyclose
+        - noctx
+
+    # Generated protobuf code: skip everything
     - path: api/proto/gen/
       linters:
         - all
+
+    # Main entry points: allow complex functions
+    - path: cmd/
+      linters:
+        - gocritic
+
+    # CLI code: allow unchecked errors in output formatting
+    - path: internal/cli/
+      linters:
+        - errcheck
+
+    # Known patterns that are intentional
+    - linters:
+        - gocritic
+      text: "commentFormatting"
+
+    # Allow unused parameters in interface implementations
+    - linters:
+        - revive
+      text: "unused-parameter"
