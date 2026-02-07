@@ -16,6 +16,7 @@ package storage
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -482,7 +483,7 @@ func TestLog_Sync(t *testing.T) {
 
 	// Sync on closed log should fail
 	log.Close()
-	if err := log.Sync(); err != ErrLogClosed {
+	if err := log.Sync(); !errors.Is(err, ErrLogClosed) {
 		t.Errorf("Expected ErrLogClosed, got %v", err)
 	}
 }
@@ -717,13 +718,13 @@ func TestLog_ListSegmentFiles_InvalidFiles(t *testing.T) {
 
 	// Create a file that doesn't match the segment naming pattern
 	invalidFile := filepath.Join(dir, "invalid.txt")
-	if err := os.WriteFile(invalidFile, []byte("test"), 0644); err != nil {
+	if err := os.WriteFile(invalidFile, []byte("test"), 0o644); err != nil {
 		t.Fatalf("Failed to create invalid file: %v", err)
 	}
 
 	// Create a valid segment file
 	validFile := filepath.Join(dir, "00000000000000000000.log")
-	if err := os.WriteFile(validFile, []byte("test"), 0644); err != nil {
+	if err := os.WriteFile(validFile, []byte("test"), 0o644); err != nil {
 		t.Fatalf("Failed to create valid file: %v", err)
 	}
 

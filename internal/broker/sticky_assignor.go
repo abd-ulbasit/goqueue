@@ -178,22 +178,20 @@ func (s *StickyAssignor) Assign(
 	assignedPartitions := make(map[TopicPartition]string) // tp → memberID
 
 	// Step 1: Preserve current assignments for active members
-	if currentAssignment != nil {
-		for memberID, partitions := range currentAssignment {
-			// Skip members no longer in group
-			if _, exists := memberSet[memberID]; !exists {
+	for memberID, partitions := range currentAssignment {
+		// Skip members no longer in group
+		if _, exists := memberSet[memberID]; !exists {
+			continue
+		}
+
+		// Copy over partitions this member still has
+		for _, tp := range partitions {
+			// Verify partition still exists in topic
+			if !s.partitionExists(tp, topicPartitions) {
 				continue
 			}
-
-			// Copy over partitions this member still has
-			for _, tp := range partitions {
-				// Verify partition still exists in topic
-				if !s.partitionExists(tp, topicPartitions) {
-					continue
-				}
-				newAssignment[memberID] = append(newAssignment[memberID], tp)
-				assignedPartitions[tp] = memberID
-			}
+			newAssignment[memberID] = append(newAssignment[memberID], tp)
+			assignedPartitions[tp] = memberID
 		}
 	}
 
@@ -232,7 +230,9 @@ func (s *StickyAssignor) Assign(
 	}
 
 	// Step 4: Combine orphaned and excess into unassigned pool
-	unassigned := append(orphanedPartitions, excessPartitions...)
+	unassigned := make([]TopicPartition, 0, len(orphanedPartitions)+len(excessPartitions))
+	unassigned = append(unassigned, orphanedPartitions...)
+	unassigned = append(unassigned, excessPartitions...)
 	sort.Sort(TopicPartitionList(unassigned))
 
 	// Step 5: Assign unassigned partitions to needy members
@@ -494,11 +494,9 @@ func CalculateAssignmentDiff(
 
 	// Build old assignment lookup
 	oldOwnership := make(map[TopicPartition]string)
-	if oldAssignment != nil {
-		for memberID, partitions := range oldAssignment {
-			for _, tp := range partitions {
-				oldOwnership[tp] = memberID
-			}
+	for memberID, partitions := range oldAssignment {
+		for _, tp := range partitions {
+			oldOwnership[tp] = memberID
 		}
 	}
 
@@ -511,18 +509,16 @@ func CalculateAssignmentDiff(
 	}
 
 	// Find revocations (in old, not in new for same member, or owner changed)
-	if oldAssignment != nil {
-		for memberID, oldPartitions := range oldAssignment {
-			for _, tp := range oldPartitions {
-				newOwner, inNew := newOwnership[tp]
-				if !inNew || newOwner != memberID {
-					// This member lost this partition
-					diff.Revocations[memberID] = append(diff.Revocations[memberID], tp)
-					diff.TotalPartitionsMoved++
-				} else {
-					// Partition stays with same member
-					diff.Unchanged[memberID] = append(diff.Unchanged[memberID], tp)
-				}
+	for memberID, oldPartitions := range oldAssignment {
+		for _, tp := range oldPartitions {
+			newOwner, inNew := newOwnership[tp]
+			if !inNew || newOwner != memberID {
+				// This member lost this partition
+				diff.Revocations[memberID] = append(diff.Revocations[memberID], tp)
+				diff.TotalPartitionsMoved++
+			} else {
+				// Partition stays with same member
+				diff.Unchanged[memberID] = append(diff.Unchanged[memberID], tp)
 			}
 		}
 	}

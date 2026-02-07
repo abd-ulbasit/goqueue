@@ -34,8 +34,7 @@ var (
 	apiKeyFlag  string
 
 	// Shared instances
-	client    *cli.Client
-	formatter *cli.Formatter
+	client *cli.Client
 )
 
 // =============================================================================
@@ -114,13 +113,6 @@ func initializeClient(cmd *cobra.Command, args []string) error {
 		APIKey:    apiKey,
 	}
 	client = cli.NewClient(clientConfig)
-
-	// Create formatter - parse the string flag to OutputFormat
-	outputFormat, err := cli.ParseOutputFormat(outputFlag)
-	if err != nil {
-		return err
-	}
-	formatter = cli.NewFormatter(outputFormat)
 
 	return nil
 }

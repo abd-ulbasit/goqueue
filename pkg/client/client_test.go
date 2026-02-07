@@ -36,6 +36,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -94,7 +95,8 @@ func setupTestEnv(t *testing.T) *testEnv {
 	// Start server in background (Start() blocks)
 	go func() {
 		if err := server.Start(); err != nil {
-			// Server stopped - this is expected during teardown
+			// Server stopped — expected during teardown; error is non-actionable in tests.
+			_ = err
 		}
 	}()
 
@@ -368,7 +370,7 @@ func TestClient_Consume(t *testing.T) {
 	messageCount := 0
 	for {
 		msg, err := stream.Recv()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {

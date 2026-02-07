@@ -482,7 +482,7 @@ func (ps *PartitionScaler) AddPartitions(request *PartitionScaleRequest) (*Parti
 //	Partition 1: [B, C, A]
 //	Partition 2: [C, A, B]
 //	Partition 3: [A, B, C]  // wraps around
-func (ps *PartitionScaler) autoAssignReplicas(partitionID int, replicationFactor int) []cluster.NodeID {
+func (ps *PartitionScaler) autoAssignReplicas(partitionID, replicationFactor int) []cluster.NodeID {
 	numNodes := len(ps.nodeIDs)
 	replicas := make([]cluster.NodeID, replicationFactor)
 

@@ -61,7 +61,7 @@
 //
 // 1. PRODUCER ID (PID)
 //    A unique 64-bit identifier assigned to each producer instance.
-//    - Assigned by broker on InitProducerId call
+//    - Assigned by broker on InitProducerID call
 //    - Stable across producer lifetime (same PID for all sends)
 //    - Different producers have different PIDs
 //
@@ -83,7 +83,7 @@
 //    │     │                              ▼                                 │
 //    │     │                    Producer A' (epoch=1)                       │
 //    │     │                         │                                      │
-//    │     │                         │ InitProducerId                       │
+//    │     │                         │ InitProducerID                       │
 //    │     │                         │ (broker increments epoch)            │
 //    │     │                         ▼                                      │
 //    │     │ recovers!          Starts sending                              │
@@ -125,7 +125,7 @@
 //    TRANSACTIONAL ID FLOW:
 //    ┌─────────────────────────────────────────────────────────────────────┐
 //    │                                                                     │
-//    │   InitProducerId("order-service-1")                                 │
+//    │   InitProducerID("order-service-1")                                 │
 //    │        │                                                            │
 //    │        ▼                                                            │
 //    │   ┌─────────────────────────────────────────────────────────────┐   │
@@ -169,14 +169,14 @@ var (
 	// ErrOutOfOrderSequence means sequence numbers arrived out of order
 	ErrOutOfOrderSequence = errors.New("out of order sequence number")
 
-	// ErrUnknownProducerId means the PID is not registered
-	ErrUnknownProducerId = errors.New("unknown producer ID")
+	// ErrUnknownProducerID means the PID is not registered
+	ErrUnknownProducerID = errors.New("unknown producer ID")
 
-	// ErrTransactionalIdRequired means transactional operations need a transactional ID
-	ErrTransactionalIdRequired = errors.New("transactional ID required")
+	// ErrTransactionalIDRequired means transactional operations need a transactional ID
+	ErrTransactionalIDRequired = errors.New("transactional ID required")
 
-	// ErrProducerIdExhausted means no more producer IDs available (unlikely)
-	ErrProducerIdExhausted = errors.New("producer IDs exhausted")
+	// ErrProducerIDExhausted means no more producer IDs available (unlikely)
+	ErrProducerIDExhausted = errors.New("producer IDs exhausted")
 )
 
 // =============================================================================
@@ -188,15 +188,15 @@ const (
 	// Kafka uses 5, but we use a larger window for better duplicate detection
 	DefaultDedupWindowSize = 50
 
-	// MaxProducerId is the maximum producer ID (2^63 - 1)
+	// MaxProducerID is the maximum producer ID (2^63 - 1)
 	// Using int64 for simplicity (Kafka uses unsigned)
-	MaxProducerId int64 = 1<<63 - 1
+	MaxProducerID int64 = 1<<63 - 1
 
 	// MaxEpoch is the maximum epoch value (2^16 - 1)
 	MaxEpoch int16 = 1<<15 - 1
 
-	// NoProducerId represents an uninitialized producer
-	NoProducerId int64 = -1
+	// NoProducerID represents an uninitialized producer
+	NoProducerID int64 = -1
 
 	// NoEpoch represents an uninitialized epoch
 	NoEpoch int16 = -1
@@ -206,18 +206,18 @@ const (
 // PRODUCER STATE
 // =============================================================================
 
-// ProducerIdAndEpoch holds the identity of an idempotent/transactional producer.
+// ProducerIDAndEpoch holds the identity of an idempotent/transactional producer.
 //
 // WHY SEPARATE ID AND EPOCH?
 // - PID identifies the "logical" producer (e.g., order-service)
 // - Epoch identifies the "incarnation" (e.g., 3rd restart today)
 // - Together they uniquely identify a producer instance
 // - Old epochs are rejected (zombie fencing)
-type ProducerIdAndEpoch struct {
-	// ProducerId is a unique 64-bit identifier assigned by the broker.
+type ProducerIDAndEpoch struct {
+	// ProducerID is a unique 64-bit identifier assigned by the broker.
 	// It remains stable across a producer's lifetime but changes if
 	// the transactional ID is different.
-	ProducerId int64
+	ProducerID int64
 
 	// Epoch is incremented each time a producer with the same
 	// transactional ID initializes. Used for zombie fencing.
@@ -226,13 +226,13 @@ type ProducerIdAndEpoch struct {
 }
 
 // IsValid returns true if this represents a valid producer identity.
-func (p ProducerIdAndEpoch) IsValid() bool {
-	return p.ProducerId >= 0 && p.Epoch >= 0
+func (p ProducerIDAndEpoch) IsValid() bool {
+	return p.ProducerID >= 0 && p.Epoch >= 0
 }
 
 // String returns a human-readable representation.
-func (p ProducerIdAndEpoch) String() string {
-	return fmt.Sprintf("PID=%d,epoch=%d", p.ProducerId, p.Epoch)
+func (p ProducerIDAndEpoch) String() string {
+	return fmt.Sprintf("PID=%d,epoch=%d", p.ProducerID, p.Epoch)
 }
 
 // =============================================================================
@@ -240,9 +240,9 @@ func (p ProducerIdAndEpoch) String() string {
 // =============================================================================
 
 // PartitionSequenceKey uniquely identifies a sequence tracking context.
-// Sequences are tracked per (ProducerId, Topic, Partition) combination.
+// Sequences are tracked per (ProducerID, Topic, Partition) combination.
 type PartitionSequenceKey struct {
-	ProducerId int64
+	ProducerID int64
 	Topic      string
 	Partition  int
 }
@@ -291,20 +291,20 @@ func NewSequenceState() *SequenceState {
 // TRANSACTIONAL ID STATE
 // =============================================================================
 
-// TransactionalIdState holds the mapping from transactional ID to producer state.
+// TransactionalIDState holds the mapping from transactional ID to producer state.
 //
 // LIFECYCLE:
-//  1. Producer calls InitProducerId("my-txn-id")
+//  1. Producer calls InitProducerID("my-txn-id")
 //  2. Broker looks up or creates PID for "my-txn-id"
 //  3. Broker increments epoch (or starts at 0 for new)
 //  4. Broker returns (PID, epoch) to producer
 //  5. Producer uses this identity for all subsequent operations
-type TransactionalIdState struct {
-	// TransactionalId is the client-provided identifier
-	TransactionalId string
+type TransactionalIDState struct {
+	// TransactionalID is the client-provided identifier
+	TransactionalID string
 
-	// ProducerIdAndEpoch is the current identity
-	ProducerIdAndEpoch ProducerIdAndEpoch
+	// ProducerIDAndEpoch is the current identity
+	ProducerIDAndEpoch ProducerIDAndEpoch
 
 	// LastHeartbeat is when the producer last sent a heartbeat
 	// Used for timeout detection
@@ -316,8 +316,8 @@ type TransactionalIdState struct {
 	// State is the current transaction state (if in a transaction)
 	State TransactionState
 
-	// CurrentTransactionId is the ID of the current transaction (if any)
-	CurrentTransactionId string
+	// CurrentTransactionID is the ID of the current transaction (if any)
+	CurrentTransactionID string
 
 	// PendingPartitions are partitions touched in the current transaction
 	// Maps topic -> set of partition numbers
@@ -327,11 +327,11 @@ type TransactionalIdState struct {
 	TransactionStartTime time.Time
 }
 
-// NewTransactionalIdState creates a new transactional ID state.
-func NewTransactionalIdState(txnId string, pid ProducerIdAndEpoch, timeoutMs int64) *TransactionalIdState {
-	return &TransactionalIdState{
-		TransactionalId:      txnId,
-		ProducerIdAndEpoch:   pid,
+// NewTransactionalIDState creates a new transactional ID state.
+func NewTransactionalIDState(txnID string, pid ProducerIDAndEpoch, timeoutMs int64) *TransactionalIDState {
+	return &TransactionalIDState{
+		TransactionalID:      txnID,
+		ProducerIDAndEpoch:   pid,
 		LastHeartbeat:        time.Now(),
 		TransactionTimeoutMs: timeoutMs,
 		State:                TransactionStateEmpty,
@@ -479,13 +479,13 @@ type IdempotentProducerManager struct {
 	// config holds manager configuration
 	config IdempotentProducerManagerConfig
 
-	// nextProducerId is the next PID to assign
+	// nextProducerID is the next PID to assign
 	// Atomically incremented for each new producer
-	nextProducerId int64
+	nextProducerID int64
 
-	// transactionalIds maps transactional ID to state
+	// transactionalIDs maps transactional ID to state
 	// Protected by txnMu
-	transactionalIds map[string]*TransactionalIdState
+	transactionalIDs map[string]*TransactionalIDState
 	txnMu            sync.RWMutex
 
 	// sequenceStates maps (PID, topic, partition) to sequence state
@@ -493,7 +493,7 @@ type IdempotentProducerManager struct {
 	sequenceStates map[PartitionSequenceKey]*SequenceState
 	seqMu          sync.RWMutex
 
-	// pidMu protects nextProducerId
+	// pidMu protects nextProducerID
 	pidMu sync.Mutex
 }
 
@@ -501,8 +501,8 @@ type IdempotentProducerManager struct {
 func NewIdempotentProducerManager(config IdempotentProducerManagerConfig) *IdempotentProducerManager {
 	return &IdempotentProducerManager{
 		config:           config,
-		nextProducerId:   1, // Start at 1 (0 reserved for future use)
-		transactionalIds: make(map[string]*TransactionalIdState),
+		nextProducerID:   1, // Start at 1 (0 reserved for future use)
+		transactionalIDs: make(map[string]*TransactionalIDState),
 		sequenceStates:   make(map[PartitionSequenceKey]*SequenceState),
 	}
 }
@@ -511,7 +511,7 @@ func NewIdempotentProducerManager(config IdempotentProducerManagerConfig) *Idemp
 // PRODUCER ID OPERATIONS
 // =============================================================================
 
-// InitProducerId initializes or retrieves the producer ID for a transactional ID.
+// InitProducerID initializes or retrieves the producer ID for a transactional ID.
 //
 // BEHAVIOR:
 //   - New transactional ID: Assign new PID with epoch=0
@@ -519,11 +519,11 @@ func NewIdempotentProducerManager(config IdempotentProducerManagerConfig) *Idemp
 //   - Empty transactional ID: Assign new PID with epoch=0 (non-transactional)
 //
 // RETURNS:
-//   - ProducerIdAndEpoch: The identity to use for subsequent operations
+//   - ProducerIDAndEpoch: The identity to use for subsequent operations
 //   - error: If ID exhausted or other error
 //
-// KAFKA EQUIVALENT: InitProducerIdRequest / InitProducerIdResponse
-func (m *IdempotentProducerManager) InitProducerId(transactionalId string, transactionTimeoutMs int64) (ProducerIdAndEpoch, error) {
+// KAFKA EQUIVALENT: InitProducerIDRequest / InitProducerIDResponse
+func (m *IdempotentProducerManager) InitProducerID(transactionalID string, transactionTimeoutMs int64) (ProducerIDAndEpoch, error) {
 	// Validate timeout
 	if transactionTimeoutMs <= 0 {
 		transactionTimeoutMs = m.config.DefaultTransactionTimeoutMs
@@ -533,56 +533,56 @@ func (m *IdempotentProducerManager) InitProducerId(transactionalId string, trans
 	}
 
 	// Non-transactional producer: assign new PID each time
-	if transactionalId == "" {
-		return m.allocateNewProducerId()
+	if transactionalID == "" {
+		return m.allocateNewProducerID()
 	}
 
 	// Transactional producer: look up or create mapping
 	m.txnMu.Lock()
 	defer m.txnMu.Unlock()
 
-	existing, exists := m.transactionalIds[transactionalId]
+	existing, exists := m.transactionalIDs[transactionalID]
 	if exists {
 		// Existing producer: increment epoch (fence old instance)
-		newEpoch := existing.ProducerIdAndEpoch.Epoch + 1
+		newEpoch := existing.ProducerIDAndEpoch.Epoch + 1
 		if newEpoch > MaxEpoch {
 			// Epoch overflow: assign new PID
-			pid, err := m.allocateNewProducerIdLocked()
+			pid, err := m.allocateNewProducerIDLocked()
 			if err != nil {
-				return ProducerIdAndEpoch{}, err
+				return ProducerIDAndEpoch{}, err
 			}
 			newEpoch = 0
-			existing.ProducerIdAndEpoch = ProducerIdAndEpoch{
-				ProducerId: pid,
+			existing.ProducerIDAndEpoch = ProducerIDAndEpoch{
+				ProducerID: pid,
 				Epoch:      newEpoch,
 			}
 		} else {
-			existing.ProducerIdAndEpoch.Epoch = newEpoch
+			existing.ProducerIDAndEpoch.Epoch = newEpoch
 		}
 
 		// Reset transaction state
 		existing.State = TransactionStateEmpty
-		existing.CurrentTransactionId = ""
+		existing.CurrentTransactionID = ""
 		existing.PendingPartitions = make(map[string]map[int]struct{})
 		existing.LastHeartbeat = time.Now()
 		existing.TransactionTimeoutMs = transactionTimeoutMs
 
-		return existing.ProducerIdAndEpoch, nil
+		return existing.ProducerIDAndEpoch, nil
 	}
 
 	// New transactional ID: allocate new PID
-	pid, err := m.allocateNewProducerIdLocked()
+	pid, err := m.allocateNewProducerIDLocked()
 	if err != nil {
-		return ProducerIdAndEpoch{}, err
+		return ProducerIDAndEpoch{}, err
 	}
 
-	identity := ProducerIdAndEpoch{
-		ProducerId: pid,
+	identity := ProducerIDAndEpoch{
+		ProducerID: pid,
 		Epoch:      0,
 	}
 
-	m.transactionalIds[transactionalId] = NewTransactionalIdState(
-		transactionalId,
+	m.transactionalIDs[transactionalID] = NewTransactionalIDState(
+		transactionalID,
 		identity,
 		transactionTimeoutMs,
 	)
@@ -590,29 +590,29 @@ func (m *IdempotentProducerManager) InitProducerId(transactionalId string, trans
 	return identity, nil
 }
 
-// allocateNewProducerId allocates a new PID (thread-safe).
-func (m *IdempotentProducerManager) allocateNewProducerId() (ProducerIdAndEpoch, error) {
+// allocateNewProducerID allocates a new PID (thread-safe).
+func (m *IdempotentProducerManager) allocateNewProducerID() (ProducerIDAndEpoch, error) {
 	m.pidMu.Lock()
 	defer m.pidMu.Unlock()
 
-	pid, err := m.allocateNewProducerIdLocked()
+	pid, err := m.allocateNewProducerIDLocked()
 	if err != nil {
-		return ProducerIdAndEpoch{}, err
+		return ProducerIDAndEpoch{}, err
 	}
 
-	return ProducerIdAndEpoch{
-		ProducerId: pid,
+	return ProducerIDAndEpoch{
+		ProducerID: pid,
 		Epoch:      0, // New producer starts at epoch 0
 	}, nil
 }
 
-// allocateNewProducerIdLocked allocates a new PID (caller must hold pidMu).
-func (m *IdempotentProducerManager) allocateNewProducerIdLocked() (int64, error) {
-	if m.nextProducerId >= MaxProducerId {
-		return 0, ErrProducerIdExhausted
+// allocateNewProducerIDLocked allocates a new PID (caller must hold pidMu).
+func (m *IdempotentProducerManager) allocateNewProducerIDLocked() (int64, error) {
+	if m.nextProducerID >= MaxProducerID {
+		return 0, ErrProducerIDExhausted
 	}
-	pid := m.nextProducerId
-	m.nextProducerId++
+	pid := m.nextProducerID
+	m.nextProducerID++
 	return pid, nil
 }
 
@@ -639,7 +639,7 @@ func (m *IdempotentProducerManager) allocateNewProducerIdLocked() (int64, error)
 //   - Duplicate (sequence≤last): Return existing offset, don't write
 //   - Gap (sequence>last+1): Reject with ErrOutOfOrderSequence
 func (m *IdempotentProducerManager) CheckAndUpdateSequence(
-	pid ProducerIdAndEpoch,
+	pid ProducerIDAndEpoch,
 	topic string,
 	partition int,
 	sequence int32,
@@ -648,11 +648,11 @@ func (m *IdempotentProducerManager) CheckAndUpdateSequence(
 
 	// Validate producer identity first
 	if !pid.IsValid() {
-		return 0, false, ErrUnknownProducerId
+		return 0, false, ErrUnknownProducerID
 	}
 
 	key := PartitionSequenceKey{
-		ProducerId: pid.ProducerId,
+		ProducerID: pid.ProducerID,
 		Topic:      topic,
 		Partition:  partition,
 	}
@@ -718,7 +718,7 @@ func (m *IdempotentProducerManager) CheckAndUpdateSequence(
 // Returns nil if no state exists.
 func (m *IdempotentProducerManager) GetSequenceState(pid int64, topic string, partition int) *SequenceState {
 	key := PartitionSequenceKey{
-		ProducerId: pid,
+		ProducerID: pid,
 		Topic:      topic,
 		Partition:  partition,
 	}
@@ -740,11 +740,11 @@ func (m *IdempotentProducerManager) GetSequenceState(pid int64, topic string, pa
 
 // copySequenceWindow creates a copy of the sequence window map.
 func copySequenceWindow(m map[int32]int64) map[int32]int64 {
-	copy := make(map[int32]int64, len(m))
+	clonedMap := make(map[int32]int64, len(m))
 	for k, v := range m {
-		copy[k] = v
+		clonedMap[k] = v
 	}
-	return copy
+	return clonedMap
 }
 
 // =============================================================================
@@ -756,9 +756,9 @@ func copySequenceWindow(m map[int32]int64) map[int32]int64 {
 // RETURNS:
 //   - nil: Epoch is valid
 //   - ErrProducerFenced: A newer epoch exists (zombie detected)
-//   - ErrUnknownProducerId: No such transactional ID registered
-func (m *IdempotentProducerManager) ValidateProducerEpoch(transactionalId string, pid ProducerIdAndEpoch) error {
-	if transactionalId == "" {
+//   - ErrUnknownProducerID: No such transactional ID registered
+func (m *IdempotentProducerManager) ValidateProducerEpoch(transactionalID string, pid ProducerIDAndEpoch) error {
+	if transactionalID == "" {
 		// Non-transactional producers: can't be fenced
 		return nil
 	}
@@ -766,20 +766,20 @@ func (m *IdempotentProducerManager) ValidateProducerEpoch(transactionalId string
 	m.txnMu.RLock()
 	defer m.txnMu.RUnlock()
 
-	state, exists := m.transactionalIds[transactionalId]
+	state, exists := m.transactionalIDs[transactionalID]
 	if !exists {
-		return ErrUnknownProducerId
+		return ErrUnknownProducerID
 	}
 
-	if state.ProducerIdAndEpoch.ProducerId != pid.ProducerId {
-		return ErrUnknownProducerId
+	if state.ProducerIDAndEpoch.ProducerID != pid.ProducerID {
+		return ErrUnknownProducerID
 	}
 
-	if state.ProducerIdAndEpoch.Epoch > pid.Epoch {
+	if state.ProducerIDAndEpoch.Epoch > pid.Epoch {
 		return ErrProducerFenced
 	}
 
-	if state.ProducerIdAndEpoch.Epoch < pid.Epoch {
+	if state.ProducerIDAndEpoch.Epoch < pid.Epoch {
 		// This shouldn't happen - producer has higher epoch than recorded
 		return ErrInvalidProducerEpoch
 	}
@@ -793,29 +793,29 @@ func (m *IdempotentProducerManager) ValidateProducerEpoch(transactionalId string
 
 // GetTransactionalState returns the state for a transactional ID.
 // Returns nil if not found.
-func (m *IdempotentProducerManager) GetTransactionalState(transactionalId string) *TransactionalIdState {
+func (m *IdempotentProducerManager) GetTransactionalState(transactionalID string) *TransactionalIDState {
 	m.txnMu.RLock()
 	defer m.txnMu.RUnlock()
 
-	state, exists := m.transactionalIds[transactionalId]
+	state, exists := m.transactionalIDs[transactionalID]
 	if !exists {
 		return nil
 	}
 
 	// Return a copy to prevent external modification
-	return &TransactionalIdState{
-		TransactionalId:      state.TransactionalId,
-		ProducerIdAndEpoch:   state.ProducerIdAndEpoch,
+	return &TransactionalIDState{
+		TransactionalID:      state.TransactionalID,
+		ProducerIDAndEpoch:   state.ProducerIDAndEpoch,
 		LastHeartbeat:        state.LastHeartbeat,
 		TransactionTimeoutMs: state.TransactionTimeoutMs,
 		State:                state.State,
-		CurrentTransactionId: state.CurrentTransactionId,
+		CurrentTransactionID: state.CurrentTransactionID,
 		PendingPartitions:    copyPendingPartitions(state.PendingPartitions),
 		TransactionStartTime: state.TransactionStartTime,
 	}
 }
 
-// GetTransactionalStateByProducerId looks up transactional state by producer ID.
+// GetTransactionalStateByProducerID looks up transactional state by producer ID.
 // This is a reverse lookup (iterates over all transactional IDs).
 //
 // RETURNS:
@@ -824,24 +824,24 @@ func (m *IdempotentProducerManager) GetTransactionalState(transactionalId string
 //
 // USE CASE:
 //
-//	PublishTransactional has producerId/epoch but not transactionalId.
+//	PublishTransactional has producerID/epoch but not transactionalID.
 //	This method allows looking up the current transaction ID for tracking.
-func (m *IdempotentProducerManager) GetTransactionalStateByProducerId(producerId int64, epoch int16) *TransactionalIdState {
+func (m *IdempotentProducerManager) GetTransactionalStateByProducerID(producerID int64, epoch int16) *TransactionalIDState {
 	m.txnMu.RLock()
 	defer m.txnMu.RUnlock()
 
 	// Linear scan - not optimal but transactional IDs are typically few
-	for _, state := range m.transactionalIds {
-		if state.ProducerIdAndEpoch.ProducerId == producerId &&
-			state.ProducerIdAndEpoch.Epoch == epoch {
+	for _, state := range m.transactionalIDs {
+		if state.ProducerIDAndEpoch.ProducerID == producerID &&
+			state.ProducerIDAndEpoch.Epoch == epoch {
 			// Return a copy
-			return &TransactionalIdState{
-				TransactionalId:      state.TransactionalId,
-				ProducerIdAndEpoch:   state.ProducerIdAndEpoch,
+			return &TransactionalIDState{
+				TransactionalID:      state.TransactionalID,
+				ProducerIDAndEpoch:   state.ProducerIDAndEpoch,
 				LastHeartbeat:        state.LastHeartbeat,
 				TransactionTimeoutMs: state.TransactionTimeoutMs,
 				State:                state.State,
-				CurrentTransactionId: state.CurrentTransactionId,
+				CurrentTransactionID: state.CurrentTransactionID,
 				PendingPartitions:    copyPendingPartitions(state.PendingPartitions),
 				TransactionStartTime: state.TransactionStartTime,
 			}
@@ -851,22 +851,22 @@ func (m *IdempotentProducerManager) GetTransactionalStateByProducerId(producerId
 }
 
 // UpdateHeartbeat updates the last heartbeat time for a transactional ID.
-func (m *IdempotentProducerManager) UpdateHeartbeat(transactionalId string, pid ProducerIdAndEpoch) error {
-	if transactionalId == "" {
-		return ErrTransactionalIdRequired
+func (m *IdempotentProducerManager) UpdateHeartbeat(transactionalID string, pid ProducerIDAndEpoch) error {
+	if transactionalID == "" {
+		return ErrTransactionalIDRequired
 	}
 
 	m.txnMu.Lock()
 	defer m.txnMu.Unlock()
 
-	state, exists := m.transactionalIds[transactionalId]
+	state, exists := m.transactionalIDs[transactionalID]
 	if !exists {
-		return ErrUnknownProducerId
+		return ErrUnknownProducerID
 	}
 
 	// Validate epoch
-	if state.ProducerIdAndEpoch.ProducerId != pid.ProducerId ||
-		state.ProducerIdAndEpoch.Epoch != pid.Epoch {
+	if state.ProducerIDAndEpoch.ProducerID != pid.ProducerID ||
+		state.ProducerIDAndEpoch.Epoch != pid.Epoch {
 		return ErrProducerFenced
 	}
 
@@ -891,13 +891,13 @@ func copyPendingPartitions(m map[string]map[int]struct{}) map[string]map[int]str
 // =============================================================================
 
 // SetTransactionState updates the transaction state for a transactional ID.
-func (m *IdempotentProducerManager) SetTransactionState(transactionalId string, state TransactionState) error {
+func (m *IdempotentProducerManager) SetTransactionState(transactionalID string, state TransactionState) error {
 	m.txnMu.Lock()
 	defer m.txnMu.Unlock()
 
-	txnState, exists := m.transactionalIds[transactionalId]
+	txnState, exists := m.transactionalIDs[transactionalID]
 	if !exists {
-		return ErrUnknownProducerId
+		return ErrUnknownProducerID
 	}
 
 	txnState.State = state
@@ -905,13 +905,13 @@ func (m *IdempotentProducerManager) SetTransactionState(transactionalId string, 
 }
 
 // AddPendingPartition records that a partition has been touched in the current transaction.
-func (m *IdempotentProducerManager) AddPendingPartition(transactionalId, topic string, partition int) error {
+func (m *IdempotentProducerManager) AddPendingPartition(transactionalID, topic string, partition int) error {
 	m.txnMu.Lock()
 	defer m.txnMu.Unlock()
 
-	state, exists := m.transactionalIds[transactionalId]
+	state, exists := m.transactionalIDs[transactionalID]
 	if !exists {
-		return ErrUnknownProducerId
+		return ErrUnknownProducerID
 	}
 
 	if state.PendingPartitions[topic] == nil {
@@ -923,11 +923,11 @@ func (m *IdempotentProducerManager) AddPendingPartition(transactionalId, topic s
 }
 
 // GetPendingPartitions returns all partitions touched in the current transaction.
-func (m *IdempotentProducerManager) GetPendingPartitions(transactionalId string) map[string]map[int]struct{} {
+func (m *IdempotentProducerManager) GetPendingPartitions(transactionalID string) map[string]map[int]struct{} {
 	m.txnMu.RLock()
 	defer m.txnMu.RUnlock()
 
-	state, exists := m.transactionalIds[transactionalId]
+	state, exists := m.transactionalIDs[transactionalID]
 	if !exists {
 		return nil
 	}
@@ -936,13 +936,13 @@ func (m *IdempotentProducerManager) GetPendingPartitions(transactionalId string)
 }
 
 // ClearPendingPartitions clears the pending partitions for a transactional ID.
-func (m *IdempotentProducerManager) ClearPendingPartitions(transactionalId string) error {
+func (m *IdempotentProducerManager) ClearPendingPartitions(transactionalID string) error {
 	m.txnMu.Lock()
 	defer m.txnMu.Unlock()
 
-	state, exists := m.transactionalIds[transactionalId]
+	state, exists := m.transactionalIDs[transactionalID]
 	if !exists {
-		return ErrUnknownProducerId
+		return ErrUnknownProducerID
 	}
 
 	state.PendingPartitions = make(map[string]map[int]struct{})
@@ -950,30 +950,30 @@ func (m *IdempotentProducerManager) ClearPendingPartitions(transactionalId strin
 }
 
 // SetTransactionStartTime sets the start time for the current transaction.
-func (m *IdempotentProducerManager) SetTransactionStartTime(transactionalId string, t time.Time) error {
+func (m *IdempotentProducerManager) SetTransactionStartTime(transactionalID string, t time.Time) error {
 	m.txnMu.Lock()
 	defer m.txnMu.Unlock()
 
-	state, exists := m.transactionalIds[transactionalId]
+	state, exists := m.transactionalIDs[transactionalID]
 	if !exists {
-		return ErrUnknownProducerId
+		return ErrUnknownProducerID
 	}
 
 	state.TransactionStartTime = t
 	return nil
 }
 
-// SetCurrentTransactionId sets the current transaction ID.
-func (m *IdempotentProducerManager) SetCurrentTransactionId(transactionalId, txnId string) error {
+// SetCurrentTransactionID sets the current transaction ID.
+func (m *IdempotentProducerManager) SetCurrentTransactionID(transactionalID, txnID string) error {
 	m.txnMu.Lock()
 	defer m.txnMu.Unlock()
 
-	state, exists := m.transactionalIds[transactionalId]
+	state, exists := m.transactionalIDs[transactionalID]
 	if !exists {
-		return ErrUnknownProducerId
+		return ErrUnknownProducerID
 	}
 
-	state.CurrentTransactionId = txnId
+	state.CurrentTransactionID = txnID
 	return nil
 }
 
@@ -991,14 +991,14 @@ func (m *IdempotentProducerManager) ExpireInactiveProducers() int {
 	timeout := time.Duration(m.config.ProducerSessionTimeoutMs) * time.Millisecond
 	expired := 0
 
-	for txnId, state := range m.transactionalIds {
+	for txnID, state := range m.transactionalIDs {
 		// Don't expire producers with active transactions
 		if state.State != TransactionStateEmpty {
 			continue
 		}
 
 		if now.Sub(state.LastHeartbeat) > timeout {
-			delete(m.transactionalIds, txnId)
+			delete(m.transactionalIDs, txnID)
 			expired++
 		}
 	}
@@ -1037,8 +1037,8 @@ type IdempotentProducerStats struct {
 	// SequenceStates is the number of tracked sequence states
 	SequenceStates int
 
-	// NextProducerId is the next PID to be assigned
-	NextProducerId int64
+	// NextProducerID is the next PID to be assigned
+	NextProducerID int64
 
 	// ProducersByState counts producers in each transaction state
 	ProducersByState map[TransactionState]int
@@ -1054,13 +1054,13 @@ func (m *IdempotentProducerManager) Stats() IdempotentProducerStats {
 	defer m.txnMu.RUnlock()
 
 	stats := IdempotentProducerStats{
-		ActiveProducers:  len(m.transactionalIds),
+		ActiveProducers:  len(m.transactionalIDs),
 		SequenceStates:   len(m.sequenceStates),
-		NextProducerId:   m.nextProducerId,
+		NextProducerID:   m.nextProducerID,
 		ProducersByState: make(map[TransactionState]int),
 	}
 
-	for _, state := range m.transactionalIds {
+	for _, state := range m.transactionalIDs {
 		stats.ProducersByState[state.State]++
 	}
 
@@ -1073,11 +1073,11 @@ func (m *IdempotentProducerManager) Stats() IdempotentProducerStats {
 
 // ProducerStateSnapshot captures state for persistence.
 type ProducerStateSnapshot struct {
-	// NextProducerId is the next PID to assign
-	NextProducerId int64 `json:"nextProducerId"`
+	// NextProducerID is the next PID to assign
+	NextProducerID int64 `json:"nextProducerId"`
 
-	// TransactionalIds maps transactional ID to its serialized state
-	TransactionalIds map[string]TransactionalIdStateSnapshot `json:"transactionalIds"`
+	// TransactionalIDs maps transactional ID to its serialized state
+	TransactionalIDs map[string]TransactionalIDStateSnapshot `json:"transactionalIds"`
 
 	// SequenceStates maps key string to sequence state
 	// Key format: "pid:topic:partition"
@@ -1087,15 +1087,15 @@ type ProducerStateSnapshot struct {
 	Timestamp time.Time `json:"timestamp"`
 }
 
-// TransactionalIdStateSnapshot is the serializable form of TransactionalIdState.
-type TransactionalIdStateSnapshot struct {
-	TransactionalId      string           `json:"transactionalId"`
-	ProducerId           int64            `json:"producerId"`
+// TransactionalIDStateSnapshot is the serializable form of TransactionalIDState.
+type TransactionalIDStateSnapshot struct {
+	TransactionalID      string           `json:"transactionalId"`
+	ProducerID           int64            `json:"producerId"`
 	Epoch                int16            `json:"epoch"`
 	LastHeartbeat        time.Time        `json:"lastHeartbeat"`
 	TransactionTimeoutMs int64            `json:"transactionTimeoutMs"`
 	State                TransactionState `json:"state"`
-	CurrentTransactionId string           `json:"currentTransactionId,omitempty"`
+	CurrentTransactionID string           `json:"currentTransactionId,omitempty"`
 	PendingPartitions    map[string][]int `json:"pendingPartitions,omitempty"`
 	TransactionStartTime time.Time        `json:"transactionStartTime,omitempty"`
 }
@@ -1118,14 +1118,14 @@ func (m *IdempotentProducerManager) TakeSnapshot() ProducerStateSnapshot {
 	defer m.txnMu.RUnlock()
 
 	snapshot := ProducerStateSnapshot{
-		NextProducerId:   m.nextProducerId,
-		TransactionalIds: make(map[string]TransactionalIdStateSnapshot),
+		NextProducerID:   m.nextProducerID,
+		TransactionalIDs: make(map[string]TransactionalIDStateSnapshot),
 		SequenceStates:   make(map[string]SequenceStateSnapshot),
 		Timestamp:        time.Now(),
 	}
 
 	// Serialize transactional IDs
-	for txnId, state := range m.transactionalIds {
+	for txnID, state := range m.transactionalIDs {
 		pendingPartitions := make(map[string][]int)
 		for topic, partitions := range state.PendingPartitions {
 			parts := make([]int, 0, len(partitions))
@@ -1135,14 +1135,14 @@ func (m *IdempotentProducerManager) TakeSnapshot() ProducerStateSnapshot {
 			pendingPartitions[topic] = parts
 		}
 
-		snapshot.TransactionalIds[txnId] = TransactionalIdStateSnapshot{
-			TransactionalId:      state.TransactionalId,
-			ProducerId:           state.ProducerIdAndEpoch.ProducerId,
-			Epoch:                state.ProducerIdAndEpoch.Epoch,
+		snapshot.TransactionalIDs[txnID] = TransactionalIDStateSnapshot{
+			TransactionalID:      state.TransactionalID,
+			ProducerID:           state.ProducerIDAndEpoch.ProducerID,
+			Epoch:                state.ProducerIDAndEpoch.Epoch,
 			LastHeartbeat:        state.LastHeartbeat,
 			TransactionTimeoutMs: state.TransactionTimeoutMs,
 			State:                state.State,
-			CurrentTransactionId: state.CurrentTransactionId,
+			CurrentTransactionID: state.CurrentTransactionID,
 			PendingPartitions:    pendingPartitions,
 			TransactionStartTime: state.TransactionStartTime,
 		}
@@ -1150,7 +1150,7 @@ func (m *IdempotentProducerManager) TakeSnapshot() ProducerStateSnapshot {
 
 	// Serialize sequence states
 	for key, state := range m.sequenceStates {
-		keyStr := fmt.Sprintf("%d:%s:%d", key.ProducerId, key.Topic, key.Partition)
+		keyStr := fmt.Sprintf("%d:%s:%d", key.ProducerID, key.Topic, key.Partition)
 		snapshot.SequenceStates[keyStr] = SequenceStateSnapshot{
 			LastSequence:   state.LastSequence,
 			FirstSequence:  state.FirstSequence,
@@ -1172,11 +1172,11 @@ func (m *IdempotentProducerManager) RestoreFromSnapshot(snapshot ProducerStateSn
 	defer m.txnMu.Unlock()
 
 	// Restore next PID
-	m.nextProducerId = snapshot.NextProducerId
+	m.nextProducerID = snapshot.NextProducerID
 
 	// Restore transactional IDs
-	m.transactionalIds = make(map[string]*TransactionalIdState)
-	for txnId, snap := range snapshot.TransactionalIds {
+	m.transactionalIDs = make(map[string]*TransactionalIDState)
+	for txnID, snap := range snapshot.TransactionalIDs {
 		pendingPartitions := make(map[string]map[int]struct{})
 		for topic, parts := range snap.PendingPartitions {
 			pendingPartitions[topic] = make(map[int]struct{})
@@ -1185,16 +1185,16 @@ func (m *IdempotentProducerManager) RestoreFromSnapshot(snapshot ProducerStateSn
 			}
 		}
 
-		m.transactionalIds[txnId] = &TransactionalIdState{
-			TransactionalId: snap.TransactionalId,
-			ProducerIdAndEpoch: ProducerIdAndEpoch{
-				ProducerId: snap.ProducerId,
+		m.transactionalIDs[txnID] = &TransactionalIDState{
+			TransactionalID: snap.TransactionalID,
+			ProducerIDAndEpoch: ProducerIDAndEpoch{
+				ProducerID: snap.ProducerID,
 				Epoch:      snap.Epoch,
 			},
 			LastHeartbeat:        snap.LastHeartbeat,
 			TransactionTimeoutMs: snap.TransactionTimeoutMs,
 			State:                snap.State,
-			CurrentTransactionId: snap.CurrentTransactionId,
+			CurrentTransactionID: snap.CurrentTransactionID,
 			PendingPartitions:    pendingPartitions,
 			TransactionStartTime: snap.TransactionStartTime,
 		}
@@ -1212,8 +1212,8 @@ func (m *IdempotentProducerManager) RestoreFromSnapshot(snapshot ProducerStateSn
 			// Try alternative parsing for topics with colons
 			parts := splitKeyString(keyStr)
 			if len(parts) >= 3 {
-				fmt.Sscanf(parts[0], "%d", &pid)
-				fmt.Sscanf(parts[len(parts)-1], "%d", &partition)
+				_, _ = fmt.Sscanf(parts[0], "%d", &pid)
+				_, _ = fmt.Sscanf(parts[len(parts)-1], "%d", &partition)
 				topic = joinKeyParts(parts[1 : len(parts)-1])
 			} else {
 				continue // Skip malformed key
@@ -1221,7 +1221,7 @@ func (m *IdempotentProducerManager) RestoreFromSnapshot(snapshot ProducerStateSn
 		}
 
 		key := PartitionSequenceKey{
-			ProducerId: pid,
+			ProducerID: pid,
 			Topic:      topic,
 			Partition:  partition,
 		}

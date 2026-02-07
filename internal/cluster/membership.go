@@ -596,7 +596,7 @@ func (m *Membership) persistStateLocked() error {
 
 	// Ensure directory exists
 	dir := filepath.Dir(m.stateFilePath())
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("failed to create cluster state directory: %w", err)
 	}
 
@@ -608,7 +608,7 @@ func (m *Membership) persistStateLocked() error {
 
 	// Write atomically (write to temp, then rename)
 	tempPath := m.stateFilePath() + ".tmp"
-	if err := os.WriteFile(tempPath, data, 0644); err != nil {
+	if err := os.WriteFile(tempPath, data, 0o600); err != nil {
 		return fmt.Errorf("failed to write cluster state: %w", err)
 	}
 

@@ -65,10 +65,10 @@ type Partition struct {
 // =============================================================================
 
 // NewPartition creates a new partition.
-func NewPartition(baseDir string, topic string, id int) (*Partition, error) {
+func NewPartition(baseDir, topic string, id int) (*Partition, error) {
 	// Create partition directory
 	dir := filepath.Join(baseDir, topic, fmt.Sprintf("%d", id))
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("failed to create partition directory: %w", err)
 	}
 
@@ -90,7 +90,7 @@ func NewPartition(baseDir string, topic string, id int) (*Partition, error) {
 }
 
 // LoadPartition opens an existing partition.
-func LoadPartition(baseDir string, topic string, id int) (*Partition, error) {
+func LoadPartition(baseDir, topic string, id int) (*Partition, error) {
 	dir := filepath.Join(baseDir, topic, fmt.Sprintf("%d", id))
 
 	// Check directory exists

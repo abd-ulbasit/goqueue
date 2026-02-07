@@ -125,7 +125,7 @@ func (s *transactionServiceServer) InitProducer(ctx context.Context, req *InitPr
 		timeoutMs = 60000
 	}
 
-	pidAndEpoch, err := tc.InitProducerId(req.TransactionalId, timeoutMs)
+	pidAndEpoch, err := tc.InitProducerID(req.TransactionalId, timeoutMs)
 	if err != nil {
 		return &InitProducerResponse{
 			Error: mapTransactionError(err),
@@ -134,11 +134,11 @@ func (s *transactionServiceServer) InitProducer(ctx context.Context, req *InitPr
 
 	s.logger.Info("producer initialized via gRPC",
 		"transactional_id", req.TransactionalId,
-		"producer_id", pidAndEpoch.ProducerId,
+		"producer_id", pidAndEpoch.ProducerID,
 		"epoch", pidAndEpoch.Epoch)
 
 	return &InitProducerResponse{
-		ProducerId: pidAndEpoch.ProducerId,
+		ProducerId: pidAndEpoch.ProducerID,
 		Epoch:      int32(pidAndEpoch.Epoch),
 	}, nil
 }
@@ -175,12 +175,12 @@ func (s *transactionServiceServer) BeginTransaction(ctx context.Context, req *Be
 		return nil, mapBrokerError(broker.ErrTransactionsNotEnabled)
 	}
 
-	pid := broker.ProducerIdAndEpoch{
-		ProducerId: req.ProducerId,
+	pid := broker.ProducerIDAndEpoch{
+		ProducerID: req.ProducerId,
 		Epoch:      int16(req.Epoch),
 	}
 
-	txnId, err := tc.BeginTransaction(req.TransactionalId, pid)
+	txnID, err := tc.BeginTransaction(req.TransactionalId, pid)
 	if err != nil {
 		return &BeginTransactionResponse{
 			Error: mapTransactionError(err),
@@ -189,10 +189,10 @@ func (s *transactionServiceServer) BeginTransaction(ctx context.Context, req *Be
 
 	s.logger.Debug("transaction started via gRPC",
 		"transactional_id", req.TransactionalId,
-		"transaction_id", txnId)
+		"transaction_id", txnID)
 
 	return &BeginTransactionResponse{
-		TransactionId: txnId,
+		TransactionId: txnID,
 	}, nil
 }
 
@@ -230,8 +230,8 @@ func (s *transactionServiceServer) AddPartition(ctx context.Context, req *AddPar
 		return nil, mapBrokerError(broker.ErrTransactionsNotEnabled)
 	}
 
-	pid := broker.ProducerIdAndEpoch{
-		ProducerId: req.ProducerId,
+	pid := broker.ProducerIDAndEpoch{
+		ProducerID: req.ProducerId,
 		Epoch:      int16(req.Epoch),
 	}
 
@@ -290,8 +290,8 @@ func (s *transactionServiceServer) CommitTransaction(ctx context.Context, req *C
 		return nil, mapBrokerError(broker.ErrTransactionsNotEnabled)
 	}
 
-	pid := broker.ProducerIdAndEpoch{
-		ProducerId: req.ProducerId,
+	pid := broker.ProducerIDAndEpoch{
+		ProducerID: req.ProducerId,
 		Epoch:      int16(req.Epoch),
 	}
 
@@ -344,8 +344,8 @@ func (s *transactionServiceServer) AbortTransaction(ctx context.Context, req *Ab
 		return nil, mapBrokerError(broker.ErrTransactionsNotEnabled)
 	}
 
-	pid := broker.ProducerIdAndEpoch{
-		ProducerId: req.ProducerId,
+	pid := broker.ProducerIDAndEpoch{
+		ProducerID: req.ProducerId,
 		Epoch:      int16(req.Epoch),
 	}
 
@@ -452,9 +452,9 @@ func txnMetadataToProto(txn *broker.TransactionMetadata) *TransactionInfo {
 	}
 
 	return &TransactionInfo{
-		TransactionId:   txn.TransactionId,
-		TransactionalId: txn.TransactionalId,
-		ProducerId:      txn.ProducerId,
+		TransactionId:   txn.TransactionID,
+		TransactionalId: txn.TransactionalID,
+		ProducerId:      txn.ProducerID,
 		Epoch:           int32(txn.Epoch),
 		State:           txn.State.String(),
 		StartTime:       timestamppb.New(txn.StartTime),

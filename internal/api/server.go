@@ -65,12 +65,12 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -92,7 +92,6 @@ type Server struct {
 	httpServer *http.Server
 	router     *chi.Mux
 	logger     *slog.Logger
-	wg         sync.WaitGroup
 
 	// Security components (M21)
 	security *security.SecurityManager
@@ -523,7 +522,7 @@ func (s *Server) registerRoutes() {
 	// ==========================================================================
 	s.router.Route("/producers", func(r chi.Router) {
 		r.Post("/init", s.initProducer)
-		r.Route("/{producerId}", func(r chi.Router) {
+		r.Route("/{producerID}", func(r chi.Router) {
 			r.Post("/heartbeat", s.producerHeartbeat)
 		})
 	})
@@ -1097,7 +1096,8 @@ func (s *Server) publishMessages(w http.ResponseWriter, r *http.Request) {
 		// Publish with or without delay/priority
 		// NOTE: Delayed messages with priority will be tracked in the delay index
 		// and the priority will be honored when the message becomes visible.
-		if isDelayed {
+		switch {
+		case isDelayed:
 			// Delayed message with priority (M5+M6 integration)
 			partition, offset, err = s.broker.PublishAtWithPriority(topicName, key, value, deliverAt, priority)
 			results[i] = PublishResult{
@@ -1107,7 +1107,7 @@ func (s *Server) publishMessages(w http.ResponseWriter, r *http.Request) {
 				Delayed:   true,
 				DeliverAt: deliverAt.Format(time.RFC3339),
 			}
-		} else if msg.Partition != nil {
+		case msg.Partition != nil:
 			// Direct partition publish with priority
 			// Uses broker.PublishToPartitionWithPriority which handles cluster forwarding
 			offset, err = s.broker.PublishToPartitionWithPriority(topicName, *msg.Partition, key, value, priority)
@@ -1117,7 +1117,7 @@ func (s *Server) publishMessages(w http.ResponseWriter, r *http.Request) {
 				Offset:    offset,
 				Priority:  priority.String(),
 			}
-		} else {
+		default:
 			// Normal publish with priority (key-based routing)
 			// Uses broker.PublishWithPriority which handles cluster forwarding
 			partition, offset, err = s.broker.PublishWithPriority(topicName, key, value, priority)
@@ -1418,12 +1418,12 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 
 	coordinator := s.broker.GroupCoordinator()
 	if err := coordinator.Heartbeat(groupID, req.MemberID, req.Generation); err != nil {
-		switch err {
-		case broker.ErrGroupNotFound:
+		switch {
+		case errors.Is(err, broker.ErrGroupNotFound):
 			s.errorResponse(w, http.StatusNotFound, "group not found")
-		case broker.ErrMemberNotFound:
+		case errors.Is(err, broker.ErrMemberNotFound):
 			s.errorResponse(w, http.StatusNotFound, "member not found (may have been evicted)")
-		case broker.ErrStaleGeneration:
+		case errors.Is(err, broker.ErrStaleGeneration):
 			s.errorResponse(w, http.StatusConflict, "stale generation (rebalance occurred)")
 		default:
 			s.errorResponse(w, http.StatusInternalServerError, err.Error())
@@ -1457,10 +1457,10 @@ func (s *Server) leaveGroup(w http.ResponseWriter, r *http.Request) {
 
 	coordinator := s.broker.GroupCoordinator()
 	if err := coordinator.LeaveGroup(groupID, req.MemberID); err != nil {
-		switch err {
-		case broker.ErrGroupNotFound:
+		switch {
+		case errors.Is(err, broker.ErrGroupNotFound):
 			s.errorResponse(w, http.StatusNotFound, "group not found")
-		case broker.ErrMemberNotFound:
+		case errors.Is(err, broker.ErrMemberNotFound):
 			s.errorResponse(w, http.StatusNotFound, "member not found")
 		default:
 			s.errorResponse(w, http.StatusInternalServerError, err.Error())
@@ -1703,10 +1703,10 @@ func (s *Server) commitOffsets(w http.ResponseWriter, r *http.Request) {
 
 	coordinator := s.broker.GroupCoordinator()
 	if err := coordinator.CommitOffsets(groupID, offsets, req.MemberID); err != nil {
-		switch err {
-		case broker.ErrGroupNotFound:
+		switch {
+		case errors.Is(err, broker.ErrGroupNotFound):
 			s.errorResponse(w, http.StatusNotFound, "group not found")
-		case broker.ErrNotAssigned:
+		case errors.Is(err, broker.ErrNotAssigned):
 			s.errorResponse(w, http.StatusForbidden, "partition not assigned to this member")
 		default:
 			s.errorResponse(w, http.StatusInternalServerError, err.Error())
@@ -1727,7 +1727,7 @@ func (s *Server) getOffsets(w http.ResponseWriter, r *http.Request) {
 	coordinator := s.broker.GroupCoordinator()
 	groupOffsets, err := coordinator.GetGroupOffsets(groupID)
 	if err != nil {
-		if err == broker.ErrOffsetNotFound {
+		if errors.Is(err, broker.ErrOffsetNotFound) {
 			// No offsets committed yet
 			s.writeJSON(w, http.StatusOK, map[string]interface{}{
 				"group_id": groupID,
@@ -1787,7 +1787,7 @@ func (s *Server) getGroup(w http.ResponseWriter, r *http.Request) {
 	coordinator := s.broker.GroupCoordinator()
 	info, err := coordinator.GetGroupInfo(groupID)
 	if err != nil {
-		if err == broker.ErrGroupNotFound {
+		if errors.Is(err, broker.ErrGroupNotFound) {
 			s.errorResponse(w, http.StatusNotFound, "group not found")
 			return
 		}
@@ -1822,7 +1822,7 @@ func (s *Server) deleteGroup(w http.ResponseWriter, r *http.Request) {
 
 	coordinator := s.broker.GroupCoordinator()
 	if err := coordinator.DeleteGroup(groupID); err != nil {
-		if err == broker.ErrGroupNotFound {
+		if errors.Is(err, broker.ErrGroupNotFound) {
 			s.errorResponse(w, http.StatusNotFound, "group not found")
 			return
 		}
@@ -1894,10 +1894,10 @@ func (s *Server) ackMessage(w http.ResponseWriter, r *http.Request) {
 	result, err := s.broker.Ack(req.ReceiptHandle)
 	if err != nil {
 		// Map error to appropriate HTTP status
-		switch err {
-		case broker.ErrMessageNotFound:
+		switch {
+		case errors.Is(err, broker.ErrMessageNotFound):
 			s.errorResponse(w, http.StatusNotFound, "message not found or already processed")
-		case broker.ErrInvalidReceiptHandle:
+		case errors.Is(err, broker.ErrInvalidReceiptHandle):
 			s.errorResponse(w, http.StatusBadRequest, "invalid receipt handle format")
 		default:
 			s.errorResponse(w, http.StatusInternalServerError, err.Error())
@@ -1948,10 +1948,10 @@ func (s *Server) nackMessage(w http.ResponseWriter, r *http.Request) {
 
 	result, err := s.broker.Nack(req.ReceiptHandle, req.Reason)
 	if err != nil {
-		switch err {
-		case broker.ErrMessageNotFound:
+		switch {
+		case errors.Is(err, broker.ErrMessageNotFound):
 			s.errorResponse(w, http.StatusNotFound, "message not found or already processed")
-		case broker.ErrInvalidReceiptHandle:
+		case errors.Is(err, broker.ErrInvalidReceiptHandle):
 			s.errorResponse(w, http.StatusBadRequest, "invalid receipt handle format")
 		default:
 			s.errorResponse(w, http.StatusInternalServerError, err.Error())
@@ -2017,10 +2017,10 @@ func (s *Server) rejectMessage(w http.ResponseWriter, r *http.Request) {
 
 	result, err := s.broker.Reject(req.ReceiptHandle, req.Reason)
 	if err != nil {
-		switch err {
-		case broker.ErrMessageNotFound:
+		switch {
+		case errors.Is(err, broker.ErrMessageNotFound):
 			s.errorResponse(w, http.StatusNotFound, "message not found or already processed")
-		case broker.ErrInvalidReceiptHandle:
+		case errors.Is(err, broker.ErrInvalidReceiptHandle):
 			s.errorResponse(w, http.StatusBadRequest, "invalid receipt handle format")
 		default:
 			s.errorResponse(w, http.StatusInternalServerError, err.Error())
@@ -2083,10 +2083,10 @@ func (s *Server) extendVisibility(w http.ResponseWriter, r *http.Request) {
 	extension := time.Duration(req.ExtensionSeconds) * time.Second
 	newDeadline, err := s.broker.ExtendVisibility(req.ReceiptHandle, extension)
 	if err != nil {
-		switch err {
-		case broker.ErrMessageNotFound:
+		switch {
+		case errors.Is(err, broker.ErrMessageNotFound):
 			s.errorResponse(w, http.StatusNotFound, "message not found or already processed")
-		case broker.ErrInvalidReceiptHandle:
+		case errors.Is(err, broker.ErrInvalidReceiptHandle):
 			s.errorResponse(w, http.StatusBadRequest, "invalid receipt handle format")
 		default:
 			s.errorResponse(w, http.StatusInternalServerError, err.Error())
@@ -2262,7 +2262,7 @@ func (s *Server) getDelayedMessage(w http.ResponseWriter, r *http.Request) {
 // cancelDelayedMessage handles DELETE /topics/{topicName}/delayed/{partition}/{offset}
 //
 // Cancels a pending delayed message. The message will never be delivered.
-// Returns 200 if cancelled, 404 if not found or already delivered.
+// Returns 200 if canceled, 404 if not found or already delivered.
 //
 // EXAMPLE:
 //
@@ -2284,19 +2284,19 @@ func (s *Server) cancelDelayedMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cancelled, err := s.broker.CancelDelayed(topicName, partition, offset)
+	canceled, err := s.broker.CancelDelayed(topicName, partition, offset)
 	if err != nil {
 		s.errorResponse(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	if !cancelled {
+	if !canceled {
 		s.errorResponse(w, http.StatusNotFound, "delayed message not found or already delivered")
 		return
 	}
 
 	s.writeJSON(w, http.StatusOK, map[string]interface{}{
-		"cancelled": true,
+		"canceled":  true,
 		"topic":     topicName,
 		"partition": partition,
 		"offset":    offset,
@@ -2306,7 +2306,7 @@ func (s *Server) cancelDelayedMessage(w http.ResponseWriter, r *http.Request) {
 // handleDelayStats handles GET /delay/stats
 //
 // Returns statistics about the delay scheduling system:
-//   - Total scheduled, delivered, cancelled messages
+//   - Total scheduled, delivered, canceled messages
 //   - Pending messages by topic
 //   - Timer wheel statistics
 //
@@ -2319,13 +2319,13 @@ func (s *Server) handleDelayStats(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, map[string]interface{}{
 		"total_scheduled": stats.TotalScheduled,
 		"total_delivered": stats.TotalDelivered,
-		"total_cancelled": stats.TotalCancelled,
+		"total_canceled":  stats.TotalCanceled,
 		"total_pending":   stats.TotalPending,
 		"by_topic":        stats.ByTopic,
 		"timer_wheel": map[string]interface{}{
 			"total_scheduled": stats.TimerWheel.TotalScheduled,
 			"total_expired":   stats.TimerWheel.TotalExpired,
-			"total_cancelled": stats.TimerWheel.TotalCancelled,
+			"total_canceled":  stats.TimerWheel.TotalCanceled,
 			"current_active":  stats.TimerWheel.CurrentActive,
 			"current_tick":    stats.TimerWheel.CurrentTick,
 		},
@@ -2388,7 +2388,8 @@ func (s *Server) handlePriorityStats(w http.ResponseWriter, r *http.Request) {
 				"oldest_pending": convertPriorityTimeArray(partStats.OldestPending),
 			}
 		}
-		response["topics"].(map[string]interface{})[topicName] = map[string]interface{}{
+		topicsMap, _ := response["topics"].(map[string]interface{})
+		topicsMap[topicName] = map[string]interface{}{
 			"total_by_priority": convertPriorityArray(topicStats.TotalByPriority),
 			"partitions":        partitions,
 		}
@@ -2422,7 +2423,7 @@ func convertPriorityTimeArray(arr [5]time.Time) []string {
 func (s *Server) writeJSON(w http.ResponseWriter, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(data)
+	_ = json.NewEncoder(w).Encode(data)
 }
 
 func (s *Server) errorResponse(w http.ResponseWriter, status int, message string) {
@@ -3191,7 +3192,7 @@ func (s *Server) handleSchemaStats(w http.ResponseWriter, r *http.Request) {
 //	from interfering with the new producer instance.
 func (s *Server) initProducer(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		TransactionalId      string `json:"transactional_id"`
+		TransactionalID      string `json:"transactional_id"`
 		TransactionTimeoutMs int64  `json:"transaction_timeout_ms"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -3199,7 +3200,7 @@ func (s *Server) initProducer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.TransactionalId == "" {
+	if req.TransactionalID == "" {
 		s.errorResponse(w, http.StatusBadRequest, "transactional_id is required")
 		return
 	}
@@ -3218,26 +3219,26 @@ func (s *Server) initProducer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Initialize producer
-	pid, err := coord.InitProducerId(req.TransactionalId, timeoutMs)
+	pid, err := coord.InitProducerID(req.TransactionalID, timeoutMs)
 	if err != nil {
 		s.errorResponse(w, http.StatusInternalServerError, "failed to init producer: "+err.Error())
 		return
 	}
 
 	s.writeJSON(w, http.StatusOK, map[string]interface{}{
-		"producer_id": pid.ProducerId,
+		"producer_id": pid.ProducerID,
 		"epoch":       pid.Epoch,
 	})
 }
 
-// producerHeartbeat handles POST /producers/{producerId}/heartbeat
+// producerHeartbeat handles POST /producers/{producerID}/heartbeat
 //
 // Sends a heartbeat to keep the producer session alive.
 // If no heartbeat is received within the session timeout (default 30s),
 // any active transaction is aborted and the producer is marked as dead.
 //
 // URL PARAMETERS:
-//   - producerId: The producer ID (from /producers/init)
+//   - producerID: The producer ID (from /producers/init)
 //
 // REQUEST BODY:
 //
@@ -3256,15 +3257,15 @@ func (s *Server) initProducer(w http.ResponseWriter, r *http.Request) {
 //   - 404 Not Found: Producer not found
 //   - 409 Conflict: Producer has been fenced (newer epoch exists)
 func (s *Server) producerHeartbeat(w http.ResponseWriter, r *http.Request) {
-	producerIdStr := chi.URLParam(r, "producerId")
-	producerId, err := strconv.ParseInt(producerIdStr, 10, 64)
+	producerIDStr := chi.URLParam(r, "producerID")
+	producerID, err := strconv.ParseInt(producerIDStr, 10, 64)
 	if err != nil {
 		s.errorResponse(w, http.StatusBadRequest, "invalid producer_id")
 		return
 	}
 
 	var req struct {
-		TransactionalId string `json:"transactional_id"`
+		TransactionalID string `json:"transactional_id"`
 		Epoch           int16  `json:"epoch"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -3272,7 +3273,7 @@ func (s *Server) producerHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.TransactionalId == "" {
+	if req.TransactionalID == "" {
 		s.errorResponse(w, http.StatusBadRequest, "transactional_id is required")
 		return
 	}
@@ -3283,12 +3284,12 @@ func (s *Server) producerHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pid := broker.ProducerIdAndEpoch{
-		ProducerId: producerId,
+	pid := broker.ProducerIDAndEpoch{
+		ProducerID: producerID,
 		Epoch:      req.Epoch,
 	}
 
-	if err := coord.Heartbeat(req.TransactionalId, pid); err != nil {
+	if err := coord.Heartbeat(req.TransactionalID, pid); err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			s.errorResponse(w, http.StatusNotFound, err.Error())
 			return
@@ -3335,16 +3336,16 @@ func (s *Server) producerHeartbeat(w http.ResponseWriter, r *http.Request) {
 //   - 409 Conflict: Producer fenced or transaction already in progress
 func (s *Server) beginTransaction(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ProducerId      int64  `json:"producer_id"`
+		ProducerID      int64  `json:"producer_id"`
 		Epoch           int16  `json:"epoch"`
-		TransactionalId string `json:"transactional_id"`
+		TransactionalID string `json:"transactional_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.errorResponse(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
 
-	if req.TransactionalId == "" {
+	if req.TransactionalID == "" {
 		s.errorResponse(w, http.StatusBadRequest, "transactional_id is required")
 		return
 	}
@@ -3355,12 +3356,12 @@ func (s *Server) beginTransaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pid := broker.ProducerIdAndEpoch{
-		ProducerId: req.ProducerId,
+	pid := broker.ProducerIDAndEpoch{
+		ProducerID: req.ProducerID,
 		Epoch:      req.Epoch,
 	}
 
-	txnId, err := coord.BeginTransaction(req.TransactionalId, pid)
+	txnID, err := coord.BeginTransaction(req.TransactionalID, pid)
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			s.errorResponse(w, http.StatusNotFound, err.Error())
@@ -3375,7 +3376,7 @@ func (s *Server) beginTransaction(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.writeJSON(w, http.StatusOK, map[string]interface{}{
-		"transaction_id": txnId,
+		"transaction_id": txnID,
 	})
 }
 
@@ -3417,7 +3418,7 @@ func (s *Server) beginTransaction(w http.ResponseWriter, r *http.Request) {
 //   - 409 Conflict: Producer fenced or no active transaction
 func (s *Server) publishTransactional(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ProducerId int64  `json:"producer_id"`
+		ProducerID int64  `json:"producer_id"`
 		Epoch      int16  `json:"epoch"`
 		Topic      string `json:"topic"`
 		Partition  int    `json:"partition"`
@@ -3440,7 +3441,7 @@ func (s *Server) publishTransactional(w http.ResponseWriter, r *http.Request) {
 		req.Partition,
 		[]byte(req.Key),
 		[]byte(req.Value),
-		req.ProducerId,
+		req.ProducerID,
 		req.Epoch,
 		req.Sequence,
 	)
@@ -3491,9 +3492,9 @@ func (s *Server) publishTransactional(w http.ResponseWriter, r *http.Request) {
 //	}
 func (s *Server) addPartitionToTransaction(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ProducerId      int64  `json:"producer_id"`
+		ProducerID      int64  `json:"producer_id"`
 		Epoch           int16  `json:"epoch"`
-		TransactionalId string `json:"transactional_id"`
+		TransactionalID string `json:"transactional_id"`
 		Topic           string `json:"topic"`
 		Partition       int    `json:"partition"`
 	}
@@ -3508,12 +3509,12 @@ func (s *Server) addPartitionToTransaction(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	pid := broker.ProducerIdAndEpoch{
-		ProducerId: req.ProducerId,
+	pid := broker.ProducerIDAndEpoch{
+		ProducerID: req.ProducerID,
 		Epoch:      req.Epoch,
 	}
 
-	err := coord.AddPartitionToTransaction(req.TransactionalId, pid, req.Topic, req.Partition)
+	err := coord.AddPartitionToTransaction(req.TransactionalID, pid, req.Topic, req.Partition)
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			s.errorResponse(w, http.StatusNotFound, err.Error())
@@ -3561,16 +3562,16 @@ func (s *Server) addPartitionToTransaction(w http.ResponseWriter, r *http.Reques
 //   - 500 Internal Server Error: Commit failed
 func (s *Server) commitTransaction(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ProducerId      int64  `json:"producer_id"`
+		ProducerID      int64  `json:"producer_id"`
 		Epoch           int16  `json:"epoch"`
-		TransactionalId string `json:"transactional_id"`
+		TransactionalID string `json:"transactional_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.errorResponse(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
 
-	if req.TransactionalId == "" {
+	if req.TransactionalID == "" {
 		s.errorResponse(w, http.StatusBadRequest, "transactional_id is required")
 		return
 	}
@@ -3581,12 +3582,12 @@ func (s *Server) commitTransaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pid := broker.ProducerIdAndEpoch{
-		ProducerId: req.ProducerId,
+	pid := broker.ProducerIDAndEpoch{
+		ProducerID: req.ProducerID,
 		Epoch:      req.Epoch,
 	}
 
-	err := coord.CommitTransaction(req.TransactionalId, pid)
+	err := coord.CommitTransaction(req.TransactionalID, pid)
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			s.errorResponse(w, http.StatusNotFound, err.Error())
@@ -3631,16 +3632,16 @@ func (s *Server) commitTransaction(w http.ResponseWriter, r *http.Request) {
 //   - 409 Conflict: Producer fenced
 func (s *Server) abortTransaction(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ProducerId      int64  `json:"producer_id"`
+		ProducerID      int64  `json:"producer_id"`
 		Epoch           int16  `json:"epoch"`
-		TransactionalId string `json:"transactional_id"`
+		TransactionalID string `json:"transactional_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.errorResponse(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
 
-	if req.TransactionalId == "" {
+	if req.TransactionalID == "" {
 		s.errorResponse(w, http.StatusBadRequest, "transactional_id is required")
 		return
 	}
@@ -3651,12 +3652,12 @@ func (s *Server) abortTransaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pid := broker.ProducerIdAndEpoch{
-		ProducerId: req.ProducerId,
+	pid := broker.ProducerIDAndEpoch{
+		ProducerID: req.ProducerID,
 		Epoch:      req.Epoch,
 	}
 
-	err := coord.AbortTransaction(req.TransactionalId, pid)
+	err := coord.AbortTransaction(req.TransactionalID, pid)
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			s.errorResponse(w, http.StatusNotFound, err.Error())
@@ -3719,9 +3720,9 @@ func (s *Server) listTransactions(w http.ResponseWriter, r *http.Request) {
 		Partition int    `json:"partition"`
 	}
 	type txnInfo struct {
-		TransactionId   string         `json:"transaction_id"`
-		TransactionalId string         `json:"transactional_id"`
-		ProducerId      int64          `json:"producer_id"`
+		TransactionID   string         `json:"transaction_id"`
+		TransactionalID string         `json:"transactional_id"`
+		ProducerID      int64          `json:"producer_id"`
 		Epoch           int16          `json:"epoch"`
 		State           string         `json:"state"`
 		StartTime       time.Time      `json:"start_time"`
@@ -3741,9 +3742,9 @@ func (s *Server) listTransactions(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		txnList = append(txnList, txnInfo{
-			TransactionId:   txn.TransactionId,
-			TransactionalId: txn.TransactionalId,
-			ProducerId:      txn.ProducerId,
+			TransactionID:   txn.TransactionID,
+			TransactionalID: txn.TransactionalID,
+			ProducerID:      txn.ProducerID,
 			Epoch:           txn.Epoch,
 			State:           txn.State.String(),
 			StartTime:       txn.StartTime,

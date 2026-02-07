@@ -1,6 +1,7 @@
 package broker
 
 import (
+	"errors"
 	"log/slog"
 	"testing"
 	"time"
@@ -77,7 +78,7 @@ func TestAckManager_TrackDelivery_Backpressure(t *testing.T) {
 
 	if _, err := am.TrackDelivery(msg1, "c1", "g1", 30*time.Second); err == nil {
 		t.Fatalf("TrackDelivery(msg1) expected ErrBackpressure")
-	} else if err != ErrBackpressure {
+	} else if !errors.Is(err, ErrBackpressure) {
 		t.Fatalf("TrackDelivery(msg1) error=%v, want %v", err, ErrBackpressure)
 	}
 

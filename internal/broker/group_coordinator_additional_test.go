@@ -1,6 +1,7 @@
 package broker
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -45,12 +46,12 @@ func TestGroupCoordinator_JoinLeaveAndDeleteGroup_Errors(t *testing.T) {
 	defer func() { _ = gc.Close() }()
 
 	// LeaveGroup should fail for unknown group.
-	if err := gc.LeaveGroup("missing", "m"); err != ErrGroupNotFound {
+	if err := gc.LeaveGroup("missing", "m"); !errors.Is(err, ErrGroupNotFound) {
 		t.Fatalf("LeaveGroup unknown group err=%v, want %v", err, ErrGroupNotFound)
 	}
 
 	// DeleteGroup should fail for unknown group.
-	if err := gc.DeleteGroup("missing"); err != ErrGroupNotFound {
+	if err := gc.DeleteGroup("missing"); !errors.Is(err, ErrGroupNotFound) {
 		t.Fatalf("DeleteGroup unknown group err=%v, want %v", err, ErrGroupNotFound)
 	}
 
@@ -109,7 +110,7 @@ func TestGroupCoordinator_HeartbeatAndCommitAndFetchOffsets(t *testing.T) {
 
 	// Unknown group returns ErrOffsetNotFound because offsets are stored independently
 	// from group membership state.
-	if _, err := gc.GetOffset("missing", "orders", 0); err != ErrOffsetNotFound {
+	if _, err := gc.GetOffset("missing", "orders", 0); !errors.Is(err, ErrOffsetNotFound) {
 		t.Fatalf("GetOffset missing group err=%v, want %v", err, ErrOffsetNotFound)
 	}
 }

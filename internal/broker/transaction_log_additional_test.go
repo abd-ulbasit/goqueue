@@ -76,7 +76,7 @@ func TestTransactionLog_ParseHelpers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseInitProducerData failed: %v", err)
 	}
-	if initData.TransactionalId != "t" || initData.ProducerId != 1 || initData.Epoch != 2 {
+	if initData.TransactionalID != "t" || initData.ProducerID != 1 || initData.Epoch != 2 {
 		t.Fatalf("ParseInitProducerData parsed unexpected values: %+v", initData)
 	}
 
@@ -85,7 +85,7 @@ func TestTransactionLog_ParseHelpers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseBeginTxnData failed: %v", err)
 	}
-	if beginData.TransactionId != "x" || beginData.ProducerId != 9 {
+	if beginData.TransactionID != "x" || beginData.ProducerID != 9 {
 		t.Fatalf("ParseBeginTxnData parsed unexpected values: %+v", beginData)
 	}
 
@@ -120,7 +120,7 @@ func TestWALReader_SkipEmptyLinesAndEOF(t *testing.T) {
 
 	// Leading + trailing empty lines ensure Next() exercises its recursion.
 	content := "\n" + string(b) + "\n\n"
-	if err := os.WriteFile(walPath, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(walPath, []byte(content), 0o644); err != nil {
 		t.Fatalf("WriteFile failed: %v", err)
 	}
 
@@ -148,7 +148,7 @@ func TestWALReader_InvalidJSON(t *testing.T) {
 	dir := t.TempDir()
 	walPath := dir + "/transactions.log"
 
-	if err := os.WriteFile(walPath, []byte("not-json\n"), 0644); err != nil {
+	if err := os.WriteFile(walPath, []byte("not-json\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile failed: %v", err)
 	}
 

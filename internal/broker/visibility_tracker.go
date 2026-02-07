@@ -130,7 +130,7 @@ func (h visibilityHeap) Swap(i, j int) {
 
 func (h *visibilityHeap) Push(x interface{}) {
 	n := len(*h)
-	item := x.(*visibilityItem)
+	item, _ := x.(*visibilityItem)
 	item.index = n
 	*h = append(*h, item)
 }

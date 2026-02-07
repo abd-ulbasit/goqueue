@@ -5,6 +5,7 @@
 package storage
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -153,7 +154,7 @@ func TestTimeIndexLookupEmpty(t *testing.T) {
 	defer ti.Close()
 
 	_, err = ti.Lookup(1000)
-	if err != ErrTimestampNotFound {
+	if !errors.Is(err, ErrTimestampNotFound) {
 		t.Errorf("expected ErrTimestampNotFound, got %v", err)
 	}
 }
@@ -334,12 +335,12 @@ func TestTimeIndexGetFirstLastTimestamp(t *testing.T) {
 
 	// Test empty index
 	_, err = ti.GetFirstTimestamp()
-	if err != ErrTimestampNotFound {
+	if !errors.Is(err, ErrTimestampNotFound) {
 		t.Errorf("expected ErrTimestampNotFound for empty index, got %v", err)
 	}
 
 	_, err = ti.GetLastTimestamp()
-	if err != ErrTimestampNotFound {
+	if !errors.Is(err, ErrTimestampNotFound) {
 		t.Errorf("expected ErrTimestampNotFound for empty index, got %v", err)
 	}
 
@@ -401,13 +402,13 @@ func TestTimeIndex_GetLastTimestamp_Empty(t *testing.T) {
 
 	// Test empty index
 	_, err = ti.GetLastTimestamp()
-	if err != ErrTimestampNotFound {
+	if !errors.Is(err, ErrTimestampNotFound) {
 		t.Errorf("expected ErrTimestampNotFound for empty index, got %v", err)
 	}
 
 	// Test empty index
 	_, err = ti.GetFirstTimestamp()
-	if err != ErrTimestampNotFound {
+	if !errors.Is(err, ErrTimestampNotFound) {
 		t.Errorf("expected ErrTimestampNotFound for empty index, got %v", err)
 	}
 

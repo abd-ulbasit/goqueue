@@ -16,6 +16,7 @@
 package broker
 
 import (
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -86,8 +87,8 @@ func TestTimerWheel_Cancel(t *testing.T) {
 	}
 
 	// Cancel it
-	cancelled := tw.Cancel("timer-1")
-	if !cancelled {
+	canceled := tw.Cancel("timer-1")
+	if !canceled {
 		t.Error("expected Cancel to return true")
 	}
 
@@ -99,14 +100,14 @@ func TestTimerWheel_Cancel(t *testing.T) {
 	// Wait and verify it doesn't fire
 	select {
 	case id := <-fired:
-		t.Errorf("cancelled timer fired: %s", id)
+		t.Errorf("canceled timer fired: %s", id)
 	case <-time.After(200 * time.Millisecond):
 		// Good - timer did not fire
 	}
 }
 
 func TestTimerWheel_CancelNonExistent(t *testing.T) {
-	// WHAT: Cancelling a non-existent timer
+	// WHAT: Canceling a non-existent timer
 	// WHY: Should handle gracefully without error
 
 	tw := NewTimerWheel(TimerWheelConfig{
@@ -114,8 +115,8 @@ func TestTimerWheel_CancelNonExistent(t *testing.T) {
 	})
 	defer tw.Close()
 
-	cancelled := tw.Cancel("non-existent")
-	if cancelled {
+	canceled := tw.Cancel("non-existent")
+	if canceled {
 		t.Error("expected Cancel to return false for non-existent timer")
 	}
 }
@@ -159,7 +160,7 @@ func TestTimerWheel_NegativeDelay(t *testing.T) {
 	defer tw.Close()
 
 	err := tw.Schedule("negative", -1*time.Second, nil)
-	if err != ErrDelayNegative {
+	if !errors.Is(err, ErrDelayNegative) {
 		t.Errorf("expected ErrDelayNegative, got %v", err)
 	}
 }
@@ -190,7 +191,7 @@ func TestTimerWheel_ExceedMaxDelay(t *testing.T) {
 	defer tw.Close()
 
 	err := tw.Schedule("too-long", MaxDelay+time.Hour, nil)
-	if err != ErrDelayTooLong {
+	if !errors.Is(err, ErrDelayTooLong) {
 		t.Errorf("expected ErrDelayTooLong, got %v", err)
 	}
 }
@@ -313,7 +314,7 @@ func TestTimerWheel_ConcurrentCancelAndFire(t *testing.T) {
 	// WHAT: Concurrent cancellation while timers fire
 	// WHY: Must handle race between cancel and fire
 
-	var fired, cancelled atomic.Int64
+	var fired, canceled atomic.Int64
 
 	tw := NewTimerWheel(TimerWheelConfig{
 		Callback: func(entry *TimerEntry) {
@@ -334,7 +335,7 @@ func TestTimerWheel_ConcurrentCancelAndFire(t *testing.T) {
 		go func(n int) {
 			defer wg.Done()
 			if tw.Cancel(string(rune('a' + n))) {
-				cancelled.Add(1)
+				canceled.Add(1)
 			}
 		}(i)
 	}
@@ -343,11 +344,11 @@ func TestTimerWheel_ConcurrentCancelAndFire(t *testing.T) {
 	// Wait for remaining to fire
 	time.Sleep(200 * time.Millisecond)
 
-	// Verify: cancelled + fired should equal 50
-	total := cancelled.Load() + fired.Load()
+	// Verify: canceled + fired should equal 50
+	total := canceled.Load() + fired.Load()
 	if total != 50 {
-		t.Errorf("expected cancelled(%d) + fired(%d) = 50, got %d",
-			cancelled.Load(), fired.Load(), total)
+		t.Errorf("expected canceled(%d) + fired(%d) = 50, got %d",
+			canceled.Load(), fired.Load(), total)
 	}
 }
 
@@ -401,7 +402,7 @@ func TestTimerWheel_RescheduleNonExistent(t *testing.T) {
 	defer tw.Close()
 
 	err := tw.Reschedule("non-existent", 100*time.Millisecond)
-	if err != ErrTimerNotFound {
+	if !errors.Is(err, ErrTimerNotFound) {
 		t.Errorf("expected ErrTimerNotFound, got %v", err)
 	}
 }
@@ -484,8 +485,8 @@ func TestTimerWheel_Stats(t *testing.T) {
 		t.Errorf("expected TotalScheduled=3, got %d", stats.TotalScheduled)
 	}
 
-	if stats.TotalCancelled != 1 {
-		t.Errorf("expected TotalCancelled=1, got %d", stats.TotalCancelled)
+	if stats.TotalCanceled != 1 {
+		t.Errorf("expected TotalCanceled=1, got %d", stats.TotalCanceled)
 	}
 
 	if stats.TotalExpired != 2 {
@@ -520,7 +521,7 @@ func TestTimerWheel_Close(t *testing.T) {
 
 	// Scheduling after close should fail
 	err = tw.Schedule("after-close", 1*time.Second, nil)
-	if err != ErrTimerWheelClosed {
+	if !errors.Is(err, ErrTimerWheelClosed) {
 		t.Errorf("expected ErrTimerWheelClosed, got %v", err)
 	}
 

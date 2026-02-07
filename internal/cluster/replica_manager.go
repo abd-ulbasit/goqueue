@@ -404,7 +404,7 @@ func (rm *ReplicaManager) BecomeLeader(topic string, partition int, epoch int64,
 
 // BecomeFollower transitions a partition to follower state.
 // Called when this node should follow another leader.
-func (rm *ReplicaManager) BecomeFollower(topic string, partition int, leaderID NodeID, leaderAddr string, epoch int64, initialLEO int64) error {
+func (rm *ReplicaManager) BecomeFollower(topic string, partition int, leaderID NodeID, leaderAddr string, epoch, initialLEO int64) error {
 	key := partitionKey(topic, partition)
 	rm.logger.Info("becoming follower",
 		"topic", topic,
@@ -693,7 +693,7 @@ func (rm *ReplicaManager) completePendingAcks(replica *LocalReplica, newHW int64
 
 // ApplyFetchedMessages applies messages fetched from leader.
 // Called by FollowerFetcher after successful fetch.
-func (rm *ReplicaManager) ApplyFetchedMessages(topic string, partition int, messages []ReplicatedMessage, leaderHW int64, leaderLEO int64) error {
+func (rm *ReplicaManager) ApplyFetchedMessages(topic string, partition int, messages []ReplicatedMessage, leaderHW, leaderLEO int64) error {
 	key := partitionKey(topic, partition)
 
 	rm.mu.RLock()

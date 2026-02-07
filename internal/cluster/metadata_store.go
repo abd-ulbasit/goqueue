@@ -312,17 +312,18 @@ func (ms *MetadataStore) GetAssignmentsForTopic(topic string) []*PartitionAssign
 	ms.mu.RLock()
 	defer ms.mu.RUnlock()
 
-	var assignments []*PartitionAssignment
+	assignments := make([]*PartitionAssignment, 0, len(ms.meta.Assignments))
 	for key, assign := range ms.meta.Assignments {
-		if assign.Topic == topic {
-			assignCopy := *assign
-			assignCopy.Replicas = make([]NodeID, len(assign.Replicas))
-			copy(assignCopy.Replicas, assign.Replicas)
-			assignCopy.ISR = make([]NodeID, len(assign.ISR))
-			copy(assignCopy.ISR, assign.ISR)
-			assignments = append(assignments, &assignCopy)
-			_ = key // silence unused warning
+		if assign.Topic != topic {
+			continue
 		}
+		assignCopy := *assign
+		assignCopy.Replicas = make([]NodeID, len(assign.Replicas))
+		copy(assignCopy.Replicas, assign.Replicas)
+		assignCopy.ISR = make([]NodeID, len(assign.ISR))
+		copy(assignCopy.ISR, assign.ISR)
+		assignments = append(assignments, &assignCopy)
+		_ = key // silence unused warning
 	}
 	return assignments
 }
@@ -332,16 +333,17 @@ func (ms *MetadataStore) GetAssignmentsForNode(nodeID NodeID) []*PartitionAssign
 	ms.mu.RLock()
 	defer ms.mu.RUnlock()
 
-	var assignments []*PartitionAssignment
+	assignments := make([]*PartitionAssignment, 0, len(ms.meta.Assignments))
 	for _, assign := range ms.meta.Assignments {
-		if assign.Leader == nodeID {
-			assignCopy := *assign
-			assignCopy.Replicas = make([]NodeID, len(assign.Replicas))
-			copy(assignCopy.Replicas, assign.Replicas)
-			assignCopy.ISR = make([]NodeID, len(assign.ISR))
-			copy(assignCopy.ISR, assign.ISR)
-			assignments = append(assignments, &assignCopy)
+		if assign.Leader != nodeID {
+			continue
 		}
+		assignCopy := *assign
+		assignCopy.Replicas = make([]NodeID, len(assign.Replicas))
+		copy(assignCopy.Replicas, assign.Replicas)
+		assignCopy.ISR = make([]NodeID, len(assign.ISR))
+		copy(assignCopy.ISR, assign.ISR)
+		assignments = append(assignments, &assignCopy)
 	}
 	return assignments
 }
@@ -352,7 +354,7 @@ func (ms *MetadataStore) GetAssignmentsForNode(nodeID NodeID) []*PartitionAssign
 
 // CreateTopic adds a new topic to metadata.
 // Should only be called by the controller.
-func (ms *MetadataStore) CreateTopic(name string, partitions int, replicationFactor int, config TopicConfig) error {
+func (ms *MetadataStore) CreateTopic(name string, partitions, replicationFactor int, config TopicConfig) error {
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
 
@@ -595,7 +597,7 @@ func (ms *MetadataStore) persistLocked() error {
 
 	// Ensure directory exists
 	dir := filepath.Dir(ms.metadataFilePath())
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("failed to create metadata directory: %w", err)
 	}
 
@@ -607,7 +609,7 @@ func (ms *MetadataStore) persistLocked() error {
 
 	// Write atomically
 	tempPath := ms.metadataFilePath() + ".tmp"
-	if err := os.WriteFile(tempPath, data, 0644); err != nil {
+	if err := os.WriteFile(tempPath, data, 0o600); err != nil {
 		return fmt.Errorf("failed to write metadata: %w", err)
 	}
 

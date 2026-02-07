@@ -122,7 +122,7 @@ func NewReplicationClient(
 // =============================================================================
 
 // Fetch fetches messages from the leader for a partition.
-func (rc *ReplicationClient) Fetch(ctx context.Context, topic string, partition int, fromOffset int64, leaderEpoch int64) (*FetchResponse, error) {
+func (rc *ReplicationClient) Fetch(ctx context.Context, topic string, partition int, fromOffset, leaderEpoch int64) (*FetchResponse, error) {
 	// Get leader address.
 	leaderAddr, err := rc.getLeaderAddress(topic, partition)
 	if err != nil {
@@ -173,7 +173,7 @@ func (rc *ReplicationClient) RequestSnapshot(ctx context.Context, topic string, 
 
 // DownloadSnapshot downloads a snapshot file from the leader.
 // Returns the path to the downloaded snapshot.
-func (rc *ReplicationClient) DownloadSnapshot(ctx context.Context, topic string, partition int, downloadURL string, destDir string) (string, error) {
+func (rc *ReplicationClient) DownloadSnapshot(ctx context.Context, topic string, partition int, downloadURL, destDir string) (string, error) {
 	leaderAddr, err := rc.getLeaderAddress(topic, partition)
 	if err != nil {
 		return "", fmt.Errorf("get leader address: %w", err)
@@ -187,7 +187,7 @@ func (rc *ReplicationClient) DownloadSnapshot(ctx context.Context, topic string,
 		"url", url)
 
 	// Create request.
-	httpReq, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", url, http.NoBody)
 	if err != nil {
 		return "", fmt.Errorf("create request: %w", err)
 	}
@@ -205,7 +205,7 @@ func (rc *ReplicationClient) DownloadSnapshot(ctx context.Context, topic string,
 	}
 
 	// Create destination directory.
-	if err := os.MkdirAll(destDir, 0755); err != nil {
+	if err := os.MkdirAll(destDir, 0o755); err != nil {
 		return "", fmt.Errorf("create dest dir: %w", err)
 	}
 
@@ -328,7 +328,7 @@ func (rc *ReplicationClient) GetPartitionInfo(ctx context.Context, nodeID NodeID
 
 	url := fmt.Sprintf("http://%s/cluster/partition/%s/%d/info", nodeInfo.ClusterAddress.String(), topic, partition)
 
-	httpReq, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", url, http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
@@ -388,7 +388,7 @@ func (rc *ReplicationClient) getControllerAddress() (string, error) {
 	return controllerInfo.ClusterAddress.String(), nil
 }
 
-func (rc *ReplicationClient) doPost(ctx context.Context, addr string, path string, reqBody interface{}, respBody interface{}) error {
+func (rc *ReplicationClient) doPost(ctx context.Context, addr, path string, reqBody, respBody interface{}) error {
 	// Marshal request.
 	body, err := json.Marshal(reqBody)
 	if err != nil {

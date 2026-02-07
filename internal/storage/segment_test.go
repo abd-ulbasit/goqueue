@@ -16,6 +16,7 @@ package storage
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -217,7 +218,7 @@ func TestSegment_Seal(t *testing.T) {
 	// Writing should fail
 	msg2 := NewMessage([]byte("key2"), []byte("value2"))
 	_, err = seg.Append(msg2)
-	if err != ErrSegmentReadOnly {
+	if !errors.Is(err, ErrSegmentReadOnly) {
 		t.Errorf("Append after seal should fail with ErrSegmentReadOnly, got: %v", err)
 	}
 
@@ -498,10 +499,10 @@ func TestSegment_TimeBasedQueries_ErrSegmentClosed(t *testing.T) {
 		t.Fatalf("Close failed: %v", err)
 	}
 
-	if _, err := seg.ReadFromTimestamp(time.Now().UnixNano(), 0); err != ErrSegmentClosed {
+	if _, err := seg.ReadFromTimestamp(time.Now().UnixNano(), 0); !errors.Is(err, ErrSegmentClosed) {
 		t.Fatalf("ReadFromTimestamp on closed segment error=%v, want %v", err, ErrSegmentClosed)
 	}
-	if _, err := seg.ReadTimeRange(time.Now().UnixNano(), time.Now().UnixNano()+1, 0); err != ErrSegmentClosed {
+	if _, err := seg.ReadTimeRange(time.Now().UnixNano(), time.Now().UnixNano()+1, 0); !errors.Is(err, ErrSegmentClosed) {
 		t.Fatalf("ReadTimeRange on closed segment error=%v, want %v", err, ErrSegmentClosed)
 	}
 }
@@ -541,7 +542,7 @@ func TestSegment_Sync(t *testing.T) {
 
 	// Sync on closed segment should fail
 	seg.Close()
-	if err := seg.Sync(); err != ErrSegmentClosed {
+	if err := seg.Sync(); !errors.Is(err, ErrSegmentClosed) {
 		t.Errorf("Expected ErrSegmentClosed, got %v", err)
 	}
 }
@@ -622,10 +623,10 @@ func TestSegment_Close_ErrorHandling(t *testing.T) {
 	}
 
 	// Operations after close should fail
-	if _, err := seg.Read(0); err != ErrSegmentClosed {
+	if _, err := seg.Read(0); !errors.Is(err, ErrSegmentClosed) {
 		t.Errorf("Read after close should fail with ErrSegmentClosed, got: %v", err)
 	}
-	if _, err := seg.Append(msg); err != ErrSegmentClosed {
+	if _, err := seg.Append(msg); !errors.Is(err, ErrSegmentClosed) {
 		t.Errorf("Append after close should fail with ErrSegmentClosed, got: %v", err)
 	}
 }

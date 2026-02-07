@@ -384,8 +384,8 @@ const (
 	// SpanEventDelayFired - delay timer expired, message now visible
 	SpanEventDelayFired SpanEventType = "delay.fired"
 
-	// SpanEventDelayCancelled - delayed message was cancelled before delivery
-	SpanEventDelayCancelled SpanEventType = "delay.cancelled"
+	// SpanEventDelayCanceled - delayed message was canceled before delivery
+	SpanEventDelayCanceled SpanEventType = "delay.canceled"
 
 	// === VISIBILITY EVENTS (M4) ===
 
@@ -863,7 +863,7 @@ type FileExporter struct {
 
 // NewFileExporter creates a file exporter.
 func NewFileExporter(dir string, maxFileSize int64) (*FileExporter, error) {
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("failed to create trace directory: %w", err)
 	}
 
@@ -889,7 +889,7 @@ func (e *FileExporter) rotateFile() error {
 	filename := fmt.Sprintf("traces-%s-%03d.json", date, e.fileCount)
 	path := filepath.Join(e.dir, filename)
 
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return fmt.Errorf("failed to create trace file: %w", err)
 	}
@@ -1125,8 +1125,10 @@ func (e *OTLPExporter) createGRPCExporter(ctx context.Context) (sdktrace.SpanExp
 	}
 
 	if e.config.Insecure {
-		opts = append(opts, otlptracegrpc.WithDialOption(grpc.WithTransportCredentials(insecure.NewCredentials())))
-		opts = append(opts, otlptracegrpc.WithInsecure())
+		opts = append(opts,
+			otlptracegrpc.WithDialOption(grpc.WithTransportCredentials(insecure.NewCredentials())),
+			otlptracegrpc.WithInsecure(),
+		)
 	}
 
 	if len(e.config.Headers) > 0 {
@@ -1216,7 +1218,7 @@ func (e *OTLPExporter) sendOTLP(spans []*Span) {
 			attribute.String("service.name", e.config.ServiceName),
 		)),
 	)
-	defer tp.Shutdown(ctx)
+	defer func() { _ = tp.Shutdown(ctx) }()
 
 	tracer := tp.Tracer("goqueue")
 
@@ -1669,7 +1671,7 @@ func (t *Tracer) RecordSpan(span *Span) {
 	// Export to all exporters
 	ctx := context.Background()
 	for _, exp := range t.exporters {
-		go exp.Export(ctx, span)
+		go func(e TraceExporter) { _ = e.Export(ctx, span) }(exp)
 	}
 }
 
@@ -1817,7 +1819,10 @@ func (t *Tracer) SearchTraces(query TraceQuery) []*Trace {
 			continue
 		}
 		if query.Status != "" {
-			// Will filter after building trace
+			// Intentionally empty: status filtering is deferred until after
+			// full traces are assembled below, because we need all spans
+			// in a trace to determine its overall status.
+			_ = query.Status
 		}
 
 		traceMap[span.TraceID] = append(traceMap[span.TraceID], span)
@@ -1942,7 +1947,7 @@ func (t *Tracer) Shutdown() error {
 	defer cancel()
 
 	for _, exp := range t.exporters {
-		exp.Shutdown(ctx)
+		_ = exp.Shutdown(ctx)
 	}
 
 	return nil

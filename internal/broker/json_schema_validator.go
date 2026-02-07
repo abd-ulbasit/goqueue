@@ -68,6 +68,7 @@
 package broker
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -362,20 +363,23 @@ func (v *JSONSchemaValidator) validateType(schema *jsonSchemaNode, data interfac
 	// Type-specific validation
 	switch actualType {
 	case "string":
-		errors = append(errors, v.validateString(schema, data.(string), path)...)
+		strVal, _ := data.(string)
+		errors = append(errors, v.validateString(schema, strVal, path)...)
 	case "number", "integer":
 		errors = append(errors, v.validateNumber(schema, data, path)...)
 	case "object":
-		errors = append(errors, v.validateObject(schema, data.(map[string]interface{}), path)...)
+		objVal, _ := data.(map[string]interface{})
+		errors = append(errors, v.validateObject(schema, objVal, path)...)
 	case "array":
-		errors = append(errors, v.validateArray(schema, data.([]interface{}), path)...)
+		arrVal, _ := data.([]interface{})
+		errors = append(errors, v.validateArray(schema, arrVal, path)...)
 	}
 
 	return errors
 }
 
 // validateString validates string-specific constraints
-func (v *JSONSchemaValidator) validateString(schema *jsonSchemaNode, data string, path string) []string {
+func (v *JSONSchemaValidator) validateString(schema *jsonSchemaNode, data, path string) []string {
 	var errors []string
 
 	// Check minLength
@@ -590,7 +594,7 @@ func jsonEquals(a, b interface{}) bool {
 	if err1 != nil || err2 != nil {
 		return false
 	}
-	return string(aJSON) == string(bJSON)
+	return bytes.Equal(aJSON, bJSON)
 }
 
 // =============================================================================

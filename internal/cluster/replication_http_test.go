@@ -62,14 +62,14 @@ func TestReplication_HTTP_RoundTrip_ServerAndClients(t *testing.T) {
 
 	// Add follower node.
 	followerInfo := &NodeInfo{
-		ID:            "n2",
+		ID:             "n2",
 		ClientAddress:  NodeAddress{Host: "127.0.0.1", Port: 8002},
 		ClusterAddress: NodeAddress{Host: "127.0.0.1", Port: 9002},
-		Status:        NodeStatusAlive,
-		Role:          NodeRoleFollower,
-		JoinedAt:      time.Now(),
-		LastHeartbeat: time.Now(),
-		Version:       "test",
+		Status:         NodeStatusAlive,
+		Role:           NodeRoleFollower,
+		JoinedAt:       time.Now(),
+		LastHeartbeat:  time.Now(),
+		Version:        "test",
 	}
 	if err := membership.AddNode(followerInfo); err != nil {
 		t.Fatalf("AddNode(n2): %v", err)

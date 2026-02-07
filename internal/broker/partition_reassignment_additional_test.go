@@ -202,7 +202,7 @@ func TestReassignmentManager_WaitForCatchup_DeadlineExceededMapsToSentinel(t *te
 	}
 }
 
-func TestReassignmentManager_RunReassignment_CancelledStateIsNotFailed(t *testing.T) {
+func TestReassignmentManager_RunReassignment_CanceledStateIsNotFailed(t *testing.T) {
 	ms := newTestMetadataStore(t)
 	mustCreateTopicMeta(t, ms, "orders", 1, 2)
 
@@ -232,15 +232,15 @@ func TestReassignmentManager_RunReassignment_CancelledStateIsNotFailed(t *testin
 	rm.activeReassignments[status.ID] = status
 	rm.partitionReassignments["orders-0"] = status.ID
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // cancelled before the worker starts
+	cancel() // canceled before the worker starts
 
 	// Pretend there is a cancel function registered.
 	rm.cancelFuncs[status.ID] = func() {}
 
 	rm.runReassignment(ctx, status)
 
-	if status.State != ReassignmentStateCancelled {
-		t.Fatalf("status.State=%q, want %q", status.State, ReassignmentStateCancelled)
+	if status.State != ReassignmentStateCanceled {
+		t.Fatalf("status.State=%q, want %q", status.State, ReassignmentStateCanceled)
 	}
 	if status.CompletedAt == nil {
 		t.Fatalf("CompletedAt expected to be set")

@@ -150,16 +150,23 @@ func (c *TLSConfig) NewTLSConfig() (*tls.Config, error) {
 		return nil, nil
 	}
 
+	// Enforce minimum TLS 1.2 to prevent downgrade attacks (gosec G402).
+	// Even if config specifies a lower version (or zero-value), floor at TLS 1.2.
 	tlsConfig := &tls.Config{
-		MinVersion: c.MinVersion,
+		MinVersion: tls.VersionTLS12,
 		ClientAuth: c.ClientAuth,
+	}
+	// Allow higher TLS versions if explicitly configured.
+	if c.MinVersion > tls.VersionTLS12 {
+		tlsConfig.MinVersion = c.MinVersion
 	}
 
 	// Load or generate server certificate
 	var cert tls.Certificate
 	var err error
 
-	if c.CertFile != "" && c.KeyFile != "" {
+	switch {
+	case c.CertFile != "" && c.KeyFile != "":
 		// ┌───────────────────────────────────────────────────────────────────────┐
 		// │ LOADING CERTIFICATES FROM FILES                                       │
 		// │                                                                        │
@@ -177,14 +184,14 @@ func (c *TLSConfig) NewTLSConfig() (*tls.Config, error) {
 			return nil, fmt.Errorf("failed to load certificate: %w", err)
 		}
 		slog.Info("loaded TLS certificate", "cert", c.CertFile)
-	} else if c.GenerateSelfSigned {
+	case c.GenerateSelfSigned:
 		// Generate self-signed certificate for development/testing
 		cert, err = c.generateSelfSignedCert()
 		if err != nil {
 			return nil, fmt.Errorf("failed to generate self-signed cert: %w", err)
 		}
 		slog.Warn("using self-signed certificate - NOT FOR PRODUCTION")
-	} else {
+	default:
 		return nil, fmt.Errorf("TLS enabled but no certificate provided")
 	}
 
@@ -290,9 +297,9 @@ func (c *TLSConfig) generateSelfSignedCert() (tls.Certificate, error) {
 
 	// Optionally save to disk for debugging
 	if c.CertDir != "" {
-		if err := os.MkdirAll(c.CertDir, 0700); err == nil {
-			_ = os.WriteFile(filepath.Join(c.CertDir, "server.crt"), certPEM, 0644)
-			_ = os.WriteFile(filepath.Join(c.CertDir, "server.key"), keyPEM, 0600)
+		if err := os.MkdirAll(c.CertDir, 0o700); err == nil {
+			_ = os.WriteFile(filepath.Join(c.CertDir, "server.crt"), certPEM, 0o600)
+			_ = os.WriteFile(filepath.Join(c.CertDir, "server.key"), keyPEM, 0o600)
 		}
 	}
 

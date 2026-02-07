@@ -5,6 +5,7 @@
 package broker
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -608,19 +609,19 @@ func TestTenantManager_SystemTenantProtection(t *testing.T) {
 
 	// Cannot delete system tenant
 	err = tm.DeleteTenant(DefaultTenantID)
-	if err != ErrSystemTenant {
+	if !errors.Is(err, ErrSystemTenant) {
 		t.Errorf("Delete system tenant should return ErrSystemTenant, got %v", err)
 	}
 
 	// Cannot update system tenant
 	_, err = tm.UpdateTenant(DefaultTenantID, nil, nil)
-	if err != ErrSystemTenant {
+	if !errors.Is(err, ErrSystemTenant) {
 		t.Errorf("Update system tenant should return ErrSystemTenant, got %v", err)
 	}
 
 	// Cannot change system tenant status
 	_, err = tm.SetTenantStatus(DefaultTenantID, TenantStatusDisabled, "test")
-	if err != ErrSystemTenant {
+	if !errors.Is(err, ErrSystemTenant) {
 		t.Errorf("SetStatus system tenant should return ErrSystemTenant, got %v", err)
 	}
 }

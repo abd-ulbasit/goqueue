@@ -357,7 +357,7 @@ func (r *CoordinatorRouter) forwardJoinGroup(ctx context.Context, coord *Coordin
 
 	resp, err := r.httpClient.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrForwardingFailed, err)
+		return nil, fmt.Errorf("%w: %w", ErrForwardingFailed, err)
 	}
 	defer resp.Body.Close()
 
@@ -390,7 +390,7 @@ func (r *CoordinatorRouter) forwardLeaveGroup(ctx context.Context, coord *Coordi
 
 	resp, err := r.httpClient.Do(httpReq)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrForwardingFailed, err)
+		return fmt.Errorf("%w: %w", ErrForwardingFailed, err)
 	}
 	defer resp.Body.Close()
 
@@ -418,7 +418,7 @@ func (r *CoordinatorRouter) forwardHeartbeat(ctx context.Context, coord *Coordin
 
 	resp, err := r.httpClient.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrForwardingFailed, err)
+		return nil, fmt.Errorf("%w: %w", ErrForwardingFailed, err)
 	}
 	defer resp.Body.Close()
 
@@ -451,7 +451,7 @@ func (r *CoordinatorRouter) forwardSyncGroup(ctx context.Context, coord *Coordin
 
 	resp, err := r.httpClient.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrForwardingFailed, err)
+		return nil, fmt.Errorf("%w: %w", ErrForwardingFailed, err)
 	}
 	defer resp.Body.Close()
 
@@ -484,7 +484,7 @@ func (r *CoordinatorRouter) forwardCommitOffset(ctx context.Context, coord *Coor
 
 	resp, err := r.httpClient.Do(httpReq)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrForwardingFailed, err)
+		return fmt.Errorf("%w: %w", ErrForwardingFailed, err)
 	}
 	defer resp.Body.Close()
 
@@ -500,14 +500,14 @@ func (r *CoordinatorRouter) forwardFetchOffset(ctx context.Context, coord *Coord
 	url := fmt.Sprintf("http://%s:%d/internal/coordinator/fetch-offset?group=%s&topic=%s&partition=%d",
 		coord.Host, coord.Port, req.GroupID, req.Topic, req.Partition)
 
-	httpReq, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", url, http.NoBody)
 	if err != nil {
 		return nil, err
 	}
 
 	resp, err := r.httpClient.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrForwardingFailed, err)
+		return nil, fmt.Errorf("%w: %w", ErrForwardingFailed, err)
 	}
 	defer resp.Body.Close()
 
@@ -530,14 +530,14 @@ func (r *CoordinatorRouter) forwardFetchOffset(ctx context.Context, coord *Coord
 func (r *CoordinatorRouter) forwardDescribeGroup(ctx context.Context, coord *CoordinatorInfo, groupID string) (*GroupDescription, error) {
 	url := fmt.Sprintf("http://%s:%d/internal/coordinator/describe?group=%s", coord.Host, coord.Port, groupID)
 
-	httpReq, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", url, http.NoBody)
 	if err != nil {
 		return nil, err
 	}
 
 	resp, err := r.httpClient.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrForwardingFailed, err)
+		return nil, fmt.Errorf("%w: %w", ErrForwardingFailed, err)
 	}
 	defer resp.Body.Close()
 

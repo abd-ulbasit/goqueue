@@ -719,7 +719,7 @@ func (p *Producer) accumulatorLoop() {
 				}
 			}
 			// Shutdown: flush remaining batches
-			p.flushAllBatches()
+			_ = p.flushAllBatches()
 			return
 
 		case record := <-p.records:
@@ -795,7 +795,7 @@ func (p *Producer) addToBatch(record *ProducerRecord) {
 		b.bytes >= p.config.BatchBytes
 
 	if shouldFlush {
-		p.flushBatchLocked(partition)
+		_ = p.flushBatchLocked(partition)
 	}
 }
 
@@ -808,7 +808,7 @@ func (p *Producer) flushStaleBatches() {
 
 	for partition, b := range p.batches {
 		if len(b.records) > 0 && time.Since(b.createdAt) >= lingerDuration {
-			p.flushBatchLocked(partition)
+			_ = p.flushBatchLocked(partition)
 		}
 	}
 }

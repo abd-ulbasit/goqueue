@@ -436,12 +436,12 @@ var tenantIDRegex = regexp.MustCompile(`^[a-z][a-z0-9-]{2,63}$`)
 // NewTenantManager creates a new tenant manager.
 func NewTenantManager(config TenantManagerConfig) (*TenantManager, error) {
 	// Create data directories
-	if err := os.MkdirAll(config.DataDir, 0755); err != nil {
+	if err := os.MkdirAll(config.DataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("failed to create tenant data directory: %w", err)
 	}
 
 	usageDir := filepath.Join(config.DataDir, "usage")
-	if err := os.MkdirAll(usageDir, 0755); err != nil {
+	if err := os.MkdirAll(usageDir, 0o755); err != nil {
 		return nil, fmt.Errorf("failed to create usage directory: %w", err)
 	}
 
@@ -584,8 +584,8 @@ func (tm *TenantManager) GetTenant(id string) (*Tenant, error) {
 	}
 
 	// Return a copy to prevent external modification
-	copy := *tenant
-	return &copy, nil
+	tenantCopy := *tenant
+	return &tenantCopy, nil
 }
 
 // ListTenants returns all tenants.
@@ -595,8 +595,8 @@ func (tm *TenantManager) ListTenants() []*Tenant {
 
 	tenants := make([]*Tenant, 0, len(tm.tenants))
 	for _, t := range tm.tenants {
-		copy := *t
-		tenants = append(tenants, &copy)
+		tenantCopy := *t
+		tenants = append(tenants, &tenantCopy)
 	}
 	return tenants
 }
@@ -629,8 +629,8 @@ func (tm *TenantManager) UpdateTenant(id string, name *string, metadata map[stri
 		return nil, fmt.Errorf("failed to persist tenant update: %w", err)
 	}
 
-	copy := *tenant
-	return &copy, nil
+	tenantCopy := *tenant
+	return &tenantCopy, nil
 }
 
 // UpdateTenantQuotas updates tenant quotas.
@@ -659,8 +659,8 @@ func (tm *TenantManager) UpdateTenantQuotas(id string, quotas TenantQuotas) (*Te
 		return nil, fmt.Errorf("failed to persist quota update: %w", err)
 	}
 
-	copy := *tenant
-	return &copy, nil
+	tenantCopy := *tenant
+	return &tenantCopy, nil
 }
 
 // SetTenantStatus updates tenant status.
@@ -695,8 +695,8 @@ func (tm *TenantManager) SetTenantStatus(id string, status TenantStatus, reason 
 		return nil, fmt.Errorf("failed to persist status update: %w", err)
 	}
 
-	copy := *tenant
-	return &copy, nil
+	tenantCopy := *tenant
+	return &tenantCopy, nil
 }
 
 // DeleteTenant removes a tenant.
@@ -747,8 +747,8 @@ func (tm *TenantManager) GetUsage(tenantID string) (*TenantUsage, error) {
 		return nil, fmt.Errorf("%w: %s", ErrTenantNotFound, tenantID)
 	}
 
-	copy := *usage
-	return &copy, nil
+	usageCopy := *usage
+	return &usageCopy, nil
 }
 
 // IncrementUsage atomically increments usage counters.
@@ -955,7 +955,7 @@ func (tm *TenantManager) persistTenantsLocked() error {
 	}
 
 	path := filepath.Join(tm.config.DataDir, tenantsFile)
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return fmt.Errorf("failed to write tenants file: %w", err)
 	}
 
@@ -1012,7 +1012,7 @@ func (tm *TenantManager) persistUsageLocked() error {
 		}
 
 		path := filepath.Join(usageDir, tenantID+".json")
-		if err := os.WriteFile(path, data, 0644); err != nil {
+		if err := os.WriteFile(path, data, 0o600); err != nil {
 			// Log but don't fail
 			continue
 		}
@@ -1034,7 +1034,7 @@ func (tm *TenantManager) persistUsageLoop() {
 			return
 		case <-ticker.C:
 			tm.mu.RLock()
-			tm.persistUsageLocked()
+			_ = tm.persistUsageLocked()
 			tm.mu.RUnlock()
 		}
 	}
@@ -1066,7 +1066,7 @@ func (tm *TenantManager) GetTenantStats(tenantID string) (*TenantStats, error) {
 		return nil, fmt.Errorf("%w: %s", ErrTenantNotFound, tenantID)
 	}
 
-	usage, _ := tm.usage[tenantID]
+	usage := tm.usage[tenantID]
 	if usage == nil {
 		usage = &TenantUsage{}
 	}

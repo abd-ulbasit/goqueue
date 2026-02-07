@@ -299,7 +299,7 @@ type Broker struct {
 	//   - goqueue uses file-based WAL + snapshots (simpler, same guarantees)
 	//
 	// FLOW:
-	//   ┌──────────────┐  initProducerId  ┌─────────────────────────┐
+	//   ┌──────────────┐  initProducerID  ┌─────────────────────────┐
 	//   │   Producer   │─────────────────►│ Transaction Coordinator │
 	//   │              │◄─────────────────│  - Assigns PID+Epoch    │
 	//   └──────────────┘  PID=123,Epoch=1 │  - Tracks sequences     │
@@ -531,7 +531,7 @@ func NewBroker(config BrokerConfig) (*Broker, error) {
 
 	// Create data directories
 	logsDir := filepath.Join(config.DataDir, "logs")
-	if err := os.MkdirAll(logsDir, 0755); err != nil {
+	if err := os.MkdirAll(logsDir, 0o755); err != nil {
 		return nil, fmt.Errorf("failed to create logs directory: %w", err)
 	}
 
@@ -675,7 +675,7 @@ func NewBroker(config BrokerConfig) (*Broker, error) {
 	schemaRegistryConfig := DefaultSchemaRegistryConfig(config.DataDir)
 	schemaRegistry, err := NewSchemaRegistry(schemaRegistryConfig)
 	if err != nil {
-		tracer.Shutdown()
+		_ = tracer.Shutdown()
 		scheduler.Close()
 		groupCoordinator.Close()
 		return nil, fmt.Errorf("failed to create schema registry: %w", err)
@@ -708,7 +708,7 @@ func NewBroker(config BrokerConfig) (*Broker, error) {
 	transactionCoordinator, err := NewTransactionCoordinator(txnCoordinatorConfig, broker)
 	if err != nil {
 		schemaRegistry.Close()
-		tracer.Shutdown()
+		_ = tracer.Shutdown()
 		scheduler.Close()
 		groupCoordinator.Close()
 		return nil, fmt.Errorf("failed to create transaction coordinator: %w", err)
@@ -738,7 +738,7 @@ func NewBroker(config BrokerConfig) (*Broker, error) {
 		if err != nil {
 			transactionCoordinator.Close()
 			schemaRegistry.Close()
-			tracer.Shutdown()
+			_ = tracer.Shutdown()
 			scheduler.Close()
 			groupCoordinator.Close()
 			return nil, fmt.Errorf("failed to create cluster coordinator: %w", err)
@@ -759,10 +759,10 @@ func NewBroker(config BrokerConfig) (*Broker, error) {
 		// ======================================================================
 		rc, err := newReplicationCoordinator(broker, logger)
 		if err != nil {
-			cc.Stop(context.Background())
+			_ = cc.Stop(context.Background())
 			transactionCoordinator.Close()
 			schemaRegistry.Close()
-			tracer.Shutdown()
+			_ = tracer.Shutdown()
 			scheduler.Close()
 			groupCoordinator.Close()
 			return nil, fmt.Errorf("failed to create replication coordinator: %w", err)
@@ -853,11 +853,11 @@ func NewBroker(config BrokerConfig) (*Broker, error) {
 		tenantManager, err := NewTenantManager(tenantManagerConfig)
 		if err != nil {
 			if broker.clusterCoordinator != nil {
-				broker.clusterCoordinator.Stop(context.Background())
+				_ = broker.clusterCoordinator.Stop(context.Background())
 			}
 			transactionCoordinator.Close()
 			schemaRegistry.Close()
-			tracer.Shutdown()
+			_ = tracer.Shutdown()
 			scheduler.Close()
 			groupCoordinator.Close()
 			return nil, fmt.Errorf("failed to create tenant manager: %w", err)
@@ -873,11 +873,11 @@ func NewBroker(config BrokerConfig) (*Broker, error) {
 	// Discover and load existing topics
 	if err := broker.loadExistingTopics(); err != nil {
 		if broker.clusterCoordinator != nil {
-			broker.clusterCoordinator.Stop(context.Background())
+			_ = broker.clusterCoordinator.Stop(context.Background())
 		}
 		transactionCoordinator.Close()
 		schemaRegistry.Close()
-		tracer.Shutdown()
+		_ = tracer.Shutdown()
 		scheduler.Close()
 		groupCoordinator.Close()
 		return nil, fmt.Errorf("failed to load existing topics: %w", err)
@@ -1769,12 +1769,10 @@ func (b *Broker) PublishWithTrace(topic string, key, value []byte, traceCtx Trac
 			// Note: We continue and return success because the message IS durable
 			// on the leader. The ISR timeout just means followers are slow.
 			// This matches Kafka's behavior with acks=all when ISR shrinks.
-		} else {
+		} else if !ctx.TraceID.IsZero() {
 			// Record successful replication span
-			if !ctx.TraceID.IsZero() {
-				span := NewSpan(ctx.TraceID, SpanEventReplicationComplete, topic, partition, offset)
-				b.tracer.RecordSpan(span)
-			}
+			span := NewSpan(ctx.TraceID, SpanEventReplicationComplete, topic, partition, offset)
+			b.tracer.RecordSpan(span)
 		}
 	}
 
@@ -2055,12 +2053,12 @@ func (b *Broker) PublishBatchWithPriority(topic string, messages []struct {
 //
 // KAFKA COMPARISON:
 //   - Kafka: initTransactions(), beginTransaction(), send(), commitTransaction()
-//   - goqueue: InitProducerId(), BeginTransaction(), PublishTransactional(), CommitTransaction()
+//   - goqueue: InitProducerID(), BeginTransaction(), PublishTransactional(), CommitTransaction()
 //
 // FLOW FOR TRANSACTIONAL PUBLISH:
 //
 //   ┌──────────────────────────────────────────────────────────────────────────┐
-//   │  1. InitProducerId(txn.id)                                               │
+//   │  1. InitProducerID(txn.id)                                               │
 //   │     └── Returns PID=123, Epoch=1                                         │
 //   │                                                                          │
 //   │  2. BeginTransaction(PID, Epoch)                                         │
@@ -2088,9 +2086,9 @@ func (b *Broker) PublishBatchWithPriority(topic string, messages []struct {
 //   - topic: Topic name
 //   - partition: Partition number
 //   - isCommit: true for COMMIT marker, false for ABORT marker
-//   - producerId: Producer's unique identifier
+//   - producerID: Producer's unique identifier
 //   - epoch: Producer's current epoch
-//   - transactionalId: Transaction's string identifier
+//   - transactionalID: Transaction's string identifier
 //
 // WIRE FORMAT:
 // The control record is written as a regular message with:
@@ -2101,7 +2099,7 @@ func (b *Broker) PublishBatchWithPriority(topic string, messages []struct {
 // COMPARISON:
 //   - Kafka: Uses ControlRecordType in special batch format
 //   - goqueue: Uses flags byte in standard message format (simpler)
-func (b *Broker) WriteControlRecord(topic string, partition int, isCommit bool, producerId int64, epoch int16, transactionalId string) error {
+func (b *Broker) WriteControlRecord(topic string, partition int, isCommit bool, producerID int64, epoch int16, transactionalID string) error {
 	b.mu.RLock()
 	if b.closed {
 		b.mu.RUnlock()
@@ -2119,9 +2117,9 @@ func (b *Broker) WriteControlRecord(topic string, partition int, isCommit bool, 
 	// Note: storage package uses uint64/uint16 for PID/Epoch, so we convert here
 	var controlMsg *storage.Message
 	if isCommit {
-		controlMsg = storage.NewCommitControlRecord(0, uint64(producerId), uint16(epoch), transactionalId)
+		controlMsg = storage.NewCommitControlRecord(0, uint64(producerID), uint16(epoch), transactionalID)
 	} else {
-		controlMsg = storage.NewAbortControlRecord(0, uint64(producerId), uint16(epoch), transactionalId)
+		controlMsg = storage.NewAbortControlRecord(0, uint64(producerID), uint16(epoch), transactionalID)
 	}
 
 	// Write to the partition using PublishMessageToPartition to preserve Flags
@@ -2141,9 +2139,9 @@ func (b *Broker) WriteControlRecord(topic string, partition int, isCommit bool, 
 		"topic", topic,
 		"partition", partition,
 		"offset", offset,
-		"producer_id", producerId,
+		"producer_id", producerID,
 		"epoch", epoch,
-		"txn_id", transactionalId)
+		"txn_id", transactionalID)
 
 	return nil
 }
@@ -2152,7 +2150,7 @@ func (b *Broker) WriteControlRecord(topic string, partition int, isCommit bool, 
 // Clears tracked uncommitted offsets when a transaction commits or aborts.
 //
 // PARAMETERS:
-//   - txnId: The transaction ID to clear
+//   - txnID: The transaction ID to clear
 //
 // RETURNS:
 //   - List of offsets that were cleared (for abort filtering)
@@ -2175,14 +2173,14 @@ func (b *Broker) WriteControlRecord(topic string, partition int, isCommit bool, 
 //	│  2. MarkTransactionAborted() moves offsets to abortedTracker            │
 //	│  3. Consumers filter aborted offsets via abortedTracker                 │
 //	└─────────────────────────────────────────────────────────────────────────┘
-func (b *Broker) ClearUncommittedTransaction(txnId string) []partitionOffset {
+func (b *Broker) ClearUncommittedTransaction(txnID string) []partitionOffset { //nolint:revive // internal package type
 	if b.uncommittedTracker == nil {
 		return nil
 	}
 
-	cleared := b.uncommittedTracker.ClearTransaction(txnId)
+	cleared := b.uncommittedTracker.ClearTransaction(txnID)
 	b.logger.Debug("cleared uncommitted offsets for transaction",
-		"txn_id", txnId,
+		"txn_id", txnID,
 		"offsets_cleared", len(cleared))
 	return cleared
 }
@@ -2255,11 +2253,11 @@ func (b *Broker) MarkTransactionAborted(offsets []partitionOffset) {
 //   - goqueue: WAL txn_publish records → replay into UncommittedTracker
 //
 // ============================================================================
-func (b *Broker) TrackUncommittedOffset(topic string, partition int, offset int64, txnId string, producerId int64, epoch int16) {
+func (b *Broker) TrackUncommittedOffset(topic string, partition int, offset int64, txnID string, producerID int64, epoch int16) {
 	if b.uncommittedTracker == nil {
 		return
 	}
-	b.uncommittedTracker.Track(topic, partition, offset, txnId, producerId, epoch)
+	b.uncommittedTracker.Track(topic, partition, offset, txnID, producerID, epoch)
 }
 
 // PublishTransactional writes a message as part of an active transaction.
@@ -2276,7 +2274,7 @@ func (b *Broker) TrackUncommittedOffset(topic string, partition int, offset int6
 //   - partition: Target partition (or -1 for automatic routing)
 //   - key: Routing key (used for partition selection if partition=-1)
 //   - value: Message payload
-//   - producerId: Producer's unique identifier
+//   - producerID: Producer's unique identifier
 //   - epoch: Producer's current epoch (for zombie fencing)
 //   - sequence: Sequence number for this partition (for deduplication)
 //
@@ -2312,7 +2310,7 @@ func (b *Broker) PublishTransactional(
 	topic string,
 	partition int,
 	key, value []byte,
-	producerId int64,
+	producerID int64,
 	epoch int16,
 	sequence int32,
 ) (actualPartition int, offset int64, duplicate bool, err error) {
@@ -2347,9 +2345,9 @@ func (b *Broker) PublishTransactional(
 	}
 
 	// Step 2: Check sequence number with transaction coordinator
-	// Build ProducerIdAndEpoch for the check
-	pid := ProducerIdAndEpoch{
-		ProducerId: producerId,
+	// Build ProducerIDAndEpoch for the check
+	pid := ProducerIDAndEpoch{
+		ProducerID: producerID,
 		Epoch:      epoch,
 	}
 
@@ -2364,7 +2362,7 @@ func (b *Broker) PublishTransactional(
 		// Duplicate message - return success without writing
 		// This is idempotent behavior: same sequence returns success
 		b.logger.Debug("duplicate message detected",
-			"producer_id", producerId,
+			"producer_id", producerID,
 			"topic", topic,
 			"partition", actualPartition,
 			"sequence", sequence,
@@ -2391,34 +2389,34 @@ func (b *Broker) PublishTransactional(
 	// We track the offset in uncommittedTracker so consume operations can filter
 	// it out. When the transaction commits/aborts, we clear the tracking.
 	//
-	// NOTE: We lookup the transaction ID by producerId+epoch. If the producer
+	// NOTE: We lookup the transaction ID by producerID+epoch. If the producer
 	// is in an active transaction, we track the offset. If not (non-transactional
 	// publish), we don't track it.
 	//
 	// =========================================================================
-	state := b.transactionCoordinator.GetProducerStateByProducerId(producerId, epoch)
+	state := b.transactionCoordinator.GetProducerStateByProducerID(producerID, epoch)
 	b.logger.Debug("looked up producer state by ID",
-		"producer_id", producerId,
+		"producer_id", producerID,
 		"epoch", epoch,
 		"state_found", state != nil)
 	if state != nil {
 		b.logger.Debug("producer state details",
 			"state", state.State,
-			"current_txn_id", state.CurrentTransactionId)
-		if state.State == TransactionStateOngoing && state.CurrentTransactionId != "" {
+			"current_txn_id", state.CurrentTransactionID)
+		if state.State == TransactionStateOngoing && state.CurrentTransactionID != "" {
 			b.uncommittedTracker.Track(
 				topic,
 				actualPartition,
 				offset,
-				state.CurrentTransactionId,
-				producerId,
+				state.CurrentTransactionID,
+				producerID,
 				epoch,
 			)
 			b.logger.Debug("tracked uncommitted offset",
 				"topic", topic,
 				"partition", actualPartition,
 				"offset", offset,
-				"txn_id", state.CurrentTransactionId)
+				"txn_id", state.CurrentTransactionID)
 
 			// =========================================================================
 			// WRITE WAL RECORD FOR TRANSACTIONAL PUBLISH (M26 - Recovery)
@@ -2429,19 +2427,19 @@ func (b *Broker) PublishTransactional(
 			// can't tell which offsets belong to in-progress transactions.
 			// =========================================================================
 			b.transactionCoordinator.RecordTxnPublish(
-				state.TransactionalId,
-				state.CurrentTransactionId,
+				state.TransactionalID,
+				state.CurrentTransactionID,
 				topic,
 				actualPartition,
 				offset,
-				producerId,
+				producerID,
 				epoch,
 			)
 		}
 	}
 
 	b.logger.Debug("published transactional message",
-		"producer_id", producerId,
+		"producer_id", producerID,
 		"epoch", epoch,
 		"topic", topic,
 		"partition", actualPartition,
@@ -2489,7 +2487,7 @@ func (b *Broker) GetGroupCoordinator() *GroupCoordinator {
 // RETURNS:
 //   - *replicationCoordinator if cluster mode is enabled (M11)
 //   - nil if running in single-node mode
-func (b *Broker) GetReplicationCoordinator() *replicationCoordinator {
+func (b *Broker) GetReplicationCoordinator() *replicationCoordinator { //nolint:revive // unexported-return: used only across internal packages
 	return b.replicationCoordinator
 }
 
@@ -3248,7 +3246,7 @@ func (b *Broker) PriorityStats() BrokerPriorityStats {
 				// Total = all-time message count at this priority
 				partitionStats.Total[p] = m.TotalMessages
 
-				// Consumed = Total - Pending
+				// Consumed: derived from Total minus Pending
 				partitionStats.Consumed[p] = m.TotalMessages - int64(m.PendingMessages)
 
 				// OldestPending timestamp conversion
@@ -3931,13 +3929,13 @@ func (b *Broker) handleDelayedMessageReady(topic string, partition int, offset i
 //   - offset: Message offset
 //
 // RETURNS:
-//   - true if message was cancelled
-//   - false if message was already delivered, cancelled, or not found
+//   - true if message was canceled
+//   - false if message was already delivered, canceled, or not found
 //
 // SEMANTICS:
-//   - Cancelled messages are never delivered to consumers
-//   - Cancellation is permanent (cannot be un-cancelled)
-//   - The message data still exists in the log but is marked cancelled
+//   - Canceled messages are never delivered to consumers
+//   - Cancellation is permanent (cannot be un-canceled)
+//   - The message data still exists in the log but is marked canceled
 //
 // USE CASES:
 //   - User cancels a scheduled email
@@ -3957,7 +3955,7 @@ func (b *Broker) CancelDelayed(topic string, partition int, offset int64) (bool,
 			return false, nil
 		}
 		if errors.Is(err, ErrDelayedMessageNotPending) {
-			// Idempotency: already delivered/cancelled/expired isn't an error.
+			// Idempotency: already delivered/canceled/expired isn't an error.
 			return false, nil
 		}
 		return false, err
@@ -3974,7 +3972,7 @@ func (b *Broker) CancelDelayed(topic string, partition int, offset int64) (bool,
 //
 // RETURNS:
 //   - true if message is pending delivery
-//   - false if delivered, cancelled, expired, or not a delayed message
+//   - false if delivered, canceled, expired, or not a delayed message
 func (b *Broker) IsDelayed(topic string, partition int, offset int64) bool {
 	b.mu.RLock()
 	if b.closed {
@@ -4028,7 +4026,7 @@ func (b *Broker) Scheduler() *Scheduler {
 type DelayStats struct {
 	TotalScheduled uint64           `json:"total_scheduled"`
 	TotalDelivered uint64           `json:"total_delivered"`
-	TotalCancelled uint64           `json:"total_cancelled"`
+	TotalCanceled  uint64           `json:"total_canceled"`
 	TotalPending   int64            `json:"total_pending"`
 	ByTopic        map[string]int64 `json:"by_topic"`
 	TimerWheel     TimerWheelStats  `json:"timer_wheel"`
@@ -4044,7 +4042,7 @@ func (b *Broker) DelayStats() DelayStats {
 	return DelayStats{
 		TotalScheduled: stats.TotalScheduled,
 		TotalDelivered: stats.TotalDelivered,
-		TotalCancelled: stats.TotalCancelled,
+		TotalCanceled:  stats.TotalCanceled,
 		TotalPending:   stats.TotalPending,
 		ByTopic:        stats.ByTopic,
 		TimerWheel:     b.scheduler.timerWheel.Stats(),

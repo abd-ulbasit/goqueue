@@ -346,7 +346,7 @@ func (c *Consumer) receiveLoop() {
 		if err != nil {
 			c.logger.Error("receive error", "error", err)
 
-			// Check if context cancelled
+			// Check if context canceled
 			select {
 			case <-c.ctx.Done():
 				return

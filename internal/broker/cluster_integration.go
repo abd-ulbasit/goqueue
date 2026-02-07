@@ -291,7 +291,7 @@ type PartitionInfo struct {
 
 // CreateTopicMeta registers a topic in cluster metadata.
 // Only the controller should call this.
-func (cc *clusterCoordinator) CreateTopicMeta(name string, partitions int, replicationFactor int) error {
+func (cc *clusterCoordinator) CreateTopicMeta(name string, partitions, replicationFactor int) error {
 	if !cc.IsController() {
 		return fmt.Errorf("not controller, cannot create topic metadata")
 	}
@@ -539,7 +539,7 @@ type ForwardPublishResponse struct {
 // RETURNS:
 //   - offset: The offset assigned by the leader
 //   - error: If forwarding fails or leader returns error
-func (cc *clusterCoordinator) ForwardPublish(ctx context.Context, leaderAddr string, topic string, partition int, key, value []byte) (int64, error) {
+func (cc *clusterCoordinator) ForwardPublish(ctx context.Context, leaderAddr, topic string, partition int, key, value []byte) (int64, error) {
 	// Build request
 	reqBody := ForwardPublishRequest{
 		Key:       key,

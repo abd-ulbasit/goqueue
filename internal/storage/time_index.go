@@ -190,7 +190,7 @@ func NewTimeIndex(path string, baseOffset int64) (*TimeIndex, error) {
 	// O_CREATE: create if doesn't exist
 	// O_APPEND: all writes go to end
 	// 0644: owner can read/write, others can read
-	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create time index file: %w", err)
 	}
@@ -218,7 +218,7 @@ func NewTimeIndex(path string, baseOffset int64) (*TimeIndex, error) {
 //   - Simplifies the code (no disk I/O during lookup)
 func LoadTimeIndex(path string, baseOffset int64) (*TimeIndex, error) {
 	// Open for reading and appending
-	file, err := os.OpenFile(path, os.O_RDWR|os.O_APPEND, 0644)
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_APPEND, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open time index file: %w", err)
 	}
@@ -253,8 +253,8 @@ func LoadTimeIndex(path string, baseOffset int64) (*TimeIndex, error) {
 	}
 
 	buf := make([]byte, TimeIndexEntrySize)
-	var lastTimestamp int64 = 0
-	var lastLogPosition int64 = 0
+	var lastTimestamp int64
+	var lastLogPosition int64
 
 	for i := int64(0); i < numEntries; i++ {
 		_, err := io.ReadFull(file, buf)
@@ -304,7 +304,7 @@ func LoadTimeIndex(path string, baseOffset int64) (*TimeIndex, error) {
 // RETURNS:
 //   - true if an entry was added
 //   - false if we haven't crossed the granularity threshold
-func (ti *TimeIndex) MaybeAppend(timestamp int64, offset int64, currentLogPosition int64) (bool, error) {
+func (ti *TimeIndex) MaybeAppend(timestamp, offset, currentLogPosition int64) (bool, error) {
 	ti.mu.Lock()
 	defer ti.mu.Unlock()
 
@@ -577,7 +577,7 @@ func RebuildTimeIndex(logPath, indexPath string, baseOffset int64) (*TimeIndex, 
 	// Our on-disk message header is HeaderSize (34 bytes), not 32.
 	// Rebuild must parse the *full* header and include HeadersLen when advancing,
 	// otherwise we desync and read garbage offsets/timestamps.
-	var position int64 = 0
+	var position int64
 	headerBuf := make([]byte, HeaderSize)
 
 	for {

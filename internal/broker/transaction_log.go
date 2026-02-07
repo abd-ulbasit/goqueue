@@ -204,58 +204,58 @@ type WALRecord struct {
 
 // InitProducerData is the payload for WALRecordInitProducer.
 type InitProducerData struct {
-	TransactionalId      string `json:"transactionalId"`
-	ProducerId           int64  `json:"producerId"`
+	TransactionalID      string `json:"transactionalID"`
+	ProducerID           int64  `json:"producerId"`
 	Epoch                int16  `json:"epoch"`
 	TransactionTimeoutMs int64  `json:"transactionTimeoutMs"`
 }
 
 // BeginTxnData is the payload for WALRecordBeginTxn.
 type BeginTxnData struct {
-	TransactionalId string `json:"transactionalId"`
-	TransactionId   string `json:"transactionId"`
-	ProducerId      int64  `json:"producerId"`
+	TransactionalID string `json:"transactionalID"`
+	TransactionID   string `json:"transactionId"`
+	ProducerID      int64  `json:"producerId"`
 	Epoch           int16  `json:"epoch"`
 }
 
 // AddPartitionData is the payload for WALRecordAddPartition.
 type AddPartitionData struct {
-	TransactionalId string `json:"transactionalId"`
+	TransactionalID string `json:"transactionalID"`
 	Topic           string `json:"topic"`
 	Partition       int    `json:"partition"`
 }
 
 // PrepareCommitData is the payload for WALRecordPrepareCommit/Abort.
 type PrepareCommitData struct {
-	TransactionalId string           `json:"transactionalId"`
+	TransactionalID string           `json:"transactionalID"`
 	Partitions      map[string][]int `json:"partitions"` // topic -> partitions
 }
 
 // CompleteCommitData is the payload for WALRecordCompleteCommit/Abort.
 type CompleteCommitData struct {
-	TransactionalId string `json:"transactionalId"`
+	TransactionalID string `json:"transactionalID"`
 	Success         bool   `json:"success"`
 	Error           string `json:"error,omitempty"`
 }
 
 // HeartbeatData is the payload for WALRecordHeartbeat.
 type HeartbeatData struct {
-	TransactionalId string `json:"transactionalId"`
-	ProducerId      int64  `json:"producerId"`
+	TransactionalID string `json:"transactionalID"`
+	ProducerID      int64  `json:"producerId"`
 	Epoch           int16  `json:"epoch"`
 }
 
 // ExpireProducerData is the payload for WALRecordExpireProducer.
 type ExpireProducerData struct {
-	TransactionalId string `json:"transactionalId"`
-	ProducerId      int64  `json:"producerId"`
+	TransactionalID string `json:"transactionalID"`
+	ProducerID      int64  `json:"producerId"`
 	Epoch           int16  `json:"epoch"`
 	Reason          string `json:"reason"`
 }
 
 // UpdateSequenceData is the payload for WALRecordUpdateSequence.
 type UpdateSequenceData struct {
-	ProducerId int64  `json:"producerId"`
+	ProducerID int64  `json:"producerId"`
 	Topic      string `json:"topic"`
 	Partition  int    `json:"partition"`
 	Sequence   int32  `json:"sequence"`
@@ -268,17 +268,17 @@ type UpdateSequenceData struct {
 // This data is essential for rebuilding the UncommittedTracker during recovery.
 //
 // FIELDS:
-//   - TransactionalId: Identifies the producer (for looking up transaction state)
-//   - TransactionId: The specific transaction this publish belongs to
+//   - TransactionalID: Identifies the producer (for looking up transaction state)
+//   - TransactionID: The specific transaction this publish belongs to
 //   - Topic/Partition/Offset: Where the message was written
-//   - ProducerId/Epoch: Producer identity for the UncommittedTracker
+//   - ProducerID/Epoch: Producer identity for the UncommittedTracker
 type TxnPublishData struct {
-	TransactionalId string `json:"transactionalId"`
-	TransactionId   string `json:"transactionId"`
+	TransactionalID string `json:"transactionalID"`
+	TransactionID   string `json:"transactionId"`
 	Topic           string `json:"topic"`
 	Partition       int    `json:"partition"`
 	Offset          int64  `json:"offset"`
-	ProducerId      int64  `json:"producerId"`
+	ProducerID      int64  `json:"producerId"`
 	Epoch           int16  `json:"epoch"`
 }
 
@@ -366,7 +366,7 @@ type TransactionLog struct {
 // NewTransactionLog creates and opens a new transaction log.
 func NewTransactionLog(config TransactionLogConfig) (*TransactionLog, error) {
 	// Create data directory
-	if err := os.MkdirAll(config.DataDir, 0755); err != nil {
+	if err := os.MkdirAll(config.DataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("failed to create transaction log directory: %w", err)
 	}
 
@@ -379,7 +379,7 @@ func NewTransactionLog(config TransactionLogConfig) (*TransactionLog, error) {
 
 	// Open WAL file if enabled
 	if config.EnableWAL {
-		walFile, err := os.OpenFile(log.walPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+		walFile, err := os.OpenFile(log.walPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 		if err != nil {
 			return nil, fmt.Errorf("failed to open WAL file: %w", err)
 		}
@@ -496,7 +496,7 @@ func (l *TransactionLog) WriteSnapshot(snapshot ProducerStateSnapshot) error {
 
 	// Write to temp file first (atomic write)
 	tempPath := l.snapshotPath + ".tmp"
-	if err := os.WriteFile(tempPath, data, 0644); err != nil {
+	if err := os.WriteFile(tempPath, data, 0o600); err != nil {
 		return fmt.Errorf("failed to write snapshot: %w", err)
 	}
 
@@ -509,8 +509,10 @@ func (l *TransactionLog) WriteSnapshot(snapshot ProducerStateSnapshot) error {
 	// Truncate WAL since snapshot contains all state
 	if l.config.EnableWAL {
 		if err := l.truncateWALLocked(); err != nil {
-			// Non-fatal: WAL will just be larger than needed
-			// Log warning in production
+			// Non-fatal: WAL will just be larger than needed.
+			// The snapshot is already persisted, so a larger WAL
+			// only wastes disk space until the next successful truncation.
+			_ = err
 		}
 	}
 
@@ -529,7 +531,7 @@ func (l *TransactionLog) truncateWALLocked() error {
 		os.Remove(l.walPath)
 
 		// Reopen WAL
-		walFile, err := os.OpenFile(l.walPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+		walFile, err := os.OpenFile(l.walPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 		if err != nil {
 			return err
 		}
@@ -560,7 +562,7 @@ func (l *TransactionLog) LoadSnapshot() (*ProducerStateSnapshot, error) {
 
 	var snapshot ProducerStateSnapshot
 	if err := json.Unmarshal(data, &snapshot); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrSnapshotCorrupted, err)
+		return nil, fmt.Errorf("%w: %w", ErrSnapshotCorrupted, err)
 	}
 
 	return &snapshot, nil
@@ -692,82 +694,82 @@ func (l *TransactionLog) Stats() TransactionLogStats {
 // =============================================================================
 
 // WriteInitProducer writes an init_producer record.
-func (l *TransactionLog) WriteInitProducer(txnId string, pid int64, epoch int16, timeoutMs int64) error {
+func (l *TransactionLog) WriteInitProducer(txnID string, pid int64, epoch int16, timeoutMs int64) error {
 	return l.WriteRecord(WALRecordInitProducer, InitProducerData{
-		TransactionalId:      txnId,
-		ProducerId:           pid,
+		TransactionalID:      txnID,
+		ProducerID:           pid,
 		Epoch:                epoch,
 		TransactionTimeoutMs: timeoutMs,
 	})
 }
 
 // WriteBeginTxn writes a begin_txn record.
-func (l *TransactionLog) WriteBeginTxn(txnId, transactionId string, pid int64, epoch int16) error {
+func (l *TransactionLog) WriteBeginTxn(txnID, transactionID string, pid int64, epoch int16) error {
 	return l.WriteRecord(WALRecordBeginTxn, BeginTxnData{
-		TransactionalId: txnId,
-		TransactionId:   transactionId,
-		ProducerId:      pid,
+		TransactionalID: txnID,
+		TransactionID:   transactionID,
+		ProducerID:      pid,
 		Epoch:           epoch,
 	})
 }
 
 // WriteAddPartition writes an add_partition record.
-func (l *TransactionLog) WriteAddPartition(txnId, topic string, partition int) error {
+func (l *TransactionLog) WriteAddPartition(txnID, topic string, partition int) error {
 	return l.WriteRecord(WALRecordAddPartition, AddPartitionData{
-		TransactionalId: txnId,
+		TransactionalID: txnID,
 		Topic:           topic,
 		Partition:       partition,
 	})
 }
 
 // WritePrepareCommit writes a prepare_commit record.
-func (l *TransactionLog) WritePrepareCommit(txnId string, partitions map[string][]int) error {
+func (l *TransactionLog) WritePrepareCommit(txnID string, partitions map[string][]int) error {
 	return l.WriteRecord(WALRecordPrepareCommit, PrepareCommitData{
-		TransactionalId: txnId,
+		TransactionalID: txnID,
 		Partitions:      partitions,
 	})
 }
 
 // WritePrepareAbort writes a prepare_abort record.
-func (l *TransactionLog) WritePrepareAbort(txnId string, partitions map[string][]int) error {
+func (l *TransactionLog) WritePrepareAbort(txnID string, partitions map[string][]int) error {
 	return l.WriteRecord(WALRecordPrepareAbort, PrepareCommitData{
-		TransactionalId: txnId,
+		TransactionalID: txnID,
 		Partitions:      partitions,
 	})
 }
 
 // WriteCompleteCommit writes a complete_commit record.
-func (l *TransactionLog) WriteCompleteCommit(txnId string, success bool, errMsg string) error {
+func (l *TransactionLog) WriteCompleteCommit(txnID string, success bool, errMsg string) error {
 	return l.WriteRecord(WALRecordCompleteCommit, CompleteCommitData{
-		TransactionalId: txnId,
+		TransactionalID: txnID,
 		Success:         success,
 		Error:           errMsg,
 	})
 }
 
 // WriteCompleteAbort writes a complete_abort record.
-func (l *TransactionLog) WriteCompleteAbort(txnId string, success bool, errMsg string) error {
+func (l *TransactionLog) WriteCompleteAbort(txnID string, success bool, errMsg string) error {
 	return l.WriteRecord(WALRecordCompleteAbort, CompleteCommitData{
-		TransactionalId: txnId,
+		TransactionalID: txnID,
 		Success:         success,
 		Error:           errMsg,
 	})
 }
 
 // WriteHeartbeat writes a heartbeat record.
-func (l *TransactionLog) WriteHeartbeat(txnId string, pid int64, epoch int16) error {
+func (l *TransactionLog) WriteHeartbeat(txnID string, pid int64, epoch int16) error {
 	return l.WriteRecord(WALRecordHeartbeat, HeartbeatData{
-		TransactionalId: txnId,
-		ProducerId:      pid,
+		TransactionalID: txnID,
+		ProducerID:      pid,
 		Epoch:           epoch,
 	})
 }
 
 // WriteExpireProducer writes an expire_producer record.
-func (l *TransactionLog) WriteExpireProducer(txnId string, pid int64, epoch int16, reason string) error {
+func (l *TransactionLog) WriteExpireProducer(txnID string, pid int64, epoch int16, reason string) error {
 	return l.WriteRecord(WALRecordExpireProducer, ExpireProducerData{
-		TransactionalId: txnId,
-		ProducerId:      pid,
+		TransactionalID: txnID,
+		ProducerID:      pid,
 		Epoch:           epoch,
 		Reason:          reason,
 	})
@@ -776,7 +778,7 @@ func (l *TransactionLog) WriteExpireProducer(txnId string, pid int64, epoch int1
 // WriteUpdateSequence writes an update_sequence record.
 func (l *TransactionLog) WriteUpdateSequence(pid int64, topic string, partition int, sequence int32, offset int64) error {
 	return l.WriteRecord(WALRecordUpdateSequence, UpdateSequenceData{
-		ProducerId: pid,
+		ProducerID: pid,
 		Topic:      topic,
 		Partition:  partition,
 		Sequence:   sequence,
@@ -794,14 +796,14 @@ func (l *TransactionLog) WriteUpdateSequence(pid int64, topic string, partition 
 //
 //	Enables recovery to rebuild the UncommittedTracker by knowing exactly
 //	which offsets belong to which transaction.
-func (l *TransactionLog) WriteTxnPublish(transactionalId, transactionId, topic string, partition int, offset int64, producerId int64, epoch int16) error {
+func (l *TransactionLog) WriteTxnPublish(transactionalID, transactionID, topic string, partition int, offset, producerID int64, epoch int16) error {
 	return l.WriteRecord(WALRecordTxnPublish, TxnPublishData{
-		TransactionalId: transactionalId,
-		TransactionId:   transactionId,
+		TransactionalID: transactionalID,
+		TransactionID:   transactionID,
 		Topic:           topic,
 		Partition:       partition,
 		Offset:          offset,
-		ProducerId:      producerId,
+		ProducerID:      producerID,
 		Epoch:           epoch,
 	})
 }

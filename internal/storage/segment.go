@@ -197,13 +197,13 @@ func IndexFileName(baseOffset int64) string {
 //   - {dir}/{baseOffset}.timeindex  - The time index file
 func NewSegment(dir string, baseOffset int64) (*Segment, error) {
 	// Ensure directory exists
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("failed to create segment directory: %w", err)
 	}
 
 	// Create log file
 	logPath := filepath.Join(dir, SegmentFileName(baseOffset))
-	file, err := os.OpenFile(logPath, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
+	file, err := os.OpenFile(logPath, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create segment file: %w", err)
 	}
@@ -256,7 +256,7 @@ func NewSegment(dir string, baseOffset int64) (*Segment, error) {
 func LoadSegment(dir string, baseOffset int64) (*Segment, error) {
 	// Open log file
 	logPath := filepath.Join(dir, SegmentFileName(baseOffset))
-	file, err := os.OpenFile(logPath, os.O_RDWR, 0644)
+	file, err := os.OpenFile(logPath, os.O_RDWR, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open segment file: %w", err)
 	}
@@ -343,7 +343,7 @@ func LoadSegment(dir string, baseOffset int64) (*Segment, error) {
 // Returns the next offset to use and the byte position after last message.
 //
 // This is a recovery operation - we read every message header to verify integrity.
-func scanLogToEnd(file *os.File, baseOffset int64) (nextOffset int64, position int64, err error) {
+func scanLogToEnd(file *os.File, baseOffset int64) (nextOffset, position int64, err error) {
 	// Start from beginning
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return 0, 0, err
@@ -412,7 +412,7 @@ func rebuildSegment(dir string, baseOffset int64) (*Segment, error) {
 	os.Remove(timeIndexPath)
 
 	// Open log file
-	file, err := os.OpenFile(logPath, os.O_RDWR, 0644)
+	file, err := os.OpenFile(logPath, os.O_RDWR, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open segment for rebuild: %w", err)
 	}
@@ -441,7 +441,7 @@ func rebuildSegment(dir string, baseOffset int64) (*Segment, error) {
 	}
 
 	reader := bufio.NewReader(file)
-	var position int64 = 0
+	var position int64
 	nextOffset := baseOffset
 	firstMessage := true
 
@@ -471,14 +471,14 @@ func rebuildSegment(dir string, baseOffset int64) (*Segment, error) {
 
 		// Add to index (force first entry, then respect granularity)
 		if firstMessage {
-			index.ForceAppend(messageOffset, position)
+			_ = index.ForceAppend(messageOffset, position)
 			firstMessage = false
 		} else {
-			index.MaybeAppend(messageOffset, position)
+			_, _ = index.MaybeAppend(messageOffset, position)
 		}
 
 		// Add to time index (respects granularity internally)
-		timeIndex.MaybeAppend(timestamp, messageOffset, position)
+		_, _ = timeIndex.MaybeAppend(timestamp, messageOffset, position)
 
 		// Skip body
 		if _, err := io.CopyN(io.Discard, reader, bodySize); err != nil {
@@ -864,7 +864,7 @@ func (s *Segment) ReadFrom(startOffset int64, maxMessages int) ([]*Message, erro
 
 	for {
 		msg, err := s.readOneMessage(reader)
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
@@ -1152,17 +1152,10 @@ func (s *Segment) ReadTimeRange(startTime, endTime int64, maxMessages int) ([]*M
 	}
 
 	// Use time index to find offset range
-	startOffset, endOffsetHint, err := s.timeIndex.LookupRange(startTime, endTime)
+	startOffset, _, err := s.timeIndex.LookupRange(startTime, endTime)
 	if err != nil {
 		// Fall back to scanning from base
 		startOffset = s.baseOffset
-		endOffsetHint = -1 // Read to end
-	}
-
-	// Determine max offset to read
-	maxOffset := s.currentOffset
-	if endOffsetHint != -1 && endOffsetHint < maxOffset {
-		maxOffset = endOffsetHint
 	}
 
 	// Calculate approximate message count

@@ -775,7 +775,7 @@ func (s *consumeServiceServer) heartbeatLoop(
 		select {
 		case <-ctx.Done():
 			// Leave group on exit
-			coordinator.LeaveGroup(state.groupID, state.consumerID)
+			_ = coordinator.LeaveGroup(state.groupID, state.consumerID)
 			return
 
 		case <-ticker.C:

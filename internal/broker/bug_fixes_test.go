@@ -13,7 +13,7 @@
 //         - Fixed by properly handling the error
 //
 // BUG #3: time.After() goroutine leaks in multiple files
-//         - Using time.After() in loops causes goroutine leaks when context cancelled
+//         - Using time.After() in loops causes goroutine leaks when context canceled
 //         - Fixed by using time.NewTimer() with proper cleanup
 //
 // BUG #4: Double-close panics in multiple Close() methods
@@ -50,16 +50,11 @@ func TestBugFix_EmptyOldReplicasValidation(t *testing.T) {
 
 	// Create a partition reassignment with empty OldReplicas
 	pr := &PartitionReassignment{
-		Topic:       "test-topic",
-		Partition:   0,
 		OldReplicas: []cluster.NodeID{}, // Empty - should be rejected!
-		NewReplicas: []cluster.NodeID{"1", "2", "3"},
 	}
 
 	// Create mock manager with mock metadata store
-	rm := &ReassignmentManager{
-		metadataStore: nil, // Will cause validation to fail at topic check
-	}
+	rm := &ReassignmentManager{}
 
 	// The validation should fail before we even get to OldReplicas check
 	// because metadataStore is nil. But in production code, with a real
@@ -303,7 +298,7 @@ func TestBugFix_GetMemberAssignment_NoAliasing(t *testing.T) {
 
 	// Modify the returned slice - this should NOT affect internal state
 	assignment[0].Topic = "MODIFIED"
-	assignment = append(assignment, TopicPartition{Topic: "extra", Partition: 99})
+	_ = append(assignment, TopicPartition{Topic: "extra", Partition: 99})
 
 	// Get the assignment again - should be unchanged
 	assignment2, _ := group.GetMemberAssignment("member-1")

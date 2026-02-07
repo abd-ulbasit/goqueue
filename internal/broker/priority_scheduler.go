@@ -203,7 +203,7 @@ func (h messageHeap) Swap(i, j int) {
 
 func (h *messageHeap) Push(x any) {
 	n := len(*h)
-	item := x.(*PriorityMessage)
+	item, _ := x.(*PriorityMessage)
 	item.index = n
 	*h = append(*h, item)
 }
@@ -417,7 +417,7 @@ func (ps *PriorityScheduler) drrDequeue() (*storage.Message, bool) {
 		// Try to dequeue while we have deficit and messages
 		if queue.Len() > 0 && ps.deficits[priority] > 0 {
 			// Dequeue one message
-			sm := heap.Pop(queue).(*PriorityMessage)
+			sm, _ := heap.Pop(queue).(*PriorityMessage)
 			ps.deficits[priority]-- // Consume one unit of deficit
 			ps.stats.DequeueCount[priority]++
 
@@ -464,7 +464,7 @@ func (ps *PriorityScheduler) checkStarvation() *storage.Message {
 		oldest := queue.Peek()
 		if now.Sub(oldest.EnqueuedAt) > timeout {
 			// This message has been waiting too long - promote it
-			sm := heap.Pop(queue).(*PriorityMessage)
+			sm, _ := heap.Pop(queue).(*PriorityMessage)
 			ps.stats.StarvationPromotions++
 			ps.stats.DequeueCount[p]++
 			return sm.Message
@@ -574,7 +574,7 @@ func (ps *PriorityScheduler) DequeueByPriority(priority storage.Priority) (*stor
 		return nil, false
 	}
 
-	sm := heap.Pop(queue).(*PriorityMessage)
+	sm, _ := heap.Pop(queue).(*PriorityMessage)
 	ps.stats.DequeueCount[priority]++
 	return sm.Message, true
 }

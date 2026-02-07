@@ -86,7 +86,7 @@ type QuotaEnforcer interface {
 
 	// CheckTopicCreation validates creating a topic with given partitions.
 	// Parameters include current counts for proper limit checking.
-	CheckTopicCreation(tenantID string, partitionCount int, currentTopics int, currentPartitions int) error
+	CheckTopicCreation(tenantID string, partitionCount, currentTopics, currentPartitions int) error
 
 	// CheckConsumerGroup validates creating/joining a consumer group.
 	// Parameter includes current count for proper limit checking.
@@ -144,7 +144,7 @@ func (e *NoOpEnforcer) CheckConsume(tenantID string, messageCount int) error {
 }
 
 // CheckTopicCreation always returns nil (allowed).
-func (e *NoOpEnforcer) CheckTopicCreation(tenantID string, partitionCount int, currentTopics int, currentPartitions int) error {
+func (e *NoOpEnforcer) CheckTopicCreation(tenantID string, partitionCount, currentTopics, currentPartitions int) error {
 	return nil
 }
 
@@ -234,7 +234,7 @@ func (e *TenantQuotaEnforcer) CheckConsume(tenantID string, messageCount int) er
 }
 
 // CheckTopicCreation validates against topic and partition limits.
-func (e *TenantQuotaEnforcer) CheckTopicCreation(tenantID string, partitionCount int, currentTopics int, currentPartitions int) error {
+func (e *TenantQuotaEnforcer) CheckTopicCreation(tenantID string, partitionCount, currentTopics, currentPartitions int) error {
 	qm := e.tenantManager.quotaManager
 	result := qm.CheckTopicCreation(tenantID, partitionCount, currentTopics, currentPartitions)
 	if !result.Allowed {
@@ -281,8 +281,8 @@ func (e *TenantQuotaEnforcer) IsEnabled() bool {
 // This centralizes quota error formatting, eliminating duplication.
 func formatQuotaError(result QuotaCheckResult) error {
 	if result.WaitTime > 0 {
-		return fmt.Errorf("%w: %v (retry after %v)",
+		return fmt.Errorf("%w: %w (retry after %v)",
 			ErrQuotaExceeded, result.Error, result.WaitTime.Round(time.Millisecond))
 	}
-	return fmt.Errorf("%w: %v", ErrQuotaExceeded, result.Error)
+	return fmt.Errorf("%w: %w", ErrQuotaExceeded, result.Error)
 }

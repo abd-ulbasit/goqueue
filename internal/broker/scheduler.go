@@ -100,7 +100,7 @@ var (
 	ErrDelayedMessageNotFound = errors.New("delayed message not found")
 
 	// ErrDelayedMessageNotPending means a delay entry exists but is no longer
-	// cancellable (already delivered/cancelled/expired).
+	// cancellable (already delivered/canceled/expired).
 	//
 	// WHY A SENTINEL ERROR?
 	// The broker API wants CancelDelayed() to be idempotent and return
@@ -170,7 +170,7 @@ type ScheduledMessage struct {
 	TimeRemaining time.Duration
 
 	// State indicates current status
-	State string // "pending", "delivered", "cancelled"
+	State string // "pending", "delivered", "canceled"
 }
 
 // =============================================================================
@@ -211,8 +211,7 @@ type Scheduler struct {
 	// stats
 	totalScheduled atomic.Uint64
 	totalDelivered atomic.Uint64
-	totalCancelled atomic.Uint64
-	totalExpired   atomic.Uint64
+	totalCanceled  atomic.Uint64
 }
 
 // NewScheduler creates a new delay scheduler.
@@ -304,7 +303,7 @@ func (s *Scheduler) Close() error {
 	s.logger.Info("scheduler stopped",
 		"total_scheduled", s.totalScheduled.Load(),
 		"total_delivered", s.totalDelivered.Load(),
-		"total_cancelled", s.totalCancelled.Load())
+		"total_canceled", s.totalCanceled.Load())
 
 	return nil
 }
@@ -391,7 +390,7 @@ func (s *Scheduler) scheduleAt(topic string, partition int, offset int64, delive
 
 	if err := s.timerWheel.ScheduleAt(timerID, deliverAt, data); err != nil {
 		// Rollback index entry
-		idx.MarkCancelled(offset)
+		_ = idx.MarkCanceled(offset)
 		return fmt.Errorf("failed to schedule timer: %w", err)
 	}
 
@@ -440,12 +439,12 @@ func (s *Scheduler) Cancel(topic string, partition int, offset int64) error {
 	s.timerWheel.Cancel(timerID)
 
 	// Update index
-	if err := idx.MarkCancelled(offset); err != nil {
-		return fmt.Errorf("failed to mark cancelled: %w", err)
+	if err := idx.MarkCanceled(offset); err != nil {
+		return fmt.Errorf("failed to mark canceled: %w", err)
 	}
 
-	s.totalCancelled.Add(1)
-	s.logger.Debug("cancelled delayed message",
+	s.totalCanceled.Add(1)
+	s.logger.Debug("canceled delayed message",
 		"topic", topic,
 		"partition", partition,
 		"offset", offset)
@@ -473,8 +472,8 @@ func (s *Scheduler) GetDelayedMessage(topic string, partition int, offset int64)
 	switch entry.State {
 	case delayStateDelivered:
 		state = "delivered"
-	case delayStateCancelled:
-		state = "cancelled"
+	case delayStateCanceled:
+		state = "canceled"
 	case delayStateExpired:
 		state = "expired"
 	}
@@ -525,7 +524,7 @@ func (s *Scheduler) GetDelayedMessage(topic string, partition int, offset int64)
 //   - goqueue: We paginate at index level for memory efficiency
 //
 // ============================================================================
-func (s *Scheduler) GetDelayedMessages(topic string, limit int, skip int) []*ScheduledMessage {
+func (s *Scheduler) GetDelayedMessages(topic string, limit, skip int) []*ScheduledMessage {
 	idx, err := s.getIndex(topic)
 	if err != nil {
 		return []*ScheduledMessage{}
@@ -588,7 +587,7 @@ func (s *Scheduler) GetDeliverTime(topic string, partition int, offset int64) ti
 type SchedulerStats struct {
 	TotalScheduled uint64
 	TotalDelivered uint64
-	TotalCancelled uint64
+	TotalCanceled  uint64
 	TotalPending   int64 // Total pending across all topics
 	TimerWheelSize int
 	TopicStats     map[string]TopicDelayStats
@@ -625,7 +624,7 @@ func (s *Scheduler) Stats() SchedulerStats {
 	return SchedulerStats{
 		TotalScheduled: s.totalScheduled.Load(),
 		TotalDelivered: s.totalDelivered.Load(),
-		TotalCancelled: s.totalCancelled.Load(),
+		TotalCanceled:  s.totalCanceled.Load(),
 		TotalPending:   totalPending,
 		TimerWheelSize: s.timerWheel.Size(),
 		TopicStats:     topicStats,
@@ -703,7 +702,7 @@ func (s *Scheduler) handleTimerExpiry(entry *TimerEntry) {
 
 	// Update delay index
 	if idx, err := s.getIndex(data.Topic); err == nil {
-		idx.MarkDelivered(data.Offset)
+		_ = idx.MarkDelivered(data.Offset)
 	}
 
 	// Call delivery callback if set

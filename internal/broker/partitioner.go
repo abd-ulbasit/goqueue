@@ -157,12 +157,6 @@ func (p *HashPartitioner) Partition(key, value []byte, numPartitions int) int {
 	// Murmur3 hash of the key
 	hash := murmur3Hash(key)
 
-	// Ensure positive (hash can overflow to negative)
-	// Use bitwise AND with max int32 to get positive value
-	if hash < 0 {
-		hash = -hash
-	}
-
 	return int(hash % uint32(numPartitions))
 }
 
@@ -233,7 +227,7 @@ func murmur3Hash(data []byte) uint32 {
 	nblocks := length / 4
 
 	// Seed (0 matches Kafka's default)
-	var h1 uint32 = 0
+	var h1 uint32
 
 	// ==========================================================================
 	// BODY: Process 4-byte chunks

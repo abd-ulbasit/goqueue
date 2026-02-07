@@ -1,6 +1,7 @@
 package broker
 
 import (
+	"errors"
 	"log/slog"
 	"testing"
 	"time"
@@ -75,7 +76,7 @@ func TestBroker_PublishBatchWithPriority_SuccessAndErrors(t *testing.T) {
 	if err := b2.Close(); err != nil {
 		t.Fatalf("Close failed: %v", err)
 	}
-	if _, err := b2.PublishBatchWithPriority("orders", nil); err != ErrBrokerClosed {
+	if _, err := b2.PublishBatchWithPriority("orders", nil); !errors.Is(err, ErrBrokerClosed) {
 		t.Fatalf("PublishBatchWithPriority after Close error=%v, want %v", err, ErrBrokerClosed)
 	}
 }
@@ -182,20 +183,20 @@ func TestBroker_DelayedMessageWrappers_CancelAndQuery(t *testing.T) {
 	// Cancel should be idempotent at the broker API layer:
 	//   - First cancel: (true, nil)
 	//   - Second cancel: (false, nil)
-	cancelled, err := b.CancelDelayed("emails", 0, off)
+	canceled, err := b.CancelDelayed("emails", 0, off)
 	if err != nil {
 		t.Fatalf("CancelDelayed failed: %v", err)
 	}
-	if !cancelled {
-		t.Fatalf("CancelDelayed cancelled=false, want true")
+	if !canceled {
+		t.Fatalf("CancelDelayed canceled=false, want true")
 	}
 
-	cancelled2, err := b.CancelDelayed("emails", 0, off)
+	canceled2, err := b.CancelDelayed("emails", 0, off)
 	if err != nil {
 		t.Fatalf("CancelDelayed (2nd) failed: %v", err)
 	}
-	if cancelled2 {
-		t.Fatalf("CancelDelayed (2nd) cancelled=true, want false")
+	if canceled2 {
+		t.Fatalf("CancelDelayed (2nd) canceled=true, want false")
 	}
 
 	// After cancellation, the message should not be considered delayed.
@@ -213,8 +214,8 @@ func TestBroker_DelayedMessageWrappers_CancelAndQuery(t *testing.T) {
 	if ds.TotalScheduled == 0 {
 		t.Fatalf("DelayStats.TotalScheduled=0, want > 0")
 	}
-	if ds.TotalCancelled == 0 {
-		t.Fatalf("DelayStats.TotalCancelled=0, want > 0")
+	if ds.TotalCanceled == 0 {
+		t.Fatalf("DelayStats.TotalCanceled=0, want > 0")
 	}
 	if ds.ByTopic["emails"] == 0 {
 		// After cancellation, pending count should be 0 for this topic.

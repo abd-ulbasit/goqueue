@@ -1,6 +1,7 @@
 package broker
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -96,10 +97,10 @@ func TestConsumerGroup_JoinHeartbeatLeave_AssignmentAndState(t *testing.T) {
 	if err := g.Heartbeat(res1.MemberID, g.GetGeneration()); err != nil {
 		t.Fatalf("Heartbeat(current generation) failed: %v", err)
 	}
-	if err := g.Heartbeat(res1.MemberID, g.GetGeneration()-1); err != ErrStaleGeneration {
+	if err := g.Heartbeat(res1.MemberID, g.GetGeneration()-1); !errors.Is(err, ErrStaleGeneration) {
 		t.Fatalf("Heartbeat(stale generation) err=%v, want %v", err, ErrStaleGeneration)
 	}
-	if err := g.Heartbeat("no-such-member", g.GetGeneration()); err != ErrMemberNotFound {
+	if err := g.Heartbeat("no-such-member", g.GetGeneration()); !errors.Is(err, ErrMemberNotFound) {
 		t.Fatalf("Heartbeat(unknown member) err=%v, want %v", err, ErrMemberNotFound)
 	}
 
@@ -127,7 +128,7 @@ func TestConsumerGroup_JoinHeartbeatLeave_AssignmentAndState(t *testing.T) {
 	}
 
 	// Leave of non-existent member should return ErrMemberNotFound.
-	if err := g.Leave("nope", 6); err != ErrMemberNotFound {
+	if err := g.Leave("nope", 6); !errors.Is(err, ErrMemberNotFound) {
 		t.Fatalf("Leave(unknown) err=%v, want %v", err, ErrMemberNotFound)
 	}
 }

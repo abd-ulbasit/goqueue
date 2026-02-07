@@ -30,10 +30,10 @@ package benchmark
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
-	"math/rand"
 	"net/http"
 	"os"
 	"sync"
@@ -51,14 +51,7 @@ var (
 	baseURL = getEnv("GOQUEUE_URL", "http://localhost:8080")
 
 	// Message sizes for testing
-	smallMessage  = 100   // 100 bytes
-	mediumMessage = 1024  // 1 KB
-	largeMessage  = 10240 // 10 KB
-
-	// Batch sizes for testing
-	smallBatch  = 10
-	mediumBatch = 100
-	largeBatch  = 1000
+	mediumMessage = 1024 // 1 KB
 )
 
 func getEnv(key, fallback string) string {

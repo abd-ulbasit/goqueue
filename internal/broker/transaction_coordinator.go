@@ -78,7 +78,7 @@
 //   ┌─────────────────────────────────────────────────────────────────────────┐
 //   │                    TRANSACTIONAL PUBLISH FLOW                           │
 //   │                                                                         │
-//   │  1. InitProducerId(transactional.id)                                    │
+//   │  1. InitProducerID(transactional.id)                                    │
 //   │     └─► Coordinator assigns/returns (PID, epoch)                        │
 //   │                                                                         │
 //   │  2. BeginTransaction()                                                  │
@@ -253,17 +253,17 @@ func DefaultTransactionCoordinatorConfig(dataDir string) TransactionCoordinatorC
 
 // TransactionMetadata holds metadata for an active transaction.
 type TransactionMetadata struct {
-	// TransactionId is the unique ID for this transaction
-	TransactionId string
+	// TransactionID is the unique ID for this transaction
+	TransactionID string
 
-	// ProducerId is the producer's ID
-	ProducerId int64
+	// ProducerID is the producer's ID
+	ProducerID int64
 
 	// Epoch is the producer's current epoch
 	Epoch int16
 
-	// TransactionalId is the producer's transactional ID
-	TransactionalId string
+	// TransactionalID is the producer's transactional ID
+	TransactionalID string
 
 	// State is the current transaction state
 	State TransactionState
@@ -283,13 +283,13 @@ type TransactionMetadata struct {
 }
 
 // NewTransactionMetadata creates a new transaction metadata.
-func NewTransactionMetadata(txnId, transactionalId string, pid int64, epoch int16, timeoutMs int64) *TransactionMetadata {
+func NewTransactionMetadata(txnID, transactionalID string, pid int64, epoch int16, timeoutMs int64) *TransactionMetadata {
 	now := time.Now()
 	return &TransactionMetadata{
-		TransactionId:   txnId,
-		ProducerId:      pid,
+		TransactionID:   txnID,
+		ProducerID:      pid,
 		Epoch:           epoch,
-		TransactionalId: transactionalId,
+		TransactionalID: transactionalID,
 		State:           TransactionStateOngoing,
 		StartTime:       now,
 		LastUpdateTime:  now,
@@ -333,7 +333,7 @@ func (t *TransactionMetadata) IsTimedOut() bool {
 // This allows for easier testing by mocking the broker.
 type TransactionBroker interface {
 	// WriteControlRecord writes a commit/abort control record to a partition
-	WriteControlRecord(topic string, partition int, isCommit bool, pid int64, epoch int16, txnId string) error
+	WriteControlRecord(topic string, partition int, isCommit bool, pid int64, epoch int16, txnID string) error
 
 	// GetTopic returns a topic by name (for validation)
 	GetTopic(name string) (*Topic, error)
@@ -341,7 +341,7 @@ type TransactionBroker interface {
 	// ClearUncommittedTransaction clears tracked uncommitted offsets for a transaction.
 	// Returns the list of offsets that were cleared (for abort filtering).
 	// Called when a transaction commits or aborts.
-	ClearUncommittedTransaction(txnId string) []partitionOffset
+	ClearUncommittedTransaction(txnID string) []partitionOffset
 
 	// MarkTransactionAborted marks offsets from an aborted transaction.
 	// These offsets will remain invisible to consumers forever.
@@ -355,7 +355,7 @@ type TransactionBroker interface {
 	// RECOVERY FLOW:
 	//   WAL replay sees txn_publish records → calls this for in-progress txns
 	//   → UncommittedTracker is rebuilt → read_committed isolation maintained
-	TrackUncommittedOffset(topic string, partition int, offset int64, txnId string, producerId int64, epoch int16)
+	TrackUncommittedOffset(topic string, partition int, offset int64, txnID string, producerID int64, epoch int16)
 }
 
 // =============================================================================
@@ -463,7 +463,7 @@ func NewTransactionCoordinator(config TransactionCoordinatorConfig, broker Trans
 // PRODUCER LIFECYCLE
 // =============================================================================
 
-// InitProducerId initializes or retrieves the producer ID for a transactional ID.
+// InitProducerID initializes or retrieves the producer ID for a transactional ID.
 //
 // FLOW:
 //  1. Look up existing transactional ID or create new
@@ -472,17 +472,17 @@ func NewTransactionCoordinator(config TransactionCoordinatorConfig, broker Trans
 //  4. Return (PID, epoch) for producer to use
 //
 // PARAMETERS:
-//   - transactionalId: Client-provided stable identifier
+//   - transactionalID: Client-provided stable identifier
 //   - transactionTimeoutMs: Timeout for transactions (0 = use default)
 //
 // RETURNS:
-//   - ProducerIdAndEpoch: The identity to use
+//   - ProducerIDAndEpoch: The identity to use
 //   - error: If initialization fails
-func (tc *TransactionCoordinator) InitProducerId(transactionalId string, transactionTimeoutMs int64) (ProducerIdAndEpoch, error) {
+func (tc *TransactionCoordinator) InitProducerID(transactionalID string, transactionTimeoutMs int64) (ProducerIDAndEpoch, error) {
 	tc.closeMu.RLock()
 	if tc.closed {
 		tc.closeMu.RUnlock()
-		return ProducerIdAndEpoch{}, ErrCoordinatorClosed
+		return ProducerIDAndEpoch{}, ErrCoordinatorClosed
 	}
 	tc.closeMu.RUnlock()
 
@@ -492,40 +492,40 @@ func (tc *TransactionCoordinator) InitProducerId(transactionalId string, transac
 	}
 
 	// Get old state to check for pending transactions
-	oldState := tc.producerManager.GetTransactionalState(transactionalId)
+	oldState := tc.producerManager.GetTransactionalState(transactionalID)
 
 	// Initialize producer ID (this increments epoch for existing producers)
-	pid, err := tc.producerManager.InitProducerId(transactionalId, transactionTimeoutMs)
+	pid, err := tc.producerManager.InitProducerID(transactionalID, transactionTimeoutMs)
 	if err != nil {
-		return ProducerIdAndEpoch{}, err
+		return ProducerIDAndEpoch{}, err
 	}
 
 	// If there was a pending transaction from old epoch, abort it
 	if oldState != nil && oldState.State == TransactionStateOngoing {
 		tc.txnMu.Lock()
-		if txn, exists := tc.transactions[oldState.CurrentTransactionId]; exists {
+		if txn, exists := tc.transactions[oldState.CurrentTransactionID]; exists {
 			// Mark old transaction for abort (will be processed by timeout checker)
 			txn.State = TransactionStatePrepareAbort
 			tc.logger.Info("aborting pending transaction from old epoch",
-				"transactionalId", transactionalId,
-				"oldEpoch", oldState.ProducerIdAndEpoch.Epoch,
+				"transactionalID", transactionalID,
+				"oldEpoch", oldState.ProducerIDAndEpoch.Epoch,
 				"newEpoch", pid.Epoch,
-				"transactionId", oldState.CurrentTransactionId)
+				"transactionId", oldState.CurrentTransactionID)
 		}
 		tc.txnMu.Unlock()
 	}
 
 	// Write to transaction log
-	if err := tc.transactionLog.WriteInitProducer(transactionalId, pid.ProducerId, pid.Epoch, transactionTimeoutMs); err != nil {
+	if err := tc.transactionLog.WriteInitProducer(transactionalID, pid.ProducerID, pid.Epoch, transactionTimeoutMs); err != nil {
 		tc.logger.Error("failed to write init_producer to log",
 			"error", err,
-			"transactionalId", transactionalId)
+			"transactionalID", transactionalID)
 		// Non-fatal: state is in memory, will be persisted on snapshot
 	}
 
 	tc.logger.Info("producer initialized",
-		"transactionalId", transactionalId,
-		"producerId", pid.ProducerId,
+		"transactionalID", transactionalID,
+		"producerID", pid.ProducerID,
 		"epoch", pid.Epoch)
 
 	return pid, nil
@@ -536,7 +536,7 @@ func (tc *TransactionCoordinator) InitProducerId(transactionalId string, transac
 // Producers should call this periodically (every HeartbeatIntervalMs).
 // If no heartbeat is received within SessionTimeoutMs, the producer
 // is considered dead and any active transaction is aborted.
-func (tc *TransactionCoordinator) Heartbeat(transactionalId string, pid ProducerIdAndEpoch) error {
+func (tc *TransactionCoordinator) Heartbeat(transactionalID string, pid ProducerIDAndEpoch) error {
 	tc.closeMu.RLock()
 	if tc.closed {
 		tc.closeMu.RUnlock()
@@ -545,17 +545,17 @@ func (tc *TransactionCoordinator) Heartbeat(transactionalId string, pid Producer
 	tc.closeMu.RUnlock()
 
 	// Validate epoch
-	if err := tc.producerManager.ValidateProducerEpoch(transactionalId, pid); err != nil {
+	if err := tc.producerManager.ValidateProducerEpoch(transactionalID, pid); err != nil {
 		return err
 	}
 
 	// Update heartbeat
-	if err := tc.producerManager.UpdateHeartbeat(transactionalId, pid); err != nil {
+	if err := tc.producerManager.UpdateHeartbeat(transactionalID, pid); err != nil {
 		return err
 	}
 
 	// Write to log (optional, useful for debugging)
-	// tc.transactionLog.WriteHeartbeat(transactionalId, pid.ProducerId, pid.Epoch)
+	// tc.transactionLog.WriteHeartbeat(transactionalID, pid.ProducerID, pid.Epoch)
 
 	return nil
 }
@@ -567,7 +567,7 @@ func (tc *TransactionCoordinator) Heartbeat(transactionalId string, pid Producer
 // BeginTransaction starts a new transaction.
 //
 // PARAMETERS:
-//   - transactionalId: The producer's transactional ID
+//   - transactionalID: The producer's transactional ID
 //   - pid: The producer's identity
 //
 // RETURNS:
@@ -577,8 +577,8 @@ func (tc *TransactionCoordinator) Heartbeat(transactionalId string, pid Producer
 // ERRORS:
 //   - ErrProducerFenced: Producer has been fenced by newer epoch
 //   - ErrTransactionAlreadyExists: Transaction already in progress
-//   - ErrUnknownProducerId: Producer not initialized
-func (tc *TransactionCoordinator) BeginTransaction(transactionalId string, pid ProducerIdAndEpoch) (string, error) {
+//   - ErrUnknownProducerID: Producer not initialized
+func (tc *TransactionCoordinator) BeginTransaction(transactionalID string, pid ProducerIDAndEpoch) (string, error) {
 	// METRICS: Track transaction start time for latency measurement
 	txnStartTime := InstrumentTransactionStarted()
 
@@ -590,58 +590,58 @@ func (tc *TransactionCoordinator) BeginTransaction(transactionalId string, pid P
 	tc.closeMu.RUnlock()
 
 	// Validate producer
-	if err := tc.producerManager.ValidateProducerEpoch(transactionalId, pid); err != nil {
+	if err := tc.producerManager.ValidateProducerEpoch(transactionalID, pid); err != nil {
 		return "", err
 	}
 
 	// Check for existing transaction
-	state := tc.producerManager.GetTransactionalState(transactionalId)
+	state := tc.producerManager.GetTransactionalState(transactionalID)
 	if state == nil {
-		return "", ErrUnknownProducerId
+		return "", ErrUnknownProducerID
 	}
 	if state.State != TransactionStateEmpty {
 		return "", ErrTransactionAlreadyExists
 	}
 
 	// Generate transaction ID
-	txnId := generateTransactionId()
+	txnID := generateTransactionID()
 
 	// Update producer state
-	if err := tc.producerManager.SetTransactionState(transactionalId, TransactionStateOngoing); err != nil {
+	if err := tc.producerManager.SetTransactionState(transactionalID, TransactionStateOngoing); err != nil {
 		return "", err
 	}
-	if err := tc.producerManager.SetCurrentTransactionId(transactionalId, txnId); err != nil {
+	if err := tc.producerManager.SetCurrentTransactionID(transactionalID, txnID); err != nil {
 		return "", err
 	}
-	if err := tc.producerManager.SetTransactionStartTime(transactionalId, time.Now()); err != nil {
+	if err := tc.producerManager.SetTransactionStartTime(transactionalID, time.Now()); err != nil {
 		return "", err
 	}
 
 	// Create transaction metadata
-	txnMeta := NewTransactionMetadata(txnId, transactionalId, pid.ProducerId, pid.Epoch, state.TransactionTimeoutMs)
+	txnMeta := NewTransactionMetadata(txnID, transactionalID, pid.ProducerID, pid.Epoch, state.TransactionTimeoutMs)
 
 	// Store transaction start time for latency tracking on commit/abort
 	txnMeta.StartTime = txnStartTime
 
 	tc.txnMu.Lock()
-	tc.transactions[txnId] = txnMeta
+	tc.transactions[txnID] = txnMeta
 	tc.txnMu.Unlock()
 
 	// Write to transaction log
-	if err := tc.transactionLog.WriteBeginTxn(transactionalId, txnId, pid.ProducerId, pid.Epoch); err != nil {
+	if err := tc.transactionLog.WriteBeginTxn(transactionalID, txnID, pid.ProducerID, pid.Epoch); err != nil {
 		tc.logger.Error("failed to write begin_txn to log",
 			"error", err,
-			"transactionalId", transactionalId,
-			"transactionId", txnId)
+			"transactionalID", transactionalID,
+			"transactionId", txnID)
 	}
 
 	tc.logger.Info("transaction started",
-		"transactionalId", transactionalId,
-		"transactionId", txnId,
-		"producerId", pid.ProducerId,
+		"transactionalID", transactionalID,
+		"transactionId", txnID,
+		"producerID", pid.ProducerID,
 		"epoch", pid.Epoch)
 
-	return txnId, nil
+	return txnID, nil
 }
 
 // AddPartitionToTransaction records that a partition has been written to.
@@ -651,11 +651,11 @@ func (tc *TransactionCoordinator) BeginTransaction(transactionalId string, pid P
 // control records on commit/abort.
 //
 // PARAMETERS:
-//   - transactionalId: The producer's transactional ID
+//   - transactionalID: The producer's transactional ID
 //   - pid: The producer's identity
 //   - topic: The topic being written to
 //   - partition: The partition being written to
-func (tc *TransactionCoordinator) AddPartitionToTransaction(transactionalId string, pid ProducerIdAndEpoch, topic string, partition int) error {
+func (tc *TransactionCoordinator) AddPartitionToTransaction(transactionalID string, pid ProducerIDAndEpoch, topic string, partition int) error {
 	tc.closeMu.RLock()
 	if tc.closed {
 		tc.closeMu.RUnlock()
@@ -664,36 +664,36 @@ func (tc *TransactionCoordinator) AddPartitionToTransaction(transactionalId stri
 	tc.closeMu.RUnlock()
 
 	// Validate producer
-	if err := tc.producerManager.ValidateProducerEpoch(transactionalId, pid); err != nil {
+	if err := tc.producerManager.ValidateProducerEpoch(transactionalID, pid); err != nil {
 		return err
 	}
 
 	// Get current state
-	state := tc.producerManager.GetTransactionalState(transactionalId)
+	state := tc.producerManager.GetTransactionalState(transactionalID)
 	if state == nil {
-		return ErrUnknownProducerId
+		return ErrUnknownProducerID
 	}
 	if state.State != TransactionStateOngoing {
 		return ErrInvalidTransactionState
 	}
 
 	// Add partition to producer manager
-	if err := tc.producerManager.AddPendingPartition(transactionalId, topic, partition); err != nil {
+	if err := tc.producerManager.AddPendingPartition(transactionalID, topic, partition); err != nil {
 		return err
 	}
 
 	// Update transaction metadata
 	tc.txnMu.Lock()
-	if txn, exists := tc.transactions[state.CurrentTransactionId]; exists {
+	if txn, exists := tc.transactions[state.CurrentTransactionID]; exists {
 		txn.AddPartition(topic, partition)
 	}
 	tc.txnMu.Unlock()
 
 	// Write to transaction log
-	if err := tc.transactionLog.WriteAddPartition(transactionalId, topic, partition); err != nil {
+	if err := tc.transactionLog.WriteAddPartition(transactionalID, topic, partition); err != nil {
 		tc.logger.Error("failed to write add_partition to log",
 			"error", err,
-			"transactionalId", transactionalId,
+			"transactionalID", transactionalID,
 			"topic", topic,
 			"partition", partition)
 	}
@@ -714,7 +714,7 @@ func (tc *TransactionCoordinator) AddPartitionToTransaction(transactionalId stri
 //
 //	If this method returns nil, the transaction is committed.
 //	If it returns an error, the transaction may need to be retried or aborted.
-func (tc *TransactionCoordinator) CommitTransaction(transactionalId string, pid ProducerIdAndEpoch) error {
+func (tc *TransactionCoordinator) CommitTransaction(transactionalID string, pid ProducerIDAndEpoch) error {
 	tc.closeMu.RLock()
 	if tc.closed {
 		tc.closeMu.RUnlock()
@@ -723,35 +723,35 @@ func (tc *TransactionCoordinator) CommitTransaction(transactionalId string, pid 
 	tc.closeMu.RUnlock()
 
 	// Validate producer
-	if err := tc.producerManager.ValidateProducerEpoch(transactionalId, pid); err != nil {
+	if err := tc.producerManager.ValidateProducerEpoch(transactionalID, pid); err != nil {
 		return err
 	}
 
 	// Get current state
-	state := tc.producerManager.GetTransactionalState(transactionalId)
+	state := tc.producerManager.GetTransactionalState(transactionalID)
 	if state == nil {
-		return ErrUnknownProducerId
+		return ErrUnknownProducerID
 	}
 	if state.State != TransactionStateOngoing {
 		return fmt.Errorf("%w: expected Ongoing, got %s", ErrInvalidTransactionState, state.State)
 	}
 
-	txnId := state.CurrentTransactionId
+	txnID := state.CurrentTransactionID
 
 	// Transition to PrepareCommit
-	if err := tc.producerManager.SetTransactionState(transactionalId, TransactionStatePrepareCommit); err != nil {
+	if err := tc.producerManager.SetTransactionState(transactionalID, TransactionStatePrepareCommit); err != nil {
 		return err
 	}
 
 	tc.txnMu.Lock()
-	txn := tc.transactions[txnId]
+	txn := tc.transactions[txnID]
 	if txn != nil {
 		txn.State = TransactionStatePrepareCommit
 	}
 	tc.txnMu.Unlock()
 
 	// Get partitions to write markers to
-	partitions := tc.producerManager.GetPendingPartitions(transactionalId)
+	partitions := tc.producerManager.GetPendingPartitions(transactionalID)
 	partitionsList := make(map[string][]int)
 	for topic, parts := range partitions {
 		partitionsList[topic] = make([]int, 0, len(parts))
@@ -761,33 +761,33 @@ func (tc *TransactionCoordinator) CommitTransaction(transactionalId string, pid 
 	}
 
 	// Write to transaction log (prepare phase)
-	if err := tc.transactionLog.WritePrepareCommit(transactionalId, partitionsList); err != nil {
+	if err := tc.transactionLog.WritePrepareCommit(transactionalID, partitionsList); err != nil {
 		tc.logger.Error("failed to write prepare_commit to log",
 			"error", err,
-			"transactionalId", transactionalId)
+			"transactionalID", transactionalID)
 	}
 
 	tc.logger.Info("preparing transaction commit",
-		"transactionalId", transactionalId,
-		"transactionId", txnId,
+		"transactionalID", transactionalID,
+		"transactionId", txnID,
 		"partitions", partitionsList)
 
 	// Write COMMIT markers to all partitions
-	if err := tc.writeControlRecords(transactionalId, pid, partitions, true); err != nil {
+	if err := tc.writeControlRecords(transactionalID, pid, partitions, true); err != nil {
 		// Failed to write some markers - transaction is in inconsistent state
 		// Mark for abort and trigger immediate abort attempt
-		tc.producerManager.SetTransactionState(transactionalId, TransactionStatePrepareAbort)
+		_ = tc.producerManager.SetTransactionState(transactionalID, TransactionStatePrepareAbort)
 
 		// Attempt to abort with retry
 		tc.logger.Warn("commit failed, attempting abort",
-			"transactionalId", transactionalId,
-			"transactionId", txnId,
+			"transactionalID", transactionalID,
+			"transactionId", txnID,
 			"error", err)
 
 		// Try to abort - if this fails, the timeout checker will retry
-		if abortErr := tc.abortTransactionWithRetry(transactionalId, txnId, pid); abortErr != nil {
+		if abortErr := tc.abortTransactionWithRetry(transactionalID, txnID, pid); abortErr != nil {
 			tc.logger.Error("immediate abort also failed, will be retried by timeout checker",
-				"transactionalId", transactionalId,
+				"transactionalID", transactionalID,
 				"error", abortErr)
 		}
 
@@ -795,18 +795,18 @@ func (tc *TransactionCoordinator) CommitTransaction(transactionalId string, pid 
 	}
 
 	// Transition to CompleteCommit
-	if err := tc.producerManager.SetTransactionState(transactionalId, TransactionStateCompleteCommit); err != nil {
+	if err := tc.producerManager.SetTransactionState(transactionalID, TransactionStateCompleteCommit); err != nil {
 		return err
 	}
 
 	// Clean up
-	tc.completeTransaction(transactionalId, txnId, true)
+	tc.completeTransaction(transactionalID, txnID, true)
 
 	// Write to transaction log (complete phase)
-	if err := tc.transactionLog.WriteCompleteCommit(transactionalId, true, ""); err != nil {
+	if err := tc.transactionLog.WriteCompleteCommit(transactionalID, true, ""); err != nil {
 		tc.logger.Error("failed to write complete_commit to log",
 			"error", err,
-			"transactionalId", transactionalId)
+			"transactionalID", transactionalID)
 	}
 
 	// METRICS: Record successful transaction commit with latency
@@ -817,8 +817,8 @@ func (tc *TransactionCoordinator) CommitTransaction(transactionalId string, pid 
 	tc.txnMu.RUnlock()
 
 	tc.logger.Info("transaction committed",
-		"transactionalId", transactionalId,
-		"transactionId", txnId)
+		"transactionalID", transactionalID,
+		"transactionId", txnID)
 
 	return nil
 }
@@ -833,7 +833,7 @@ func (tc *TransactionCoordinator) CommitTransaction(transactionalId string, pid 
 //  5. Clean up transaction metadata
 //
 // This can be called explicitly by the producer or automatically on timeout.
-func (tc *TransactionCoordinator) AbortTransaction(transactionalId string, pid ProducerIdAndEpoch) error {
+func (tc *TransactionCoordinator) AbortTransaction(transactionalID string, pid ProducerIDAndEpoch) error {
 	tc.closeMu.RLock()
 	if tc.closed {
 		tc.closeMu.RUnlock()
@@ -842,38 +842,38 @@ func (tc *TransactionCoordinator) AbortTransaction(transactionalId string, pid P
 	tc.closeMu.RUnlock()
 
 	// Validate producer
-	if err := tc.producerManager.ValidateProducerEpoch(transactionalId, pid); err != nil {
+	if err := tc.producerManager.ValidateProducerEpoch(transactionalID, pid); err != nil {
 		return err
 	}
 
 	// Get current state
-	state := tc.producerManager.GetTransactionalState(transactionalId)
+	state := tc.producerManager.GetTransactionalState(transactionalID)
 	if state == nil {
-		return ErrUnknownProducerId
+		return ErrUnknownProducerID
 	}
 	if state.State != TransactionStateOngoing && state.State != TransactionStatePrepareAbort {
 		return fmt.Errorf("%w: expected Ongoing or PrepareAbort, got %s", ErrInvalidTransactionState, state.State)
 	}
 
-	return tc.abortTransactionInternal(transactionalId, state.CurrentTransactionId, pid)
+	return tc.abortTransactionInternal(transactionalID, state.CurrentTransactionID, pid)
 }
 
 // abortTransactionInternal is the internal abort logic.
-func (tc *TransactionCoordinator) abortTransactionInternal(transactionalId, txnId string, pid ProducerIdAndEpoch) error {
+func (tc *TransactionCoordinator) abortTransactionInternal(transactionalID, txnID string, pid ProducerIDAndEpoch) error {
 	// Transition to PrepareAbort
-	if err := tc.producerManager.SetTransactionState(transactionalId, TransactionStatePrepareAbort); err != nil {
+	if err := tc.producerManager.SetTransactionState(transactionalID, TransactionStatePrepareAbort); err != nil {
 		return err
 	}
 
 	tc.txnMu.Lock()
-	txn := tc.transactions[txnId]
+	txn := tc.transactions[txnID]
 	if txn != nil {
 		txn.State = TransactionStatePrepareAbort
 	}
 	tc.txnMu.Unlock()
 
 	// Get partitions
-	partitions := tc.producerManager.GetPendingPartitions(transactionalId)
+	partitions := tc.producerManager.GetPendingPartitions(transactionalID)
 	partitionsList := make(map[string][]int)
 	for topic, parts := range partitions {
 		partitionsList[topic] = make([]int, 0, len(parts))
@@ -883,46 +883,46 @@ func (tc *TransactionCoordinator) abortTransactionInternal(transactionalId, txnI
 	}
 
 	// Write to transaction log (prepare phase)
-	if err := tc.transactionLog.WritePrepareAbort(transactionalId, partitionsList); err != nil {
+	if err := tc.transactionLog.WritePrepareAbort(transactionalID, partitionsList); err != nil {
 		tc.logger.Error("failed to write prepare_abort to log",
 			"error", err,
-			"transactionalId", transactionalId)
+			"transactionalID", transactionalID)
 	}
 
 	tc.logger.Info("preparing transaction abort",
-		"transactionalId", transactionalId,
-		"transactionId", txnId,
+		"transactionalID", transactionalID,
+		"transactionId", txnID,
 		"partitions", partitionsList)
 
 	// Write ABORT markers to all partitions
-	if err := tc.writeControlRecords(transactionalId, pid, partitions, false); err != nil {
+	if err := tc.writeControlRecords(transactionalID, pid, partitions, false); err != nil {
 		tc.logger.Error("failed to write some abort markers",
 			"error", err,
-			"transactionalId", transactionalId)
+			"transactionalID", transactionalID)
 		// Continue anyway - consumers will treat unmarked messages as aborted
 	}
 
 	// Transition to CompleteAbort
-	if err := tc.producerManager.SetTransactionState(transactionalId, TransactionStateCompleteAbort); err != nil {
+	if err := tc.producerManager.SetTransactionState(transactionalID, TransactionStateCompleteAbort); err != nil {
 		return err
 	}
 
 	// Clean up
-	tc.completeTransaction(transactionalId, txnId, false)
+	tc.completeTransaction(transactionalID, txnID, false)
 
 	// Write to transaction log (complete phase)
-	if err := tc.transactionLog.WriteCompleteAbort(transactionalId, true, ""); err != nil {
+	if err := tc.transactionLog.WriteCompleteAbort(transactionalID, true, ""); err != nil {
 		tc.logger.Error("failed to write complete_abort to log",
 			"error", err,
-			"transactionalId", transactionalId)
+			"transactionalID", transactionalID)
 	}
 
 	// METRICS: Record transaction abort
 	InstrumentTransactionAborted()
 
 	tc.logger.Info("transaction aborted",
-		"transactionalId", transactionalId,
-		"transactionId", txnId)
+		"transactionalID", transactionalID,
+		"transactionId", txnID)
 
 	return nil
 }
@@ -932,12 +932,12 @@ func (tc *TransactionCoordinator) abortTransactionInternal(transactionalId, txnI
 // =============================================================================
 
 // writeControlRecords writes commit/abort markers to all partitions in the transaction.
-func (tc *TransactionCoordinator) writeControlRecords(transactionalId string, pid ProducerIdAndEpoch, partitions map[string]map[int]struct{}, isCommit bool) error {
+func (tc *TransactionCoordinator) writeControlRecords(transactionalID string, pid ProducerIDAndEpoch, partitions map[string]map[int]struct{}, isCommit bool) error {
 	var errs []error
 
 	for topic, parts := range partitions {
 		for partition := range parts {
-			if err := tc.broker.WriteControlRecord(topic, partition, isCommit, pid.ProducerId, pid.Epoch, transactionalId); err != nil {
+			if err := tc.broker.WriteControlRecord(topic, partition, isCommit, pid.ProducerID, pid.Epoch, transactionalID); err != nil {
 				errs = append(errs, fmt.Errorf("partition %s-%d: %w", topic, partition, err))
 			}
 		}
@@ -962,8 +962,8 @@ func (tc *TransactionCoordinator) writeControlRecords(transactionalId string, pi
 //
 // GOROUTINE LEAK FIX:
 // Uses time.NewTimer instead of time.After to avoid goroutine leaks when
-// context is cancelled during backoff wait.
-func (tc *TransactionCoordinator) abortTransactionWithRetry(transactionalId, txnId string, pid ProducerIdAndEpoch) error {
+// context is canceled during backoff wait.
+func (tc *TransactionCoordinator) abortTransactionWithRetry(transactionalID, txnID string, pid ProducerIDAndEpoch) error {
 	const maxRetries = 3
 	baseDelay := 100 * time.Millisecond
 
@@ -992,18 +992,18 @@ func (tc *TransactionCoordinator) abortTransactionWithRetry(transactionalId, txn
 			}
 		}
 
-		lastErr = tc.abortTransactionInternal(transactionalId, txnId, pid)
+		lastErr = tc.abortTransactionInternal(transactionalID, txnID, pid)
 		if lastErr == nil {
 			if attempt > 0 {
 				tc.logger.Info("abort succeeded after retry",
-					"transactionalId", transactionalId,
+					"transactionalID", transactionalID,
 					"attempt", attempt+1)
 			}
 			return nil
 		}
 
 		tc.logger.Warn("abort attempt failed",
-			"transactionalId", transactionalId,
+			"transactionalID", transactionalID,
 			"attempt", attempt+1,
 			"maxRetries", maxRetries,
 			"error", lastErr)
@@ -1013,17 +1013,17 @@ func (tc *TransactionCoordinator) abortTransactionWithRetry(transactionalId, txn
 }
 
 // completeTransaction cleans up after a transaction completes.
-func (tc *TransactionCoordinator) completeTransaction(transactionalId, txnId string, committed bool) {
+func (tc *TransactionCoordinator) completeTransaction(transactionalID, txnID string, committed bool) {
 	// Clear pending partitions
-	tc.producerManager.ClearPendingPartitions(transactionalId)
+	_ = tc.producerManager.ClearPendingPartitions(transactionalID)
 
 	// Reset transaction state to Empty
-	tc.producerManager.SetTransactionState(transactionalId, TransactionStateEmpty)
-	tc.producerManager.SetCurrentTransactionId(transactionalId, "")
+	_ = tc.producerManager.SetTransactionState(transactionalID, TransactionStateEmpty)
+	_ = tc.producerManager.SetCurrentTransactionID(transactionalID, "")
 
 	// Remove from active transactions
 	tc.txnMu.Lock()
-	delete(tc.transactions, txnId)
+	delete(tc.transactions, txnID)
 	tc.txnMu.Unlock()
 
 	// =========================================================================
@@ -1036,7 +1036,7 @@ func (tc *TransactionCoordinator) completeTransaction(transactionalId, txnId str
 	// ABORT:  Offsets moved to abortedTracker (remain invisible forever)
 	//
 	// =========================================================================
-	clearedOffsets := tc.broker.ClearUncommittedTransaction(txnId)
+	clearedOffsets := tc.broker.ClearUncommittedTransaction(txnID)
 
 	// For aborts, mark offsets as permanently invisible
 	if !committed && len(clearedOffsets) > 0 {
@@ -1064,7 +1064,7 @@ func (tc *TransactionCoordinator) completeTransaction(transactionalId, txnId str
 //   - existingOffset: If duplicate, the original offset
 //   - isDuplicate: True if this is a duplicate
 //   - error: If sequence is invalid
-func (tc *TransactionCoordinator) CheckSequence(pid ProducerIdAndEpoch, topic string, partition int, sequence int32, offset int64) (int64, bool, error) {
+func (tc *TransactionCoordinator) CheckSequence(pid ProducerIDAndEpoch, topic string, partition int, sequence int32, offset int64) (int64, bool, error) {
 	tc.closeMu.RLock()
 	if tc.closed {
 		tc.closeMu.RUnlock()
@@ -1083,19 +1083,19 @@ func (tc *TransactionCoordinator) CheckSequence(pid ProducerIdAndEpoch, topic st
 // violating read_committed isolation.
 //
 // PARAMETERS:
-//   - transactionalId: The producer's transactional ID
+//   - transactionalID: The producer's transactional ID
 //   - transactionId: The specific transaction this publish belongs to
 //   - topic: Topic where the message was published
 //   - partition: Partition where the message was written
 //   - offset: Offset assigned to the message
-//   - producerId: Producer's unique identifier
+//   - producerID: Producer's unique identifier
 //   - epoch: Producer's current epoch
 //
 // WHEN CALLED:
 //
 //	After a successful PublishTransactional where the offset is tracked
 //	in the UncommittedTracker.
-func (tc *TransactionCoordinator) RecordTxnPublish(transactionalId, transactionId, topic string, partition int, offset int64, producerId int64, epoch int16) {
+func (tc *TransactionCoordinator) RecordTxnPublish(transactionalID, transactionID, topic string, partition int, offset, producerID int64, epoch int16) {
 	tc.closeMu.RLock()
 	if tc.closed {
 		tc.closeMu.RUnlock()
@@ -1103,10 +1103,10 @@ func (tc *TransactionCoordinator) RecordTxnPublish(transactionalId, transactionI
 	}
 	tc.closeMu.RUnlock()
 
-	if err := tc.transactionLog.WriteTxnPublish(transactionalId, transactionId, topic, partition, offset, producerId, epoch); err != nil {
+	if err := tc.transactionLog.WriteTxnPublish(transactionalID, transactionID, topic, partition, offset, producerID, epoch); err != nil {
 		tc.logger.Error("failed to write txn_publish WAL record",
-			"transactionalId", transactionalId,
-			"transactionId", transactionId,
+			"transactionalID", transactionalID,
+			"transactionID", transactionID,
 			"topic", topic,
 			"partition", partition,
 			"offset", offset,
@@ -1147,8 +1147,8 @@ func (tc *TransactionCoordinator) checkTimeouts() {
 		// Check transaction timeout
 		if txn.State == TransactionStateOngoing && txn.IsTimedOut() {
 			tc.logger.Warn("transaction timed out",
-				"transactionId", txn.TransactionId,
-				"transactionalId", txn.TransactionalId,
+				"transactionId", txn.TransactionID,
+				"transactionalID", txn.TransactionalID,
 				"duration", time.Since(txn.StartTime))
 			txn.State = TransactionStatePrepareAbort
 			toAbort = append(toAbort, txn)
@@ -1158,30 +1158,30 @@ func (tc *TransactionCoordinator) checkTimeouts() {
 
 	// Abort timed-out transactions
 	for _, txn := range toAbort {
-		pid := ProducerIdAndEpoch{
-			ProducerId: txn.ProducerId,
+		pid := ProducerIDAndEpoch{
+			ProducerID: txn.ProducerID,
 			Epoch:      txn.Epoch,
 		}
-		if err := tc.abortTransactionInternal(txn.TransactionalId, txn.TransactionId, pid); err != nil {
+		if err := tc.abortTransactionInternal(txn.TransactionalID, txn.TransactionID, pid); err != nil {
 			tc.logger.Error("failed to abort timed-out transaction",
 				"error", err,
-				"transactionId", txn.TransactionId)
+				"transactionId", txn.TransactionID)
 		}
 	}
 
 	// Check for dead producers (no heartbeat within session timeout)
 	// and abort their transactions
 	tc.producerManager.txnMu.Lock()
-	for txnId, state := range tc.producerManager.transactionalIds {
+	for txnID, state := range tc.producerManager.transactionalIDs {
 		if now.Sub(state.LastHeartbeat) > sessionTimeout {
 			if state.State == TransactionStateOngoing {
 				tc.logger.Warn("producer session expired, aborting transaction",
-					"transactionalId", txnId,
+					"transactionalID", txnID,
 					"lastHeartbeat", state.LastHeartbeat)
 
 				// Find and abort the transaction
 				tc.txnMu.Lock()
-				if txn, exists := tc.transactions[state.CurrentTransactionId]; exists {
+				if txn, exists := tc.transactions[state.CurrentTransactionID]; exists {
 					txn.State = TransactionStatePrepareAbort
 				}
 				tc.txnMu.Unlock()
@@ -1220,7 +1220,7 @@ func (tc *TransactionCoordinator) takeSnapshot() {
 			"error", err)
 	} else {
 		tc.logger.Debug("snapshot written",
-			"producers", len(snapshot.TransactionalIds),
+			"producers", len(snapshot.TransactionalIDs),
 			"sequenceStates", len(snapshot.SequenceStates))
 	}
 }
@@ -1233,7 +1233,7 @@ func (tc *TransactionCoordinator) takeSnapshot() {
 // the UncommittedTracker and AbortedTracker.
 //
 // FLOW:
-//  1. During WAL replay, txn_publish records accumulate offsets by txnId
+//  1. During WAL replay, txn_publish records accumulate offsets by txnID
 //  2. complete_commit records remove those offsets (they're visible)
 //  3. complete_abort records move offsets to abortedTracker
 //  4. After replay, remaining offsets belong to in-progress transactions
@@ -1271,7 +1271,7 @@ func (tc *TransactionCoordinator) recover() error {
 	if snapshot != nil {
 		tc.logger.Info("loading snapshot",
 			"timestamp", snapshot.Timestamp,
-			"producers", len(snapshot.TransactionalIds))
+			"producers", len(snapshot.TransactionalIDs))
 
 		if err := tc.producerManager.RestoreFromSnapshot(*snapshot); err != nil {
 			return fmt.Errorf("failed to restore snapshot: %w", err)
@@ -1323,8 +1323,8 @@ func (tc *TransactionCoordinator) replayRecordWithRecovery(record WALRecord, rs 
 				"error", err)
 			return nil // Non-fatal: skip corrupted publish records
 		}
-		rs.publishesByTxn[data.TransactionId] = append(
-			rs.publishesByTxn[data.TransactionId], data)
+		rs.publishesByTxn[data.TransactionID] = append(
+			rs.publishesByTxn[data.TransactionID], data)
 		return nil
 	}
 
@@ -1333,17 +1333,17 @@ func (tc *TransactionCoordinator) replayRecordWithRecovery(record WALRecord, rs 
 	case WALRecordCompleteCommit:
 		data, err := ParseCompleteCommitData(record.Data)
 		if err == nil {
-			state := tc.producerManager.GetTransactionalState(data.TransactionalId)
-			if state != nil && state.CurrentTransactionId != "" {
-				rs.completedTxns[state.CurrentTransactionId] = true // committed
+			state := tc.producerManager.GetTransactionalState(data.TransactionalID)
+			if state != nil && state.CurrentTransactionID != "" {
+				rs.completedTxns[state.CurrentTransactionID] = true // committed
 			}
 		}
 	case WALRecordCompleteAbort:
 		data, err := ParseCompleteCommitData(record.Data)
 		if err == nil {
-			state := tc.producerManager.GetTransactionalState(data.TransactionalId)
-			if state != nil && state.CurrentTransactionId != "" {
-				rs.completedTxns[state.CurrentTransactionId] = false // aborted
+			state := tc.producerManager.GetTransactionalState(data.TransactionalID)
+			if state != nil && state.CurrentTransactionID != "" {
+				rs.completedTxns[state.CurrentTransactionID] = false // aborted
 			}
 		}
 	}
@@ -1364,8 +1364,8 @@ func (tc *TransactionCoordinator) replayRecordWithRecovery(record WALRecord, rs 
 func (tc *TransactionCoordinator) rebuildTrackers(rs *recoveryState) {
 	var uncommittedCount, abortedCount int
 
-	for txnId, publishes := range rs.publishesByTxn {
-		committed, isCompleted := rs.completedTxns[txnId]
+	for txnID, publishes := range rs.publishesByTxn {
+		committed, isCompleted := rs.completedTxns[txnID]
 
 		if isCompleted && committed {
 			// Transaction committed → offsets are visible, nothing to do
@@ -1395,7 +1395,7 @@ func (tc *TransactionCoordinator) rebuildTrackers(rs *recoveryState) {
 		for _, p := range publishes {
 			tc.broker.TrackUncommittedOffset(
 				p.Topic, p.Partition, p.Offset,
-				p.TransactionId, p.ProducerId, p.Epoch,
+				p.TransactionID, p.ProducerID, p.Epoch,
 			)
 		}
 		uncommittedCount += len(publishes)
@@ -1421,7 +1421,7 @@ func (tc *TransactionCoordinator) replayRecord(record WALRecord) error {
 			return err
 		}
 		// Re-initialize producer (this is idempotent)
-		_, _ = tc.producerManager.InitProducerId(data.TransactionalId, data.TransactionTimeoutMs)
+		_, _ = tc.producerManager.InitProducerID(data.TransactionalID, data.TransactionTimeoutMs)
 
 	case WALRecordBeginTxn:
 		data, err := ParseBeginTxnData(record.Data)
@@ -1429,14 +1429,14 @@ func (tc *TransactionCoordinator) replayRecord(record WALRecord) error {
 			return err
 		}
 		// Recreate transaction metadata
-		state := tc.producerManager.GetTransactionalState(data.TransactionalId)
+		state := tc.producerManager.GetTransactionalState(data.TransactionalID)
 		if state != nil {
-			tc.producerManager.SetTransactionState(data.TransactionalId, TransactionStateOngoing)
-			tc.producerManager.SetCurrentTransactionId(data.TransactionalId, data.TransactionId)
+			_ = tc.producerManager.SetTransactionState(data.TransactionalID, TransactionStateOngoing)
+			_ = tc.producerManager.SetCurrentTransactionID(data.TransactionalID, data.TransactionID)
 
-			txn := NewTransactionMetadata(data.TransactionId, data.TransactionalId, data.ProducerId, data.Epoch, state.TransactionTimeoutMs)
+			txn := NewTransactionMetadata(data.TransactionID, data.TransactionalID, data.ProducerID, data.Epoch, state.TransactionTimeoutMs)
 			tc.txnMu.Lock()
-			tc.transactions[data.TransactionId] = txn
+			tc.transactions[data.TransactionID] = txn
 			tc.txnMu.Unlock()
 		}
 
@@ -1445,12 +1445,12 @@ func (tc *TransactionCoordinator) replayRecord(record WALRecord) error {
 		if err != nil {
 			return err
 		}
-		tc.producerManager.AddPendingPartition(data.TransactionalId, data.Topic, data.Partition)
+		_ = tc.producerManager.AddPendingPartition(data.TransactionalID, data.Topic, data.Partition)
 
-		state := tc.producerManager.GetTransactionalState(data.TransactionalId)
+		state := tc.producerManager.GetTransactionalState(data.TransactionalID)
 		if state != nil {
 			tc.txnMu.Lock()
-			if txn, exists := tc.transactions[state.CurrentTransactionId]; exists {
+			if txn, exists := tc.transactions[state.CurrentTransactionID]; exists {
 				txn.AddPartition(data.Topic, data.Partition)
 			}
 			tc.txnMu.Unlock()
@@ -1462,14 +1462,14 @@ func (tc *TransactionCoordinator) replayRecord(record WALRecord) error {
 			return err
 		}
 		// Transaction completed - clean up
-		state := tc.producerManager.GetTransactionalState(data.TransactionalId)
+		state := tc.producerManager.GetTransactionalState(data.TransactionalID)
 		if state != nil {
-			tc.producerManager.ClearPendingPartitions(data.TransactionalId)
-			tc.producerManager.SetTransactionState(data.TransactionalId, TransactionStateEmpty)
-			tc.producerManager.SetCurrentTransactionId(data.TransactionalId, "")
+			_ = tc.producerManager.ClearPendingPartitions(data.TransactionalID)
+			_ = tc.producerManager.SetTransactionState(data.TransactionalID, TransactionStateEmpty)
+			_ = tc.producerManager.SetCurrentTransactionID(data.TransactionalID, "")
 
 			tc.txnMu.Lock()
-			delete(tc.transactions, state.CurrentTransactionId)
+			delete(tc.transactions, state.CurrentTransactionID)
 			tc.txnMu.Unlock()
 		}
 
@@ -1484,26 +1484,26 @@ func (tc *TransactionCoordinator) recoverInProgressTransactions() {
 	tc.txnMu.Lock()
 	defer tc.txnMu.Unlock()
 
-	for txnId, txn := range tc.transactions {
+	for txnID, txn := range tc.transactions {
 		switch txn.State {
 		case TransactionStateOngoing:
 			// Check if timed out
 			if txn.IsTimedOut() {
 				tc.logger.Warn("aborting recovered transaction (timed out)",
-					"transactionId", txnId)
+					"transactionId", txnID)
 				txn.State = TransactionStatePrepareAbort
 			}
 
 		case TransactionStatePrepareCommit:
 			// Try to complete the commit
 			tc.logger.Info("completing recovered transaction (commit)",
-				"transactionId", txnId)
+				"transactionId", txnID)
 			// Will be handled by normal timeout checker
 
 		case TransactionStatePrepareAbort:
 			// Try to complete the abort
 			tc.logger.Info("completing recovered transaction (abort)",
-				"transactionId", txnId)
+				"transactionId", txnID)
 			// Will be handled by normal timeout checker
 		}
 	}
@@ -1577,21 +1577,21 @@ func (tc *TransactionCoordinator) Stats() TransactionCoordinatorStats {
 }
 
 // GetTransaction returns metadata for a specific transaction.
-func (tc *TransactionCoordinator) GetTransaction(txnId string) *TransactionMetadata {
+func (tc *TransactionCoordinator) GetTransaction(txnID string) *TransactionMetadata {
 	tc.txnMu.RLock()
 	defer tc.txnMu.RUnlock()
 
-	txn, exists := tc.transactions[txnId]
+	txn, exists := tc.transactions[txnID]
 	if !exists {
 		return nil
 	}
 
 	// Return a copy
 	return &TransactionMetadata{
-		TransactionId:   txn.TransactionId,
-		ProducerId:      txn.ProducerId,
+		TransactionID:   txn.TransactionID,
+		ProducerID:      txn.ProducerID,
 		Epoch:           txn.Epoch,
-		TransactionalId: txn.TransactionalId,
+		TransactionalID: txn.TransactionalID,
 		State:           txn.State,
 		StartTime:       txn.StartTime,
 		LastUpdateTime:  txn.LastUpdateTime,
@@ -1608,10 +1608,10 @@ func (tc *TransactionCoordinator) GetActiveTransactions() []*TransactionMetadata
 	result := make([]*TransactionMetadata, 0, len(tc.transactions))
 	for _, txn := range tc.transactions {
 		result = append(result, &TransactionMetadata{
-			TransactionId:   txn.TransactionId,
-			ProducerId:      txn.ProducerId,
+			TransactionID:   txn.TransactionID,
+			ProducerID:      txn.ProducerID,
 			Epoch:           txn.Epoch,
-			TransactionalId: txn.TransactionalId,
+			TransactionalID: txn.TransactionalID,
 			State:           txn.State,
 			StartTime:       txn.StartTime,
 			LastUpdateTime:  txn.LastUpdateTime,
@@ -1638,20 +1638,20 @@ func copyPartitions(m map[string]map[int]struct{}) map[string]map[int]struct{} {
 // HELPERS
 // =============================================================================
 
-// generateTransactionId generates a unique transaction ID.
-func generateTransactionId() string {
+// generateTransactionID generates a unique transaction ID.
+func generateTransactionID() string {
 	bytes := make([]byte, 8)
 	rand.Read(bytes)
 	return fmt.Sprintf("txn-%d-%s", time.Now().UnixNano(), hex.EncodeToString(bytes))
 }
 
 // GetProducerState returns the state for a transactional ID (for debugging).
-func (tc *TransactionCoordinator) GetProducerState(transactionalId string) *TransactionalIdState {
-	return tc.producerManager.GetTransactionalState(transactionalId)
+func (tc *TransactionCoordinator) GetProducerState(transactionalID string) *TransactionalIDState {
+	return tc.producerManager.GetTransactionalState(transactionalID)
 }
 
-// GetProducerStateByProducerId looks up transactional state by producer ID and epoch.
+// GetProducerStateByProducerID looks up transactional state by producer ID and epoch.
 // Used by PublishTransactional to find the current transaction ID for LSO tracking.
-func (tc *TransactionCoordinator) GetProducerStateByProducerId(producerId int64, epoch int16) *TransactionalIdState {
-	return tc.producerManager.GetTransactionalStateByProducerId(producerId, epoch)
+func (tc *TransactionCoordinator) GetProducerStateByProducerID(producerID int64, epoch int16) *TransactionalIDState {
+	return tc.producerManager.GetTransactionalStateByProducerID(producerID, epoch)
 }

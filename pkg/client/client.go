@@ -541,7 +541,7 @@ type ConsumeStream struct {
 // STREAMING EXPLAINED:
 //
 //	This returns a stream that continuously delivers messages.
-//	The stream stays open until you close it or the context is cancelled.
+//	The stream stays open until you close it or the context is canceled.
 //
 //	┌────────┐           ┌────────┐
 //	│ Client │◄──stream──│ Server │
@@ -746,7 +746,7 @@ func (s *SubscribeStream) GetGeneration() int32 {
 //   - RabbitMQ: basic.ack
 //   - SQS: DeleteMessage
 //   - Kafka: Offset commit (implicit or explicit)
-func (c *Client) Ack(ctx context.Context, groupID string, receiptHandle string) error {
+func (c *Client) Ack(ctx context.Context, groupID, receiptHandle string) error {
 	c.mu.RLock()
 	if c.closed {
 		c.mu.RUnlock()
@@ -770,7 +770,7 @@ func (c *Client) Ack(ctx context.Context, groupID string, receiptHandle string) 
 //
 //	Options:
 //	- visibilityTimeout: How long to wait before redelivery
-func (c *Client) Nack(ctx context.Context, groupID string, receiptHandle string, visibilityTimeout time.Duration) error {
+func (c *Client) Nack(ctx context.Context, groupID, receiptHandle string, visibilityTimeout time.Duration) error {
 	c.mu.RLock()
 	if c.closed {
 		c.mu.RUnlock()
@@ -801,7 +801,7 @@ func (c *Client) Nack(ctx context.Context, groupID string, receiptHandle string,
 //	┌────────┐    Reject    ┌─────┐
 //	│ Queue  │─────────────►│ DLQ │
 //	└────────┘              └─────┘
-func (c *Client) Reject(ctx context.Context, groupID string, receiptHandle string, reason string) error {
+func (c *Client) Reject(ctx context.Context, groupID, receiptHandle, reason string) error {
 	c.mu.RLock()
 	if c.closed {
 		c.mu.RUnlock()
@@ -831,7 +831,7 @@ func (c *Client) Reject(ctx context.Context, groupID string, receiptHandle strin
 //	│  ◄─── extend visibility here to prevent redelivery ───►    │
 //	│                                                            │
 //	├────────────────┼────────new timeout────────────────────────┤
-func (c *Client) ExtendVisibility(ctx context.Context, groupID string, receiptHandle string, extension time.Duration) error {
+func (c *Client) ExtendVisibility(ctx context.Context, groupID, receiptHandle string, extension time.Duration) error {
 	c.mu.RLock()
 	if c.closed {
 		c.mu.RUnlock()
@@ -1020,7 +1020,7 @@ var ErrClientClosed = fmt.Errorf("client is closed")
 //	│ Status Code        │ Retryable  │ Reason                              │
 //	├────────────────────┼────────────┼─────────────────────────────────────┤
 //	│ OK                 │ N/A        │ Success                             │
-//	│ CANCELLED          │ No         │ Client cancelled                    │
+//	│ CANCELED          │ No         │ Client canceled                    │
 //	│ UNKNOWN            │ Maybe      │ Unknown error (retry once)          │
 //	│ INVALID_ARGUMENT   │ No         │ Client error, won't change          │
 //	│ DEADLINE_EXCEEDED  │ Yes        │ Timeout, may succeed on retry       │

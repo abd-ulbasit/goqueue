@@ -1,6 +1,7 @@
 package broker
 
 import (
+	"errors"
 	"testing"
 )
 
@@ -178,16 +179,16 @@ func TestPartitionBackedCoordinator_NotCoordinatorErrors(t *testing.T) {
 	}
 	defer func() { _ = c.Stop() }()
 
-	if _, err := c.JoinGroup(&JoinGroupRequest{GroupID: "g1", ClientID: "c1"}); err != ErrNotCoordinator {
+	if _, err := c.JoinGroup(&JoinGroupRequest{GroupID: "g1", ClientID: "c1"}); !errors.Is(err, ErrNotCoordinator) {
 		t.Fatalf("JoinGroup err=%v, want %v", err, ErrNotCoordinator)
 	}
-	if err := c.CommitOffset(&OffsetCommitRequest{GroupID: "g1", Topic: "orders", Partition: 0, Offset: 1}); err != ErrNotCoordinator {
+	if err := c.CommitOffset(&OffsetCommitRequest{GroupID: "g1", Topic: "orders", Partition: 0, Offset: 1}); !errors.Is(err, ErrNotCoordinator) {
 		t.Fatalf("CommitOffset err=%v, want %v", err, ErrNotCoordinator)
 	}
-	if _, err := c.FetchOffset(&OffsetFetchRequest{GroupID: "g1", Topic: "orders", Partition: 0}); err != ErrNotCoordinator {
+	if _, err := c.FetchOffset(&OffsetFetchRequest{GroupID: "g1", Topic: "orders", Partition: 0}); !errors.Is(err, ErrNotCoordinator) {
 		t.Fatalf("FetchOffset err=%v, want %v", err, ErrNotCoordinator)
 	}
-	if _, err := c.DescribeGroup("g1"); err != ErrNotCoordinator {
+	if _, err := c.DescribeGroup("g1"); !errors.Is(err, ErrNotCoordinator) {
 		t.Fatalf("DescribeGroup err=%v, want %v", err, ErrNotCoordinator)
 	}
 }
@@ -226,7 +227,7 @@ func TestPartitionBackedCoordinator_ApplyTombstones(t *testing.T) {
 	if err := c.applyRecord(tomb); err != nil {
 		t.Fatalf("applyRecord(tombstone) failed: %v", err)
 	}
-	if _, err := c.FetchOffset(&OffsetFetchRequest{GroupID: "g1", Topic: "orders", Partition: 0}); err != ErrOffsetNotFound {
+	if _, err := c.FetchOffset(&OffsetFetchRequest{GroupID: "g1", Topic: "orders", Partition: 0}); !errors.Is(err, ErrOffsetNotFound) {
 		t.Fatalf("FetchOffset after tombstone err=%v, want %v", err, ErrOffsetNotFound)
 	}
 
@@ -255,7 +256,7 @@ func TestPartitionBackedCoordinator_ApplyTombstones(t *testing.T) {
 	if err := c.applyRecord(gmTomb); err != nil {
 		t.Fatalf("applyRecord(groupmeta tombstone) failed: %v", err)
 	}
-	if _, err := c.DescribeGroup("g1"); err != ErrGroupNotFound {
+	if _, err := c.DescribeGroup("g1"); !errors.Is(err, ErrGroupNotFound) {
 		t.Fatalf("DescribeGroup after tombstone err=%v, want %v", err, ErrGroupNotFound)
 	}
 }

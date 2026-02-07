@@ -611,7 +611,7 @@ type DelayedMessage struct {
 type DelayStats struct {
 	PendingCount   int64 `json:"pending_count"`
 	DeliveredCount int64 `json:"delivered_count"`
-	CancelledCount int64 `json:"cancelled_count"`
+	CanceledCount int64 `json:"canceled_count"`
 }
 
 // --- Consumer Group Types ---

@@ -1,6 +1,7 @@
 package broker
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -74,7 +75,7 @@ func TestOffsetManager_CommitValidations_AndBatchSkipsNegativeOffsets(t *testing
 	}
 	defer func() { _ = om.Close() }()
 
-	if err := om.Commit("g1", "orders", 0, -1, 1, ""); err != ErrInvalidOffset {
+	if err := om.Commit("g1", "orders", 0, -1, 1, ""); !errors.Is(err, ErrInvalidOffset) {
 		t.Fatalf("Commit negative offset err=%v, want %v", err, ErrInvalidOffset)
 	}
 
@@ -93,7 +94,7 @@ func TestOffsetManager_CommitValidations_AndBatchSkipsNegativeOffsets(t *testing
 	if got, err := om.GetOffset("g1", "orders", 0); err != nil || got != 42 {
 		t.Fatalf("GetOffset partition 0 got=%d err=%v, want 42 nil", got, err)
 	}
-	if _, err := om.GetOffset("g1", "orders", 1); err != ErrOffsetNotFound {
+	if _, err := om.GetOffset("g1", "orders", 1); !errors.Is(err, ErrOffsetNotFound) {
 		t.Fatalf("GetOffset partition 1 err=%v, want %v", err, ErrOffsetNotFound)
 	}
 }
@@ -156,7 +157,7 @@ func TestOffsetManager_DeleteGroup_RemovesCacheAndDisk(t *testing.T) {
 	if err := om.DeleteGroup("g1"); err != nil {
 		t.Fatalf("DeleteGroup failed: %v", err)
 	}
-	if _, err := om.GetOffset("g1", "orders", 0); err != ErrOffsetNotFound {
+	if _, err := om.GetOffset("g1", "orders", 0); !errors.Is(err, ErrOffsetNotFound) {
 		t.Fatalf("GetOffset after DeleteGroup err=%v, want %v", err, ErrOffsetNotFound)
 	}
 	if _, err := os.Stat(groupDir); !os.IsNotExist(err) {

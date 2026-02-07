@@ -237,7 +237,7 @@ func (m *InternalTopicManager) Start() error {
 
 	// Create internal topics directory
 	internalDir := filepath.Join(m.config.DataDir, "internal")
-	if err := os.MkdirAll(internalDir, 0755); err != nil {
+	if err := os.MkdirAll(internalDir, 0o755); err != nil {
 		return fmt.Errorf("failed to create internal topics directory: %w", err)
 	}
 
@@ -479,7 +479,7 @@ func (m *InternalTopicManager) ReadPartition(partition int) ([]*InternalRecord, 
 		return nil, fmt.Errorf("failed to read partition: %w", err)
 	}
 
-	var records []*InternalRecord
+	records := make([]*InternalRecord, 0, len(messages))
 	for _, msg := range messages {
 		// Decode the internal record from message value
 		record, err := DecodeInternalRecord(msg.Value)
@@ -522,7 +522,7 @@ func (m *InternalTopicManager) ReadPartitionFromOffset(partition int, startOffse
 		return nil, fmt.Errorf("failed to read partition: %w", err)
 	}
 
-	var records []*InternalRecord
+	records := make([]*InternalRecord, 0, len(messages))
 	for _, msg := range messages {
 		record, err := DecodeInternalRecord(msg.Value)
 		if err != nil {

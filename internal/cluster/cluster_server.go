@@ -470,13 +470,13 @@ func (cs *ClusterServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 func (cs *ClusterServer) jsonResponse(w http.ResponseWriter, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(data)
+	_ = json.NewEncoder(w).Encode(data)
 }
 
 func (cs *ClusterServer) jsonError(w http.ResponseWriter, message string, code int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(map[string]string{"error": message})
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": message})
 }
 
 // =============================================================================
@@ -624,7 +624,7 @@ func (cc *ClusterClient) FetchState(ctx context.Context, targetID NodeID) (*Stat
 
 	// GET request doesn't need body
 	url := fmt.Sprintf("http://%s/cluster/state", targetInfo.ClusterAddress.String())
-	httpReq, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", url, http.NoBody)
 	if err != nil {
 		return nil, err
 	}
@@ -721,7 +721,7 @@ func (cc *ClusterClient) Fetch(ctx context.Context, leaderAddr string, req *Fetc
 
 // RequestSnapshot asks the leader to create a snapshot for catch-up.
 // Returns snapshot metadata including download URL.
-func (cc *ClusterClient) RequestSnapshot(ctx context.Context, leaderAddr string, topic string, partition int, requestedBy NodeID) (*SnapshotResponse, error) {
+func (cc *ClusterClient) RequestSnapshot(ctx context.Context, leaderAddr, topic string, partition int, requestedBy NodeID) (*SnapshotResponse, error) {
 	req := SnapshotRequest{
 		Topic:       topic,
 		Partition:   partition,
@@ -744,7 +744,7 @@ func (cc *ClusterClient) RequestSnapshot(ctx context.Context, leaderAddr string,
 // DownloadSnapshot downloads a snapshot file from the leader.
 // The snapshot is saved to the specified destination directory.
 // Returns the path to the downloaded snapshot file.
-func (cc *ClusterClient) DownloadSnapshot(ctx context.Context, leaderAddr string, downloadURL string, destDir string) (string, error) {
+func (cc *ClusterClient) DownloadSnapshot(ctx context.Context, leaderAddr, downloadURL, destDir string) (string, error) {
 	// Be defensive: callers may pass an empty destination directory.
 	// In that case we download into the current working directory.
 	if destDir == "" {
@@ -755,7 +755,7 @@ func (cc *ClusterClient) DownloadSnapshot(ctx context.Context, leaderAddr string
 	url := fmt.Sprintf("http://%s%s", leaderAddr, downloadURL)
 
 	// Create request.
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, http.NoBody)
 	if err != nil {
 		return "", fmt.Errorf("create request: %w", err)
 	}
@@ -772,7 +772,7 @@ func (cc *ClusterClient) DownloadSnapshot(ctx context.Context, leaderAddr string
 	}
 
 	// Ensure destination directory exists.
-	if err := os.MkdirAll(destDir, 0755); err != nil {
+	if err := os.MkdirAll(destDir, 0o755); err != nil {
 		return "", fmt.Errorf("create dest dir: %w", err)
 	}
 
@@ -814,7 +814,7 @@ func (cc *ClusterClient) PushMetadata(ctx context.Context, targetID NodeID, meta
 }
 
 // doRequest performs an HTTP request to a cluster node.
-func (cc *ClusterClient) doRequest(ctx context.Context, addr string, path string, reqBody interface{}, respBody interface{}) error {
+func (cc *ClusterClient) doRequest(ctx context.Context, addr, path string, reqBody, respBody interface{}) error {
 	// Marshal request body
 	body, err := json.Marshal(reqBody)
 	if err != nil {
@@ -949,7 +949,7 @@ func (cc *ClusterClient) BroadcastHeartbeats(ctx context.Context) {
 			// Gossip: merge the response's membership view into ours.
 			// This propagates membership changes transitively through the cluster.
 			// If the remote node knows about nodes we don't, we learn about them.
-			if resp.Nodes != nil && len(resp.Nodes) > 0 {
+			if len(resp.Nodes) > 0 {
 				clusterState := &ClusterState{
 					Version:         resp.Version,
 					ControllerID:    resp.ControllerID,

@@ -739,7 +739,7 @@ func (c *PartitionBackedCoordinator) SyncGroup(req *SyncGroupRequest) (*SyncGrou
 	}
 
 	// Return this member's assignment
-	assignment, _ := group.Assignment[req.MemberID]
+	assignment := group.Assignment[req.MemberID]
 	encoded, _ := EncodeAssignment(assignment)
 
 	return &SyncGroupResult{

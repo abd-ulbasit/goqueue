@@ -170,7 +170,7 @@ type Topic struct {
 func NewTopic(baseDir string, config TopicConfig) (*Topic, error) {
 	// Create topic directory
 	topicDir := filepath.Join(baseDir, config.Name)
-	if err := os.MkdirAll(topicDir, 0755); err != nil {
+	if err := os.MkdirAll(topicDir, 0o755); err != nil {
 		return nil, fmt.Errorf("failed to create topic directory: %w", err)
 	}
 
@@ -181,7 +181,7 @@ func NewTopic(baseDir string, config TopicConfig) (*Topic, error) {
 		if err != nil {
 			// Cleanup already created partitions
 			for j := 0; j < i; j++ {
-				partitions[j].Delete()
+				_ = partitions[j].Delete()
 			}
 			return nil, fmt.Errorf("failed to create partition %d: %w", i, err)
 		}
@@ -204,7 +204,7 @@ func NewTopic(baseDir string, config TopicConfig) (*Topic, error) {
 //   - baseDir/{topicName}/1/
 //   - etc.
 
-func LoadTopic(baseDir string, name string) (*Topic, error) {
+func LoadTopic(baseDir, name string) (*Topic, error) {
 	topicDir := filepath.Join(baseDir, name)
 
 	// Check topic exists
@@ -292,8 +292,9 @@ func LoadTopic(baseDir string, name string) (*Topic, error) {
 // based on the key, without actually writing the message.
 //
 // WHY THIS EXISTS:
-//   In cluster mode, we need to know the partition BEFORE writing to check
-//   if we're the leader. If not, we forward to the leader.
+//
+//	In cluster mode, we need to know the partition BEFORE writing to check
+//	if we're the leader. If not, we forward to the leader.
 //
 // IMPORTANT:
 //   - For keyed messages: Returns hash-based partition (deterministic)
@@ -302,13 +303,13 @@ func LoadTopic(baseDir string, name string) (*Topic, error) {
 //     nil keys, as that would advance the counter twice.
 //
 // USAGE:
-//   partition := t.DeterminePartition(key)
-//   if isLeader(partition) {
-//       t.PublishToPartition(partition, key, value)  // Direct write
-//   } else {
-//       forward(partition, key, value)               // Forward to leader
-//   }
 //
+//	partition := t.DeterminePartition(key)
+//	if isLeader(partition) {
+//	    t.PublishToPartition(partition, key, value)  // Direct write
+//	} else {
+//	    forward(partition, key, value)               // Forward to leader
+//	}
 func (t *Topic) DeterminePartition(key []byte) int {
 	t.mu.RLock()
 	numPartitions := len(t.partitions)
@@ -896,7 +897,7 @@ func (t *Topic) AddPartitions(count int) ([]int, error) {
 		if err != nil {
 			// Rollback: close any partitions we created
 			for j := 0; j < i; j++ {
-				t.partitions[startID+j].Delete()
+				_ = t.partitions[startID+j].Delete()
 			}
 			// Restore original slice
 			t.partitions = t.partitions[:startID]

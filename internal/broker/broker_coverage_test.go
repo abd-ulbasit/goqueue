@@ -10,6 +10,7 @@
 package broker
 
 import (
+	"errors"
 	"goqueue/internal/storage"
 	"log/slog"
 	"os"
@@ -191,7 +192,7 @@ func TestBroker_GetOffsetByTimestamp_ClosedBroker(t *testing.T) {
 	if err == nil {
 		t.Error("GetOffsetByTimestamp should fail on closed broker")
 	}
-	if err != ErrBrokerClosed {
+	if !errors.Is(err, ErrBrokerClosed) {
 		t.Errorf("Expected ErrBrokerClosed, got: %v", err)
 	}
 }
@@ -428,10 +429,10 @@ func TestPriorityScheduler_UpdateStarvationTimeout(t *testing.T) {
 // IDEMPOTENT PRODUCER TESTS
 // =============================================================================
 
-// TestProducerIdAndEpoch_String tests the String method.
-func TestProducerIdAndEpoch_String(t *testing.T) {
-	pid := ProducerIdAndEpoch{
-		ProducerId: 12345,
+// TestProducerIDAndEpoch_String tests the String method.
+func TestProducerIDAndEpoch_String(t *testing.T) {
+	pid := ProducerIDAndEpoch{
+		ProducerID: 12345,
 		Epoch:      42,
 	}
 
@@ -535,9 +536,9 @@ func TestIdempotentProducerManager_GetSequenceState(t *testing.T) {
 	}
 
 	// Initialize a producer
-	pid, err := manager.InitProducerId("test-txn", 60000)
+	pid, err := manager.InitProducerID("test-txn", 60000)
 	if err != nil {
-		t.Fatalf("InitProducerId failed: %v", err)
+		t.Fatalf("InitProducerID failed: %v", err)
 	}
 
 	// Record a sequence using CheckAndUpdateSequence
@@ -547,7 +548,7 @@ func TestIdempotentProducerManager_GetSequenceState(t *testing.T) {
 	}
 
 	// Now GetSequenceState should return state
-	state = manager.GetSequenceState(pid.ProducerId, "test-topic", 0)
+	state = manager.GetSequenceState(pid.ProducerID, "test-topic", 0)
 	if state == nil {
 		t.Error("GetSequenceState should return state after CheckAndUpdateSequence")
 	} else {
@@ -569,9 +570,9 @@ func TestIdempotentProducerManager_ExpireInactiveProducers(t *testing.T) {
 	manager := NewIdempotentProducerManager(config)
 
 	// Initialize a producer
-	_, err := manager.InitProducerId("test-txn", 60000)
+	_, err := manager.InitProducerID("test-txn", 60000)
 	if err != nil {
-		t.Fatalf("InitProducerId failed: %v", err)
+		t.Fatalf("InitProducerID failed: %v", err)
 	}
 
 	// Wait for timeout

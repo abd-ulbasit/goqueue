@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -210,7 +211,8 @@ func TestBrokerConfigValidator_Validate(t *testing.T) {
 				}
 
 				// Verify it's a ValidationError
-				if _, ok := err.(*ValidationError); !ok {
+				var target *ValidationError
+				if !errors.As(err, &target) {
 					t.Errorf("error should be *ValidationError, got %T", err)
 				}
 			}
@@ -251,7 +253,7 @@ func TestValidateAddress(t *testing.T) {
 func TestValidateDataDir(t *testing.T) {
 	// Test: path exists but is a file, not directory
 	tmpFile := filepath.Join(t.TempDir(), "not-a-dir")
-	if err := os.WriteFile(tmpFile, []byte("test"), 0644); err != nil {
+	if err := os.WriteFile(tmpFile, []byte("test"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
