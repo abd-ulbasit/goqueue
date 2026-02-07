@@ -34,20 +34,20 @@
 //   │                                                                          │
 //   │  1. Producer calls PublishTransactional(topic, partition, msg)           │
 //   │     └── Message written to log at offset N                               │
-//   │     └── TrackUncommitted(topic, partition, offset, txnId) called         │
+//   │     └── TrackUncommitted(topic, partition, offset, txnID) called         │
 //   │                                                                          │
-//   │  2. Uncommitted tracker records: {topic/partition: [offset N] → txnId}   │
+//   │  2. Uncommitted tracker records: {topic/partition: [offset N] → txnID}   │
 //   │                                                                          │
 //   │  3. Consumer calls Consume(topic, partition, ...)                        │
 //   │     └── Reads messages from log                                          │
 //   │     └── Filters out offset N (IsUncommitted returns true)                │
 //   │                                                                          │
 //   │  4a. Transaction COMMITS:                                                │
-//   │     └── ClearTransaction(txnId) removes all tracked offsets              │
+//   │     └── ClearTransaction(txnID) removes all tracked offsets              │
 //   │     └── Next consume WILL see offset N                                   │
 //   │                                                                          │
 //   │  4b. Transaction ABORTS:                                                 │
-//   │     └── ClearTransaction(txnId) removes all tracked offsets              │
+//   │     └── ClearTransaction(txnID) removes all tracked offsets              │
 //   │     └── Abort control record in log tells consumer to skip offset N      │
 //   │                                                                          │
 //   └──────────────────────────────────────────────────────────────────────────┘
@@ -55,11 +55,11 @@
 // DATA STRUCTURE:
 //
 //   uncommittedByPartition: map[topic]map[partition]map[offset]*txnInfo
-//   offsetsByTransaction:   map[txnId][]partitionOffset
+//   offsetsByTransaction:   map[txnID][]partitionOffset
 //
 //   This dual-indexed structure allows:
 //     - O(1) lookup: "Is offset X uncommitted?"
-//     - O(n) cleanup: "Remove all offsets for txnId Y" (n = offsets in txn)
+//     - O(n) cleanup: "Remove all offsets for txnID Y" (n = offsets in txn)
 //
 // THREAD SAFETY:
 //   All methods are thread-safe (protected by mutex).
@@ -80,16 +80,10 @@ import (
 // TYPES
 // =============================================================================
 
-// partitionKey uniquely identifies a topic-partition combination.
-type partitionKey struct {
-	Topic     string
-	Partition int
-}
-
 // txnInfo holds information about the transaction that owns an offset.
 type txnInfo struct {
-	TransactionId string
-	ProducerId    int64
+	TransactionID string
+	ProducerID    int64
 	Epoch         int16
 }
 
@@ -114,7 +108,7 @@ type UncommittedTracker struct {
 	// Used for fast lookup: "Is this offset uncommitted?"
 	uncommitted map[string]map[int]map[int64]*txnInfo
 
-	// byTransaction maps txnId -> list of (topic, partition, offset)
+	// byTransaction maps txnID -> list of (topic, partition, offset)
 	// Used for efficient cleanup when transaction commits/aborts
 	byTransaction map[string][]partitionOffset
 
@@ -139,14 +133,14 @@ func NewUncommittedTracker() *UncommittedTracker {
 //   - topic: The topic name
 //   - partition: The partition number
 //   - offset: The offset that was written
-//   - txnId: The transaction ID (for cleanup on commit/abort)
-//   - producerId: The producer's ID (for debugging)
+//   - txnID: The transaction ID (for cleanup on commit/abort)
+//   - producerID: The producer's ID (for debugging)
 //   - epoch: The producer's epoch (for debugging)
 //
 // WHEN CALLED:
 //
 //	After PublishTransactional successfully writes a message to the log.
-func (ut *UncommittedTracker) Track(topic string, partition int, offset int64, txnId string, producerId int64, epoch int16) {
+func (ut *UncommittedTracker) Track(topic string, partition int, offset int64, txnID string, producerID int64, epoch int16) {
 	ut.mu.Lock()
 	defer ut.mu.Unlock()
 
@@ -160,13 +154,13 @@ func (ut *UncommittedTracker) Track(topic string, partition int, offset int64, t
 
 	// Record the offset as uncommitted
 	ut.uncommitted[topic][partition][offset] = &txnInfo{
-		TransactionId: txnId,
-		ProducerId:    producerId,
+		TransactionID: txnID,
+		ProducerID:    producerID,
 		Epoch:         epoch,
 	}
 
 	// Also track by transaction for cleanup
-	ut.byTransaction[txnId] = append(ut.byTransaction[txnId], partitionOffset{
+	ut.byTransaction[txnID] = append(ut.byTransaction[txnID], partitionOffset{
 		Topic:     topic,
 		Partition: partition,
 		Offset:    offset,
@@ -216,7 +210,7 @@ func (ut *UncommittedTracker) IsUncommitted(topic string, partition int, offset 
 // ClearTransaction removes all tracked offsets for a transaction.
 //
 // PARAMETERS:
-//   - txnId: The transaction ID to clear
+//   - txnID: The transaction ID to clear
 //
 // RETURNS:
 //
@@ -231,12 +225,12 @@ func (ut *UncommittedTracker) IsUncommitted(topic string, partition int, offset 
 //   - ABORT: Offsets will be filtered by abortedTracker → move offsets there
 //
 // The returned offsets can be passed to AbortedTracker.MarkAborted() for abort cases.
-func (ut *UncommittedTracker) ClearTransaction(txnId string) []partitionOffset {
+func (ut *UncommittedTracker) ClearTransaction(txnID string) []partitionOffset { //nolint:revive // internal package type
 	ut.mu.Lock()
 	defer ut.mu.Unlock()
 
 	// Get all offsets for this transaction
-	offsets, exists := ut.byTransaction[txnId]
+	offsets, exists := ut.byTransaction[txnID]
 	if !exists {
 		return nil
 	}
@@ -263,7 +257,7 @@ func (ut *UncommittedTracker) ClearTransaction(txnId string) []partitionOffset {
 	}
 
 	// Remove the transaction tracking
-	delete(ut.byTransaction, txnId)
+	delete(ut.byTransaction, txnID)
 
 	return result
 }
@@ -308,11 +302,11 @@ func (ut *UncommittedTracker) Stats() UncommittedStats {
 
 // GetTransactionOffsets returns all offsets for a specific transaction.
 // Useful for debugging and testing.
-func (ut *UncommittedTracker) GetTransactionOffsets(txnId string) []partitionOffset {
+func (ut *UncommittedTracker) GetTransactionOffsets(txnID string) []partitionOffset { //nolint:revive // internal package type
 	ut.mu.RLock()
 	defer ut.mu.RUnlock()
 
-	offsets := ut.byTransaction[txnId]
+	offsets := ut.byTransaction[txnID]
 	if offsets == nil {
 		return nil
 	}

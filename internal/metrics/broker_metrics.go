@@ -597,7 +597,7 @@ func (m *BrokerMetrics) RecordPublish(topic string, bytes int, latency float64) 
 //   - "storage": Disk write failed
 //   - "timeout": Operation timed out
 //   - "unknown": Other errors
-func (m *BrokerMetrics) RecordPublishError(topic string, errorType string) {
+func (m *BrokerMetrics) RecordPublishError(topic, errorType string) {
 	if m == nil || !m.registry.enabled {
 		return
 	}
@@ -605,7 +605,7 @@ func (m *BrokerMetrics) RecordPublishError(topic string, errorType string) {
 }
 
 // RecordConsume records a successful message consumption.
-func (m *BrokerMetrics) RecordConsume(topic, consumerGroup string, count int, bytes int, latency float64) {
+func (m *BrokerMetrics) RecordConsume(topic, consumerGroup string, count, bytes int, latency float64) {
 	if m == nil || !m.registry.enabled {
 		return
 	}

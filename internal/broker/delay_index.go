@@ -43,7 +43,7 @@
 // STATE VALUES:
 //   0 = PENDING   - Waiting for delivery time
 //   1 = DELIVERED - Has been delivered to timer wheel
-//   2 = CANCELLED - User cancelled the delay
+//   2 = CANCELED - User canceled the delay
 //   3 = EXPIRED   - Delivered and consumed
 //
 // RECOVERY ON STARTUP:
@@ -119,7 +119,7 @@ const (
 	// Entry states
 	delayStatePending   = 0
 	delayStateDelivered = 1
-	delayStateCancelled = 2
+	delayStateCanceled  = 2
 	delayStateExpired   = 3
 )
 
@@ -216,7 +216,7 @@ type DelayIndex struct {
 	// Updated when buckets are added/removed.
 	sortedBucketKeys []int64
 
-	// entryCount tracks total entries (including expired/cancelled)
+	// entryCount tracks total entries (including expired/canceled)
 	entryCount int64
 
 	// pendingCount tracks active pending entries
@@ -258,7 +258,7 @@ func DefaultDelayIndexConfig(dataDir, topic string) DelayIndexConfig {
 func NewDelayIndex(config DelayIndexConfig) (*DelayIndex, error) {
 	// Create directory structure
 	dir := filepath.Join(config.DataDir, "delays", config.Topic)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("failed to create delay index directory: %w", err)
 	}
 
@@ -288,7 +288,7 @@ func NewDelayIndex(config DelayIndexConfig) (*DelayIndex, error) {
 // openOrCreate opens existing index or creates a new one.
 func (idx *DelayIndex) openOrCreate() error {
 	// Try to open existing file
-	f, err := os.OpenFile(idx.path, os.O_RDWR, 0644)
+	f, err := os.OpenFile(idx.path, os.O_RDWR, 0o600)
 	if err == nil {
 		idx.file = f
 		return idx.loadExisting()
@@ -299,7 +299,7 @@ func (idx *DelayIndex) openOrCreate() error {
 	}
 
 	// Create new file
-	f, err = os.OpenFile(idx.path, os.O_RDWR|os.O_CREATE, 0644)
+	f, err = os.OpenFile(idx.path, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return fmt.Errorf("failed to create delay index: %w", err)
 	}
@@ -496,9 +496,9 @@ func (idx *DelayIndex) MarkDelivered(offset int64) error {
 	return idx.updateState(offset, delayStateDelivered)
 }
 
-// MarkCancelled updates entry state to cancelled.
-func (idx *DelayIndex) MarkCancelled(offset int64) error {
-	return idx.updateState(offset, delayStateCancelled)
+// MarkCanceled updates entry state to canceled.
+func (idx *DelayIndex) MarkCanceled(offset int64) error {
+	return idx.updateState(offset, delayStateCanceled)
 }
 
 // MarkExpired updates entry state to expired.
@@ -731,7 +731,7 @@ func (idx *DelayIndex) addToTimeBucketLocked(entry *DelayEntry) {
 
 // removeFromTimeBucketLocked removes an entry from its time bucket.
 // Must be called with idx.mu held.
-func (idx *DelayIndex) removeFromTimeBucketLocked(deliverAt int64, offset int64) {
+func (idx *DelayIndex) removeFromTimeBucketLocked(deliverAt, offset int64) {
 	bucketKey := deliverAt / int64(time.Second)
 
 	bucket := idx.timeBuckets[bucketKey]

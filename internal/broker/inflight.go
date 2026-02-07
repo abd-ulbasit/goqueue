@@ -291,17 +291,17 @@ func ParseReceiptHandle(handle string) (*ParsedReceiptHandle, error) {
 
 	partition, err := strconv.Atoi(parts[1])
 	if err != nil {
-		return nil, fmt.Errorf("%w: invalid partition: %v", ErrInvalidReceiptHandle, err)
+		return nil, fmt.Errorf("%w: invalid partition: %w", ErrInvalidReceiptHandle, err)
 	}
 
 	offset, err := strconv.ParseInt(parts[2], 10, 64)
 	if err != nil {
-		return nil, fmt.Errorf("%w: invalid offset: %v", ErrInvalidReceiptHandle, err)
+		return nil, fmt.Errorf("%w: invalid offset: %w", ErrInvalidReceiptHandle, err)
 	}
 
 	deliveryCount, err := strconv.Atoi(parts[3])
 	if err != nil {
-		return nil, fmt.Errorf("%w: invalid delivery count: %v", ErrInvalidReceiptHandle, err)
+		return nil, fmt.Errorf("%w: invalid delivery count: %w", ErrInvalidReceiptHandle, err)
 	}
 
 	return &ParsedReceiptHandle{

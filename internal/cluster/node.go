@@ -304,7 +304,7 @@ func (n *Node) Info() *NodeInfo {
 // =============================================================================
 
 // parseAddressWithDefaults parses an address string with fallback defaults.
-func parseAddressWithDefaults(addr string, defaultHost string, defaultPort int) (NodeAddress, error) {
+func parseAddressWithDefaults(addr, defaultHost string, defaultPort int) (NodeAddress, error) {
 	if addr == "" {
 		return NodeAddress{Host: defaultHost, Port: defaultPort}, nil
 	}

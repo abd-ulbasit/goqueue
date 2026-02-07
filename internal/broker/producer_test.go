@@ -2,6 +2,7 @@ package broker
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -360,7 +361,7 @@ func TestProducerClose(t *testing.T) {
 
 	// Subsequent sends should fail
 	err = producer.Send(ProducerRecord{Key: []byte("key"), Value: []byte("value")})
-	if err != ErrProducerClosed {
+	if !errors.Is(err, ErrProducerClosed) {
 		t.Errorf("Expected ErrProducerClosed, got %v", err)
 	}
 }

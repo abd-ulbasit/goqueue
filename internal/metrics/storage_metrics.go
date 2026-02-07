@@ -603,7 +603,7 @@ func newStorageMetrics(r *Registry) *StorageMetrics {
 // =============================================================================
 
 // RecordWrite records bytes written to storage.
-func (m *StorageMetrics) RecordWrite(topic string, partition int, bytes int) {
+func (m *StorageMetrics) RecordWrite(topic string, partition, bytes int) {
 	if m == nil || !m.registry.enabled {
 		return
 	}
@@ -615,7 +615,7 @@ func (m *StorageMetrics) RecordWrite(topic string, partition int, bytes int) {
 }
 
 // RecordRead records bytes read from storage.
-func (m *StorageMetrics) RecordRead(topic string, partition int, bytes int) {
+func (m *StorageMetrics) RecordRead(topic string, partition, bytes int) {
 	if m == nil || !m.registry.enabled {
 		return
 	}
@@ -675,7 +675,7 @@ func (m *StorageMetrics) SetLogSizeBytes(topic string, partition int, size int64
 }
 
 // SetSegmentCounts sets segment counts for a partition.
-func (m *StorageMetrics) SetSegmentCounts(topic string, partition int, active, total int) {
+func (m *StorageMetrics) SetSegmentCounts(topic string, partition, active, total int) {
 	if m == nil || !m.registry.enabled {
 		return
 	}
@@ -705,7 +705,7 @@ func (m *StorageMetrics) RecordSegmentDeleted(topic string) {
 }
 
 // RecordIndexLookup records an index lookup operation.
-func (m *StorageMetrics) RecordIndexLookup(topic string, indexType string, latency float64) {
+func (m *StorageMetrics) RecordIndexLookup(topic, indexType string, latency float64) {
 	if m == nil || !m.registry.enabled {
 		return
 	}

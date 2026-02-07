@@ -114,11 +114,12 @@ type (
 	ErrorCode = pb.ErrorCode
 
 	// Oneof wrapper types for ConsumeResponse
-	ConsumeResponse_Messages   = pb.ConsumeResponse_Messages
-	ConsumeResponse_Heartbeat  = pb.ConsumeResponse_Heartbeat
-	ConsumeResponse_Assignment = pb.ConsumeResponse_Assignment
-	ConsumeResponse_Rebalance  = pb.ConsumeResponse_Rebalance
-	ConsumeResponse_Error      = pb.ConsumeResponse_Error
+	// These names match protobuf-generated types and must keep underscores.
+	ConsumeResponse_Messages   = pb.ConsumeResponse_Messages   //nolint:revive // protobuf generated name
+	ConsumeResponse_Heartbeat  = pb.ConsumeResponse_Heartbeat  //nolint:revive // protobuf generated name
+	ConsumeResponse_Assignment = pb.ConsumeResponse_Assignment //nolint:revive // protobuf generated name
+	ConsumeResponse_Rebalance  = pb.ConsumeResponse_Rebalance  //nolint:revive // protobuf generated name
+	ConsumeResponse_Error      = pb.ConsumeResponse_Error      //nolint:revive // protobuf generated name
 )
 
 // Constants
@@ -188,11 +189,12 @@ type (
 )
 
 // Streaming interfaces
+// These names match protobuf-generated types and must keep underscores.
 type (
-	PublishService_PublishStreamServer = pb.PublishService_PublishStreamServer
-	ConsumeService_ConsumeServer       = pb.ConsumeService_ConsumeServer
-	ConsumeService_SubscribeServer     = pb.ConsumeService_SubscribeServer
-	HealthService_WatchServer          = pb.HealthService_WatchServer
+	PublishService_PublishStreamServer = pb.PublishService_PublishStreamServer //nolint:revive // protobuf generated name
+	ConsumeService_ConsumeServer       = pb.ConsumeService_ConsumeServer       //nolint:revive // protobuf generated name
+	ConsumeService_SubscribeServer     = pb.ConsumeService_SubscribeServer     //nolint:revive // protobuf generated name
+	HealthService_WatchServer          = pb.HealthService_WatchServer          //nolint:revive // protobuf generated name
 )
 
 // =============================================================================

@@ -41,8 +41,8 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
-	"strconv"
 
 	"github.com/go-chi/chi/v5"
 
@@ -248,12 +248,12 @@ func (s *Server) heartbeatCooperative(w http.ResponseWriter, r *http.Request) {
 
 	response, err := coopCoordinator.HeartbeatCooperative(groupID, req.MemberID, req.Generation)
 	if err != nil {
-		switch err {
-		case broker.ErrGroupNotFound:
+		switch {
+		case errors.Is(err, broker.ErrGroupNotFound):
 			s.errorResponse(w, http.StatusNotFound, "group not found")
-		case broker.ErrMemberNotFound:
+		case errors.Is(err, broker.ErrMemberNotFound):
 			s.errorResponse(w, http.StatusNotFound, "member not found (may have been evicted)")
-		case broker.ErrStaleGeneration:
+		case errors.Is(err, broker.ErrStaleGeneration):
 			s.errorResponse(w, http.StatusConflict, "stale generation (rebalance occurred)")
 		default:
 			s.errorResponse(w, http.StatusInternalServerError, err.Error())
@@ -317,14 +317,14 @@ func (s *Server) acknowledgeRevocation(w http.ResponseWriter, r *http.Request) {
 		req.Generation,
 		req.RevokedPartitions,
 	); err != nil {
-		switch err {
-		case broker.ErrGroupNotFound:
+		switch {
+		case errors.Is(err, broker.ErrGroupNotFound):
 			s.errorResponse(w, http.StatusNotFound, "group not found")
-		case broker.ErrMemberNotFound:
+		case errors.Is(err, broker.ErrMemberNotFound):
 			s.errorResponse(w, http.StatusNotFound, "member not found")
-		case broker.ErrStaleGeneration:
+		case errors.Is(err, broker.ErrStaleGeneration):
 			s.errorResponse(w, http.StatusConflict, "stale generation")
-		case broker.ErrRebalanceInProgress:
+		case errors.Is(err, broker.ErrRebalanceInProgress):
 			s.errorResponse(w, http.StatusConflict, "no active rebalance")
 		default:
 			s.errorResponse(w, http.StatusInternalServerError, err.Error())
@@ -545,10 +545,10 @@ func (s *Server) leaveGroupCooperative(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := coopCoordinator.LeaveCooperativeGroup(groupID, req.MemberID); err != nil {
-		switch err {
-		case broker.ErrGroupNotFound:
+		switch {
+		case errors.Is(err, broker.ErrGroupNotFound):
 			s.errorResponse(w, http.StatusNotFound, "group not found")
-		case broker.ErrMemberNotFound:
+		case errors.Is(err, broker.ErrMemberNotFound):
 			s.errorResponse(w, http.StatusNotFound, "member not found")
 		default:
 			s.errorResponse(w, http.StatusInternalServerError, err.Error())
@@ -671,28 +671,4 @@ func (s *Server) RegisterCooperativeGroupRoutes(r chi.Router) {
 func (s *Server) RegisterCooperativeGlobalRoutes(r chi.Router) {
 	// Global rebalance stats
 	r.Get("/rebalance/stats", s.getGlobalRebalanceStats)
-}
-
-// =============================================================================
-// HELPER: PARSE TOPIC PARTITION FROM STRING
-// =============================================================================
-
-// parseTopicPartition parses a "topic-partition" string into TopicPartition.
-func parseTopicPartition(s string) (broker.TopicPartition, error) {
-	// Format: "topic-N" or just "N" (assumes first subscribed topic)
-	// For simplicity, we expect JSON format in requests
-	return broker.TopicPartition{}, nil
-}
-
-// Helper to get generation from query param with default
-func getGenerationParam(r *http.Request, defaultGen int) int {
-	genStr := r.URL.Query().Get("generation")
-	if genStr == "" {
-		return defaultGen
-	}
-	gen, err := strconv.Atoi(genStr)
-	if err != nil {
-		return defaultGen
-	}
-	return gen
 }

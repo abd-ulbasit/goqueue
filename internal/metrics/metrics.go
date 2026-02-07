@@ -210,9 +210,6 @@ type Registry struct {
 	// logger for metrics operations
 	logger *slog.Logger
 
-	// mu protects registry operations
-	mu sync.RWMutex
-
 	// enabled tracks if metrics collection is enabled
 	enabled bool
 

@@ -85,9 +85,6 @@ const validOrderSchema = `{
 // invalidJSONSchema has invalid JSON syntax.
 const invalidJSONSchema = `{"type": "object", properties: invalid}`
 
-// invalidSchema has valid JSON but invalid JSON Schema structure.
-const invalidSchemaType = `{"type": "invalid_type"}`
-
 // =============================================================================
 // HELPER FUNCTIONS
 // =============================================================================

@@ -32,12 +32,28 @@ version: v2
 name: buf.build/goqueue/api
 
 # Linting configuration
+#
+# WHY THESE EXCEPTIONS?
+#   - STANDARD replaces DEFAULT (buf v2 migration)
+#   - ENUM_ZERO_VALUE_SUFFIX: We use UNSPECIFIED as first enum value (protobuf best practice)
+#   - DIRECTORY_SAME_PACKAGE: Our proto file lives at api/proto/ not api/proto/goqueue/v1/
+#     This is a project structure choice — restructuring would break import paths
+#   - RPC_REQUEST_RESPONSE_UNIQUE: Some RPCs share message types (e.g., 
+#     HealthCheckRequest used by Check and Watch). This is intentional for
+#     services that follow the gRPC health checking protocol.
+#   - RPC_REQUEST_STANDARD_NAME / RPC_RESPONSE_STANDARD_NAME: Our naming follows
+#     gRPC conventions (HealthCheckRequest, ConsumeResponse) rather than buf's
+#     stricter per-RPC naming (CheckRequest, WatchRequest). Renaming would break
+#     the API contract with existing clients.
 lint:
   use:
-    - DEFAULT
+    - STANDARD
   except:
-    # We use UNSPECIFIED as first enum value (protobuf best practice)
     - ENUM_ZERO_VALUE_SUFFIX
+    - DIRECTORY_SAME_PACKAGE
+    - RPC_REQUEST_RESPONSE_UNIQUE
+    - RPC_REQUEST_STANDARD_NAME
+    - RPC_RESPONSE_STANDARD_NAME
 
 # Breaking change detection
 breaking:

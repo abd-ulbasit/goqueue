@@ -114,7 +114,7 @@ func NewPartitionLeaderElector(metadataStore *MetadataStore, membership *Members
 
 // AssignLeadersForTopic assigns initial leaders for a new topic.
 // Uses offset-start round-robin for even distribution.
-func (pe *PartitionLeaderElector) AssignLeadersForTopic(topic string, partitions int, replicationFactor int) ([]*PartitionAssignment, error) {
+func (pe *PartitionLeaderElector) AssignLeadersForTopic(topic string, partitions, replicationFactor int) ([]*PartitionAssignment, error) {
 	pe.mu.Lock()
 	defer pe.mu.Unlock()
 

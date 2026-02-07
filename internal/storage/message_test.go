@@ -592,14 +592,14 @@ func TestMessage_ControlRecordMethods(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetControlRecordPayload failed: %v", err)
 	}
-	if payload.ProducerId != 12345 {
-		t.Errorf("ProducerId = %d, want 12345", payload.ProducerId)
+	if payload.ProducerID != 12345 {
+		t.Errorf("ProducerID = %d, want 12345", payload.ProducerID)
 	}
 	if payload.Epoch != 1 {
 		t.Errorf("Epoch = %d, want 1", payload.Epoch)
 	}
-	if payload.TransactionalId != "txn-123" {
-		t.Errorf("TransactionalId = %s, want txn-123", payload.TransactionalId)
+	if payload.TransactionalID != "txn-123" {
+		t.Errorf("TransactionalID = %s, want txn-123", payload.TransactionalID)
 	}
 
 	// Verify payload extraction fails for regular message

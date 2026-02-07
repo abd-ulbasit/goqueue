@@ -276,7 +276,7 @@ func (wb *WriteBuffer) Enqueue(msg *Message) (*PendingWrite, error) {
 	// If so, flush first (while holding lock to maintain order)
 	if wb.currentSize+msgSize > wb.config.MaxBufferSize ||
 		len(wb.pending) >= wb.config.MaxBatchMessages {
-		wb.flushLocked()
+		_ = wb.flushLocked()
 	}
 
 	// Add to buffer
@@ -285,7 +285,7 @@ func (wb *WriteBuffer) Enqueue(msg *Message) (*PendingWrite, error) {
 
 	// Immediate flush if linger=0
 	if wb.config.LingerMs == 0 {
-		wb.flushLocked()
+		_ = wb.flushLocked()
 	}
 
 	wb.mu.Unlock()
@@ -335,7 +335,7 @@ func (wb *WriteBuffer) EnqueueBatch(msgs []*Message) ([]*PendingWrite, error) {
 
 	// Flush existing buffer if needed
 	if wb.currentSize+totalSize > wb.config.MaxBufferSize {
-		wb.flushLocked()
+		_ = wb.flushLocked()
 	}
 
 	// Add all messages
@@ -344,7 +344,7 @@ func (wb *WriteBuffer) EnqueueBatch(msgs []*Message) ([]*PendingWrite, error) {
 
 	// For linger=0 or if batch exceeds threshold, flush immediately
 	if wb.config.LingerMs == 0 || len(wb.pending) >= wb.config.MaxBatchMessages {
-		wb.flushLocked()
+		_ = wb.flushLocked()
 	}
 
 	wb.mu.Unlock()
@@ -442,7 +442,7 @@ func (wb *WriteBuffer) backgroundFlusher() {
 		case <-ticker.C:
 			wb.mu.Lock()
 			if len(wb.pending) > 0 && time.Since(wb.lastFlush) >= lingerDuration {
-				wb.flushLocked()
+				_ = wb.flushLocked()
 			}
 			wb.mu.Unlock()
 		}
@@ -515,7 +515,7 @@ func (wb *WriteBuffer) SetSegment(segment *Segment) {
 
 	// Flush to old segment first
 	if len(wb.pending) > 0 {
-		wb.flushLocked()
+		_ = wb.flushLocked()
 	}
 
 	wb.segment = segment

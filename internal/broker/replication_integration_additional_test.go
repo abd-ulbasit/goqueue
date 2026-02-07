@@ -78,6 +78,9 @@ func TestReplicationCoordinator_StorageCallbacks_ReadMessagesAndApplyFetched(t *
 	b := newClusterEnabledTestBroker(t)
 
 	// Create broker storage topic and write a couple messages.
+	// Note: mustCreateTopic -> Broker.CreateTopic already registers metadata with
+	// the cluster coordinator when the broker is in cluster mode, so we don't need
+	// a separate CreateTopicMeta call.
 	mustCreateTopic(t, b, "orders", 1)
 	if _, _, err := b.Publish("orders", nil, []byte("v0")); err != nil {
 		t.Fatalf("Publish(v0) failed: %v", err)
@@ -86,11 +89,8 @@ func TestReplicationCoordinator_StorageCallbacks_ReadMessagesAndApplyFetched(t *
 		t.Fatalf("Publish(v1) failed: %v", err)
 	}
 
-	// Create matching cluster metadata so replication components have something
-	// to enumerate.
-	if err := b.clusterCoordinator.CreateTopicMeta("orders", 1, 1); err != nil {
-		t.Fatalf("CreateTopicMeta failed: %v", err)
-	}
+	// Cluster metadata is already registered by mustCreateTopic (Broker.CreateTopic
+	// calls clusterCoordinator.CreateTopicMeta internally in cluster mode).
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
 	rc, err := newReplicationCoordinator(b, logger)

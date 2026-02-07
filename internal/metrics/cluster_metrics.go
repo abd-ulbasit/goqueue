@@ -706,7 +706,7 @@ func (m *ClusterMetrics) SetLeadersPerNode(nodeID string, count int) {
 }
 
 // SetISRSize sets the ISR size for a partition.
-func (m *ClusterMetrics) SetISRSize(topic string, partition int, size int) {
+func (m *ClusterMetrics) SetISRSize(topic string, partition, size int) {
 	if m == nil || !m.registry.enabled {
 		return
 	}

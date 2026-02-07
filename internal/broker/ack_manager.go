@@ -594,7 +594,7 @@ func (am *AckManager) Ack(receiptHandle string) (*AckResult, error) {
 		"new_committed", newOffset)
 
 	// Check if offset advanced (new committed > old committed)
-	offsetAdvanced := newOffset > inflight.Offset-1
+	offsetAdvanced := newOffset >= inflight.Offset
 
 	return &AckResult{
 		Success:            true,
@@ -624,7 +624,7 @@ func (am *AckManager) Ack(receiptHandle string) (*AckResult, error) {
 //   - Message will be redelivered after backoff delay
 //   - Each NACK increments delivery count
 //   - After MaxRetries, message goes to DLQ
-func (am *AckManager) Nack(receiptHandle string, reason string) (*AckResult, error) {
+func (am *AckManager) Nack(receiptHandle, reason string) (*AckResult, error) {
 	am.mu.RLock()
 	if am.closed {
 		am.mu.RUnlock()
@@ -722,7 +722,7 @@ func (am *AckManager) Nack(receiptHandle string, reason string) (*AckResult, err
 //   - Message format is invalid
 //   - Business logic determines message is unprocessable
 //   - Consumer explicitly marks as poison
-func (am *AckManager) Reject(receiptHandle string, reason string) (*AckResult, error) {
+func (am *AckManager) Reject(receiptHandle, reason string) (*AckResult, error) {
 	am.mu.RLock()
 	if am.closed {
 		am.mu.RUnlock()
@@ -852,7 +852,7 @@ func (am *AckManager) onVisibilityExpired(inflight *InFlightMessage) {
 
 	// Check if max retries exceeded
 	if inflight.DeliveryCount > inflight.MaxRetries {
-		am.routeToDLQ(inflight, DLQReasonMaxRetries)
+		_, _ = am.routeToDLQ(inflight, DLQReasonMaxRetries)
 		return
 	}
 
@@ -871,7 +871,7 @@ func (am *AckManager) onVisibilityExpired(inflight *InFlightMessage) {
 			"topic", inflight.Topic,
 			"partition", inflight.Partition,
 			"offset", inflight.Offset)
-		am.routeToDLQ(inflight, DLQReasonMaxRetries)
+		_, _ = am.routeToDLQ(inflight, DLQReasonMaxRetries)
 	}
 }
 
@@ -893,7 +893,7 @@ func (am *AckManager) retryProcessor() {
 //
 // GOROUTINE LEAK FIX:
 // Uses time.NewTimer instead of time.After to avoid goroutine leaks when
-// context is cancelled while waiting for retry time.
+// context is canceled while waiting for retry time.
 func (am *AckManager) processRetry(inflight *InFlightMessage) {
 	// Wait until retry time
 	waitDuration := time.Until(inflight.NextRetryTime)

@@ -154,7 +154,7 @@ func (c *Config) Save() error {
 func (c *Config) SaveToPath(path string) error {
 	// Create directory if needed
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 
@@ -165,7 +165,7 @@ func (c *Config) SaveToPath(path string) error {
 	}
 
 	// Write file with restricted permissions
-	if err := os.WriteFile(path, data, 0600); err != nil {
+	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
 
@@ -249,7 +249,7 @@ func (c *Config) ListContexts() []string {
 const (
 	EnvServer  = "GOQUEUE_SERVER"
 	EnvContext = "GOQUEUE_CONTEXT"
-	EnvAPIKey  = "GOQUEUE_API_KEY"
+	EnvAPIKey  = "GOQUEUE_API_KEY" //nolint:gosec // G101: env var name, not a hardcoded credential
 	EnvTimeout = "GOQUEUE_TIMEOUT"
 )
 

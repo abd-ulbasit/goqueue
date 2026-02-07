@@ -328,7 +328,7 @@ func (rs *ReplicationServer) handleFetch(w http.ResponseWriter, r *http.Request)
 // ERROR HANDLING:
 //   - "offset out of range" triggers snapshot-based catch-up
 //   - Other errors are logged and propagated
-func (rs *ReplicationServer) readMessagesFromLog(topic string, partition int, fromOffset int64, maxBytes int64) ([]ReplicatedMessage, int64, error) {
+func (rs *ReplicationServer) readMessagesFromLog(topic string, partition int, fromOffset, maxBytes int64) ([]ReplicatedMessage, int64, error) {
 	// If no log reader configured, return empty.
 	// This allows the server to start without storage (useful for testing).
 	if rs.logReader == nil {
@@ -340,15 +340,6 @@ func (rs *ReplicationServer) readMessagesFromLog(topic string, partition int, fr
 
 	// Delegate to the broker's log reader.
 	return rs.logReader(topic, partition, fromOffset, maxBytes)
-}
-
-// getLeaderHint returns the current leader for a partition.
-func (rs *ReplicationServer) getLeaderHint(topic string, partition int) NodeID {
-	assignment := rs.metadataStore.GetAssignment(topic, partition)
-	if assignment == nil {
-		return ""
-	}
-	return assignment.Leader
 }
 
 // =============================================================================
@@ -592,7 +583,9 @@ func (rs *ReplicationServer) addToISR(topic string, partition int, nodeID NodeID
 	// TODO: Verify offset is caught up with leader.
 	// For now, trust the request.
 
-	newISR := append(assignment.ISR, nodeID)
+	newISR := make([]NodeID, 0, len(assignment.ISR)+1)
+	newISR = append(newISR, assignment.ISR...)
+	newISR = append(newISR, nodeID)
 	return rs.metadataStore.UpdateISR(topic, partition, newISR)
 }
 
@@ -697,11 +690,11 @@ type PartitionInfoResponse struct {
 
 func (rs *ReplicationServer) jsonResponse(w http.ResponseWriter, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(data)
+	_ = json.NewEncoder(w).Encode(data)
 }
 
 func (rs *ReplicationServer) jsonError(w http.ResponseWriter, message string, code int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(map[string]string{"error": message})
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": message})
 }

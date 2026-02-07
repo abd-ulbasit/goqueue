@@ -160,7 +160,7 @@ func NewIndex(path string, baseOffset int64) (*Index, error) {
 	// O_CREATE: create if doesn't exist
 	// O_APPEND: all writes go to end (important for durability)
 	// 0644: owner can read/write, others can read
-	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create index file: %w", err)
 	}
@@ -187,7 +187,7 @@ func NewIndex(path string, baseOffset int64) (*Index, error) {
 //   - Simplifies the code (no disk I/O during lookup)
 func LoadIndex(path string, baseOffset int64) (*Index, error) {
 	// Open for reading and appending
-	file, err := os.OpenFile(path, os.O_RDWR|os.O_APPEND, 0644)
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_APPEND, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open index file: %w", err)
 	}
@@ -219,7 +219,7 @@ func LoadIndex(path string, baseOffset int64) (*Index, error) {
 
 	buf := make([]byte, IndexEntrySize)
 	var lastOffset int64 = -1
-	var lastPosition int64 = 0
+	var lastPosition int64
 
 	for i := 0; i < numEntries; i++ {
 		if _, err := io.ReadFull(file, buf); err != nil {
@@ -279,7 +279,7 @@ func LoadIndex(path string, baseOffset int64) (*Index, error) {
 //	MaybeAppend(100, 4100)  // position 4100 >= 0 + 4096, so add entry → true
 //	lastLogPosition = 4100
 //	MaybeAppend(101, 4200)  // position 4200 < 4100 + 4096, skip → false
-func (idx *Index) MaybeAppend(offset int64, position int64) (bool, error) {
+func (idx *Index) MaybeAppend(offset, position int64) (bool, error) {
 	// TODO: Maybe first check with RLock for performance?
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
@@ -309,7 +309,7 @@ func (idx *Index) MaybeAppend(offset int64, position int64) (bool, error) {
 
 // ForceAppend adds an index entry regardless of granularity.
 // Used when starting a new segment to ensure the first message is indexed.
-func (idx *Index) ForceAppend(offset int64, position int64) error {
+func (idx *Index) ForceAppend(offset, position int64) error {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 

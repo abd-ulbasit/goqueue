@@ -229,7 +229,7 @@ type TimerWheel struct {
 	// stats
 	totalScheduled atomic.Uint64
 	totalExpired   atomic.Uint64
-	totalCancelled atomic.Uint64
+	totalCanceled  atomic.Uint64
 }
 
 // TimerWheelConfig holds timer wheel configuration.
@@ -385,7 +385,7 @@ func (tw *TimerWheel) ScheduleAt(id string, deliverAt time.Time, data interface{
 //   - id: Timer identifier from Schedule()
 //
 // RETURNS:
-//   - true if timer was found and cancelled
+//   - true if timer was found and canceled
 //   - false if timer doesn't exist (already fired or never scheduled)
 //
 // COMPLEXITY: O(1)
@@ -398,7 +398,7 @@ func (tw *TimerWheel) Cancel(id string) bool {
 	defer tw.mu.Unlock()
 
 	if tw.removeTimerLocked(id) {
-		tw.totalCancelled.Add(1)
+		tw.totalCanceled.Add(1)
 		return true
 	}
 	return false
@@ -459,7 +459,7 @@ func (tw *TimerWheel) Size() int {
 type TimerWheelStats struct {
 	TotalScheduled uint64
 	TotalExpired   uint64
-	TotalCancelled uint64
+	TotalCanceled  uint64
 	CurrentActive  int
 	CurrentTick    uint64
 }
@@ -473,7 +473,7 @@ func (tw *TimerWheel) Stats() TimerWheelStats {
 	return TimerWheelStats{
 		TotalScheduled: tw.totalScheduled.Load(),
 		TotalExpired:   tw.totalExpired.Load(),
-		TotalCancelled: tw.totalCancelled.Load(),
+		TotalCanceled:  tw.totalCanceled.Load(),
 		CurrentActive:  active,
 		CurrentTick:    tick,
 	}
@@ -494,7 +494,7 @@ func (tw *TimerWheel) Close() error {
 	tw.logger.Info("timer wheel stopped",
 		"total_scheduled", tw.totalScheduled.Load(),
 		"total_expired", tw.totalExpired.Load(),
-		"total_cancelled", tw.totalCancelled.Load())
+		"total_canceled", tw.totalCanceled.Load())
 
 	return nil
 }
@@ -534,7 +534,7 @@ func (tw *TimerWheel) insertTimer(entry *TimerEntry) {
 //   - Level 1: delays up to 2.73min (64 × 2.56s)
 //   - Level 2: delays up to 2.91h (64 × 2.73min)
 //   - Level 3: delays up to 7.76d (64 × 2.91h)
-func (tw *TimerWheel) calculateBucket(delayMs int64) (level int, bucket int) {
+func (tw *TimerWheel) calculateBucket(delayMs int64) (level, bucket int) {
 	// Adjust delay based on current cursor position
 	// This accounts for time already elapsed within the current tick cycle
 
@@ -660,7 +660,7 @@ func (tw *TimerWheel) processExpiredBucket(level, bucket int) {
 
 	// Process all timers in bucket
 	for e := bucketList.Front(); e != nil; {
-		entry := e.Value.(*TimerEntry)
+		entry, _ := e.Value.(*TimerEntry)
 		next := e.Next()
 
 		// Remove from bucket and map
@@ -688,7 +688,7 @@ func (tw *TimerWheel) cascadeBucket(level, bucket int) {
 
 	// Move all timers to appropriate lower levels
 	for e := bucketList.Front(); e != nil; {
-		entry := e.Value.(*TimerEntry)
+		entry, _ := e.Value.(*TimerEntry)
 		next := e.Next()
 
 		// Remove from current bucket
@@ -764,7 +764,7 @@ func (tw *TimerWheel) FireNow(id string) bool {
 // CONTEXT-AWARE WAITING
 // =============================================================================
 
-// WaitForEmpty blocks until all timers have fired or context is cancelled.
+// WaitForEmpty blocks until all timers have fired or context is canceled.
 // Useful for graceful shutdown.
 func (tw *TimerWheel) WaitForEmpty(ctx context.Context) error {
 	ticker := time.NewTicker(100 * time.Millisecond)

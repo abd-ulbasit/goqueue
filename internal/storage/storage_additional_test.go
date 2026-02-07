@@ -11,6 +11,7 @@ package storage
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -195,9 +196,9 @@ func TestMessage_Size_WithHeaders_Calculation(t *testing.T) {
 
 func TestControlRecordPayload_RoundtripFull(t *testing.T) {
 	original := &ControlRecordPayload{
-		ProducerId:      123456789,
+		ProducerID:      123456789,
 		Epoch:           42,
-		TransactionalId: "test-transaction-id",
+		TransactionalID: "test-transaction-id",
 	}
 
 	encoded := original.Encode()
@@ -206,14 +207,14 @@ func TestControlRecordPayload_RoundtripFull(t *testing.T) {
 		t.Fatalf("DecodeControlRecordPayload failed: %v", err)
 	}
 
-	if decoded.ProducerId != original.ProducerId {
-		t.Errorf("ProducerId = %d, want %d", decoded.ProducerId, original.ProducerId)
+	if decoded.ProducerID != original.ProducerID {
+		t.Errorf("ProducerID = %d, want %d", decoded.ProducerID, original.ProducerID)
 	}
 	if decoded.Epoch != original.Epoch {
 		t.Errorf("Epoch = %d, want %d", decoded.Epoch, original.Epoch)
 	}
-	if decoded.TransactionalId != original.TransactionalId {
-		t.Errorf("TransactionalId = %q, want %q", decoded.TransactionalId, original.TransactionalId)
+	if decoded.TransactionalID != original.TransactionalID {
+		t.Errorf("TransactionalID = %q, want %q", decoded.TransactionalID, original.TransactionalID)
 	}
 }
 
@@ -296,27 +297,27 @@ func TestLog_ClosedOperations_Coverage(t *testing.T) {
 	// Operations on closed log should fail
 	msg := NewMessage([]byte("key"), []byte("value"))
 	_, err = log.Append(msg)
-	if err != ErrLogClosed {
+	if !errors.Is(err, ErrLogClosed) {
 		t.Errorf("Append on closed log should return ErrLogClosed, got %v", err)
 	}
 
 	_, err = log.Read(0)
-	if err != ErrLogClosed {
+	if !errors.Is(err, ErrLogClosed) {
 		t.Errorf("Read on closed log should return ErrLogClosed, got %v", err)
 	}
 
 	_, err = log.ReadFrom(0, 10)
-	if err != ErrLogClosed {
+	if !errors.Is(err, ErrLogClosed) {
 		t.Errorf("ReadFrom on closed log should return ErrLogClosed, got %v", err)
 	}
 
 	err = log.Sync()
-	if err != ErrLogClosed {
+	if !errors.Is(err, ErrLogClosed) {
 		t.Errorf("Sync on closed log should return ErrLogClosed, got %v", err)
 	}
 
 	_, err = log.GetOffsetByTimestamp(time.Now().UnixNano())
-	if err != ErrLogClosed {
+	if !errors.Is(err, ErrLogClosed) {
 		t.Errorf("GetOffsetByTimestamp on closed log should return ErrLogClosed, got %v", err)
 	}
 }
@@ -666,7 +667,7 @@ func TestSegment_LoadCorruptedSegment_Recovery(t *testing.T) {
 
 	// Create a segment file with invalid content
 	segPath := filepath.Join(dir, "00000000000000000000.log")
-	if err := os.WriteFile(segPath, []byte("invalid segment data"), 0644); err != nil {
+	if err := os.WriteFile(segPath, []byte("invalid segment data"), 0o644); err != nil {
 		t.Fatalf("Failed to create invalid segment: %v", err)
 	}
 

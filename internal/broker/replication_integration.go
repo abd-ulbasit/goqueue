@@ -531,7 +531,7 @@ func (rc *replicationCoordinator) handleMetadataChange(meta *cluster.ClusterMeta
 
 // ApplyFetchedMessages applies messages fetched by followers to local storage.
 // This is called by the follower fetcher when it receives messages.
-func (rc *replicationCoordinator) ApplyFetchedMessages(topic string, partition int, messages []cluster.ReplicatedMessage, leaderHW int64, leaderLEO int64) error {
+func (rc *replicationCoordinator) ApplyFetchedMessages(topic string, partition int, messages []cluster.ReplicatedMessage, leaderHW, leaderLEO int64) error {
 	rc.broker.mu.RLock()
 	topicObj, exists := rc.broker.topics[topic]
 	rc.broker.mu.RUnlock()

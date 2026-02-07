@@ -457,7 +457,7 @@ type ClusterConfig struct {
 	AdvertiseAddress string `json:"advertise_address" yaml:"advertise_address"`
 
 	// Peers is the list of other nodes to connect to on startup.
-	// is this going to be thier cluster address or advertise address?
+	// is this going to be their cluster address or advertise address?
 	// Format: ["host1:port1", "host2:port2"]
 	Peers []string `json:"peers" yaml:"peers"`
 

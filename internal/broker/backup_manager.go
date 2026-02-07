@@ -259,7 +259,7 @@ func (bm *BackupManager) CreateBackup(ctx context.Context) (*BackupMetadata, err
 	// Create timestamped backup directory
 	timestamp := time.Now().UTC().Format("2006-01-02-150405")
 	backupDir := filepath.Join(bm.config.BackupDir, timestamp)
-	if err := os.MkdirAll(backupDir, 0755); err != nil {
+	if err := os.MkdirAll(backupDir, 0o755); err != nil {
 		return nil, fmt.Errorf("creating backup directory: %w", err)
 	}
 
@@ -328,7 +328,7 @@ func (bm *BackupManager) CreateBackup(ctx context.Context) (*BackupMetadata, err
 	if err != nil {
 		return nil, fmt.Errorf("marshaling metadata: %w", err)
 	}
-	if err := os.WriteFile(metadataPath, metadataBytes, 0644); err != nil {
+	if err := os.WriteFile(metadataPath, metadataBytes, 0o600); err != nil {
 		return nil, fmt.Errorf("writing metadata: %w", err)
 	}
 
@@ -704,7 +704,7 @@ func (bm *BackupManager) ListBackups() ([]BackupMetadata, error) {
 		return nil, err
 	}
 
-	var backups []BackupMetadata
+	backups := make([]BackupMetadata, 0, len(entries))
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue

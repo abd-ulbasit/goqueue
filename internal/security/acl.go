@@ -54,13 +54,13 @@ const (
 type Operation string
 
 const (
-	OpRead    Operation = "read"
-	OpWrite   Operation = "write"
-	OpCreate  Operation = "create"
-	OpDelete  Operation = "delete"
+	OpRead     Operation = "read"
+	OpWrite    Operation = "write"
+	OpCreate   Operation = "create"
+	OpDelete   Operation = "delete"
 	OpDescribe Operation = "describe"
-	OpAlter   Operation = "alter"
-	OpAll     Operation = "all"
+	OpAlter    Operation = "alter"
+	OpAll      Operation = "all"
 )
 
 // ACL represents a single access control entry.
@@ -167,8 +167,8 @@ func (m *ACLManager) CheckAccess(key *APIKey, resourceType ResourceType, resourc
 
 	// Build list of principals to check
 	principals := []string{
-		key.ID,  // Exact key ID
-		"*",     // Wildcard (any authenticated user)
+		key.ID, // Exact key ID
+		"*",    // Wildcard (any authenticated user)
 	}
 	for _, role := range key.Roles {
 		principals = append(principals, "role:"+role)
@@ -437,11 +437,11 @@ func (m *SecurityManager) IsMTLSEnabled() bool {
 // Instead of checking permissions in every handler, we define once at route level.
 //
 // HOW IT WORKS:
-//   1. Client makes request to protected route
-//   2. Auth middleware already extracted API key and set in context
-//   3. RequirePermission middleware checks if that key has required permission
-//   4. If yes → request proceeds to handler
-//   5. If no → 403 Forbidden response
+//  1. Client makes request to protected route
+//  2. Auth middleware already extracted API key and set in context
+//  3. RequirePermission middleware checks if that key has required permission
+//  4. If yes → request proceeds to handler
+//  5. If no → 403 Forbidden response
 //
 // COMPARISON:
 //   - Express.js: router.use(requirePermission("admin"))
@@ -510,8 +510,8 @@ func (m *SecurityManager) RequirePermission(perm Permission) func(http.Handler) 
 // This is more granular than RequirePermission - it checks specific topic access.
 //
 // EXAMPLE:
-//   r.With(sec.RequireTopicAccess(security.OpWrite)).Post("/publish", handler)
 //
+//	r.With(sec.RequireTopicAccess(security.OpWrite)).Post("/publish", handler)
 func (m *SecurityManager) RequireTopicAccess(op Operation) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

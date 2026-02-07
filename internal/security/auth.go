@@ -597,14 +597,6 @@ func SecureCompare(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
-// min returns the smaller of two ints.
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 // LoadAPIKeyConfigFromEnv creates API key config from environment variables.
 //
 // Environment variables:

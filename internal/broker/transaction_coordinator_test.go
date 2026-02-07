@@ -11,7 +11,7 @@
 //   - Crash recovery
 //
 // TEST ORGANIZATION:
-//   - TestInitProducerId_*: Producer initialization tests
+//   - TestInitProducerID_*: Producer initialization tests
 //   - TestBeginTransaction_*: Transaction begin tests
 //   - TestCommitTransaction_*: Transaction commit tests
 //   - TestAbortTransaction_*: Transaction abort tests
@@ -86,10 +86,10 @@ type controlRecordCall struct {
 	isCommit  bool
 	pid       int64
 	epoch     int16
-	txnId     string
+	txnID     string
 }
 
-func (m *mockTransactionBroker) WriteControlRecord(topic string, partition int, isCommit bool, pid int64, epoch int16, txnId string) error {
+func (m *mockTransactionBroker) WriteControlRecord(topic string, partition int, isCommit bool, pid int64, epoch int16, txnID string) error {
 	if m.writeErr != nil {
 		return m.writeErr
 	}
@@ -99,7 +99,7 @@ func (m *mockTransactionBroker) WriteControlRecord(topic string, partition int, 
 		isCommit:  isCommit,
 		pid:       pid,
 		epoch:     epoch,
-		txnId:     txnId,
+		txnID:     txnID,
 	})
 	return nil
 }
@@ -112,8 +112,8 @@ func (m *mockTransactionBroker) GetTopic(name string) (*Topic, error) {
 	return topic, nil
 }
 
-func (m *mockTransactionBroker) ClearUncommittedTransaction(txnId string) []partitionOffset {
-	m.clearedTransactions = append(m.clearedTransactions, txnId)
+func (m *mockTransactionBroker) ClearUncommittedTransaction(txnID string) []partitionOffset {
+	m.clearedTransactions = append(m.clearedTransactions, txnID)
 	return nil // Mock doesn't track actual offsets
 }
 
@@ -121,7 +121,7 @@ func (m *mockTransactionBroker) MarkTransactionAborted(offsets []partitionOffset
 	// Mock - no-op
 }
 
-func (m *mockTransactionBroker) TrackUncommittedOffset(topic string, partition int, offset int64, txnId string, producerId int64, epoch int16) {
+func (m *mockTransactionBroker) TrackUncommittedOffset(topic string, partition int, offset int64, txnID string, producerID int64, epoch int16) {
 	// Mock - no-op (recovery tracking)
 }
 
@@ -139,68 +139,68 @@ var _ = time.Now
 // PRODUCER INITIALIZATION TESTS
 // =============================================================================
 
-func TestInitProducerId_NewTransactionalId(t *testing.T) {
+func TestInitProducerID_NewTransactionalID(t *testing.T) {
 	// Test: First-time producer initialization should get a valid PID and Epoch=0
 	coord, _, cleanup := testTransactionCoordinator(t)
 	defer cleanup()
 
-	pid, err := coord.InitProducerId("my-producer", 60000)
+	pid, err := coord.InitProducerID("my-producer", 60000)
 	if err != nil {
-		t.Fatalf("InitProducerId failed: %v", err)
+		t.Fatalf("InitProducerID failed: %v", err)
 	}
 
 	// PID should be positive (implementation starts from 1)
-	if pid.ProducerId < 0 {
-		t.Errorf("expected positive PID, got %d", pid.ProducerId)
+	if pid.ProducerID < 0 {
+		t.Errorf("expected positive PID, got %d", pid.ProducerID)
 	}
 	if pid.Epoch != 0 {
 		t.Errorf("expected first epoch to be 0, got %d", pid.Epoch)
 	}
 }
 
-func TestInitProducerId_ReinitializeBumpsEpoch(t *testing.T) {
+func TestInitProducerID_ReinitializeBumpsEpoch(t *testing.T) {
 	// Test: Re-initializing with same transactional_id should bump epoch
 	coord, _, cleanup := testTransactionCoordinator(t)
 	defer cleanup()
 
 	// First init
-	pid1, err := coord.InitProducerId("my-producer", 60000)
+	pid1, err := coord.InitProducerID("my-producer", 60000)
 	if err != nil {
-		t.Fatalf("first InitProducerId failed: %v", err)
+		t.Fatalf("first InitProducerID failed: %v", err)
 	}
 
 	// Second init (same transactional_id)
-	pid2, err := coord.InitProducerId("my-producer", 60000)
+	pid2, err := coord.InitProducerID("my-producer", 60000)
 	if err != nil {
-		t.Fatalf("second InitProducerId failed: %v", err)
+		t.Fatalf("second InitProducerID failed: %v", err)
 	}
 
 	// Should be same PID but bumped epoch
-	if pid2.ProducerId != pid1.ProducerId {
-		t.Errorf("expected same PID %d, got %d", pid1.ProducerId, pid2.ProducerId)
+	if pid2.ProducerID != pid1.ProducerID {
+		t.Errorf("expected same PID %d, got %d", pid1.ProducerID, pid2.ProducerID)
 	}
 	if pid2.Epoch != pid1.Epoch+1 {
 		t.Errorf("expected epoch %d, got %d", pid1.Epoch+1, pid2.Epoch)
 	}
 }
 
-func TestInitProducerId_DifferentTransactionalIds(t *testing.T) {
+func TestInitProducerID_DifferentTransactionalIDs(t *testing.T) {
 	// Test: Different transactional_ids should get different PIDs
 	coord, _, cleanup := testTransactionCoordinator(t)
 	defer cleanup()
 
-	pid1, err := coord.InitProducerId("producer-1", 60000)
+	pid1, err := coord.InitProducerID("producer-1", 60000)
 	if err != nil {
-		t.Fatalf("InitProducerId failed: %v", err)
+		t.Fatalf("InitProducerID failed: %v", err)
 	}
 
-	pid2, err := coord.InitProducerId("producer-2", 60000)
+	pid2, err := coord.InitProducerID("producer-2", 60000)
 	if err != nil {
-		t.Fatalf("InitProducerId failed: %v", err)
+		t.Fatalf("InitProducerID failed: %v", err)
 	}
 
-	if pid1.ProducerId == pid2.ProducerId {
-		t.Errorf("expected different PIDs, both got %d", pid1.ProducerId)
+	if pid1.ProducerID == pid2.ProducerID {
+		t.Errorf("expected different PIDs, both got %d", pid1.ProducerID)
 	}
 }
 
@@ -213,18 +213,18 @@ func TestBeginTransaction_Success(t *testing.T) {
 	defer cleanup()
 
 	// Initialize producer first
-	pid, err := coord.InitProducerId("my-producer", 60000)
+	pid, err := coord.InitProducerID("my-producer", 60000)
 	if err != nil {
-		t.Fatalf("InitProducerId failed: %v", err)
+		t.Fatalf("InitProducerID failed: %v", err)
 	}
 
 	// Begin transaction
-	txnId, err := coord.BeginTransaction("my-producer", pid)
+	txnID, err := coord.BeginTransaction("my-producer", pid)
 	if err != nil {
 		t.Fatalf("BeginTransaction failed: %v", err)
 	}
 
-	if txnId == "" {
+	if txnID == "" {
 		t.Error("expected non-empty transaction ID")
 	}
 
@@ -239,7 +239,7 @@ func TestBeginTransaction_FailsWithoutInit(t *testing.T) {
 	coord, _, cleanup := testTransactionCoordinator(t)
 	defer cleanup()
 
-	pid := ProducerIdAndEpoch{ProducerId: 999, Epoch: 0}
+	pid := ProducerIDAndEpoch{ProducerID: 999, Epoch: 0}
 
 	_, err := coord.BeginTransaction("unknown-producer", pid)
 	if err == nil {
@@ -252,15 +252,15 @@ func TestBeginTransaction_FailsWithStaleEpoch(t *testing.T) {
 	defer cleanup()
 
 	// Initialize producer
-	pid1, err := coord.InitProducerId("my-producer", 60000)
+	pid1, err := coord.InitProducerID("my-producer", 60000)
 	if err != nil {
-		t.Fatalf("InitProducerId failed: %v", err)
+		t.Fatalf("InitProducerID failed: %v", err)
 	}
 
 	// Re-initialize to bump epoch
-	_, err = coord.InitProducerId("my-producer", 60000)
+	_, err = coord.InitProducerID("my-producer", 60000)
 	if err != nil {
-		t.Fatalf("second InitProducerId failed: %v", err)
+		t.Fatalf("second InitProducerID failed: %v", err)
 	}
 
 	// Try to begin transaction with old epoch
@@ -278,7 +278,7 @@ func TestCommitTransaction_Success(t *testing.T) {
 	mockBroker.addMockTopic("orders", 3)
 
 	// Initialize and begin transaction
-	pid, _ := coord.InitProducerId("my-producer", 60000)
+	pid, _ := coord.InitProducerID("my-producer", 60000)
 	_, err := coord.BeginTransaction("my-producer", pid)
 	if err != nil {
 		t.Fatalf("BeginTransaction failed: %v", err)
@@ -326,7 +326,7 @@ func TestAbortTransaction_Success(t *testing.T) {
 	mockBroker.addMockTopic("orders", 3)
 
 	// Initialize and begin transaction
-	pid, _ := coord.InitProducerId("my-producer", 60000)
+	pid, _ := coord.InitProducerID("my-producer", 60000)
 	_, err := coord.BeginTransaction("my-producer", pid)
 	if err != nil {
 		t.Fatalf("BeginTransaction failed: %v", err)
@@ -366,7 +366,7 @@ func TestCheckSequence_ValidSequence(t *testing.T) {
 	defer cleanup()
 
 	// Initialize producer
-	pid, _ := coord.InitProducerId("my-producer", 60000)
+	pid, _ := coord.InitProducerID("my-producer", 60000)
 
 	// First sequence should be 0
 	_, isDup, err := coord.CheckSequence(pid, "orders", 0, 0, 100)
@@ -391,7 +391,7 @@ func TestCheckSequence_DuplicateDetection(t *testing.T) {
 	coord, _, cleanup := testTransactionCoordinator(t)
 	defer cleanup()
 
-	pid, _ := coord.InitProducerId("my-producer", 60000)
+	pid, _ := coord.InitProducerID("my-producer", 60000)
 
 	// First message
 	_, _, err := coord.CheckSequence(pid, "orders", 0, 0, 100)
@@ -416,7 +416,7 @@ func TestCheckSequence_OutOfOrderReject(t *testing.T) {
 	coord, _, cleanup := testTransactionCoordinator(t)
 	defer cleanup()
 
-	pid, _ := coord.InitProducerId("my-producer", 60000)
+	pid, _ := coord.InitProducerID("my-producer", 60000)
 
 	// First message (seq=0)
 	_, _, err := coord.CheckSequence(pid, "orders", 0, 0, 100)
@@ -435,7 +435,7 @@ func TestCheckSequence_PerPartitionTracking(t *testing.T) {
 	coord, _, cleanup := testTransactionCoordinator(t)
 	defer cleanup()
 
-	pid, _ := coord.InitProducerId("my-producer", 60000)
+	pid, _ := coord.InitProducerID("my-producer", 60000)
 
 	// Partition 0, seq 0
 	_, isDup, err := coord.CheckSequence(pid, "orders", 0, 0, 100)
@@ -465,7 +465,7 @@ func TestHeartbeat_UpdatesLastSeen(t *testing.T) {
 	defer cleanup()
 
 	// Initialize producer
-	pid, _ := coord.InitProducerId("my-producer", 60000)
+	pid, _ := coord.InitProducerID("my-producer", 60000)
 
 	// Send heartbeat
 	err := coord.Heartbeat("my-producer", pid)
@@ -479,10 +479,10 @@ func TestHeartbeat_FailsWithStaleEpoch(t *testing.T) {
 	defer cleanup()
 
 	// Initialize producer
-	pid1, _ := coord.InitProducerId("my-producer", 60000)
+	pid1, _ := coord.InitProducerID("my-producer", 60000)
 
 	// Re-initialize (bump epoch)
-	pid2, _ := coord.InitProducerId("my-producer", 60000)
+	pid2, _ := coord.InitProducerID("my-producer", 60000)
 	_ = pid2 // Use pid2 to avoid unused variable
 
 	// Heartbeat with old epoch should fail
@@ -523,9 +523,9 @@ func TestRecovery_ProducerStatePreserved(t *testing.T) {
 		t.Fatalf("failed to create first coordinator: %v", err)
 	}
 
-	pid1, err := coord1.InitProducerId("my-producer", 60000)
+	pid1, err := coord1.InitProducerID("my-producer", 60000)
 	if err != nil {
-		t.Fatalf("InitProducerId failed: %v", err)
+		t.Fatalf("InitProducerID failed: %v", err)
 	}
 
 	// Force snapshot write
@@ -539,13 +539,13 @@ func TestRecovery_ProducerStatePreserved(t *testing.T) {
 	defer coord2.Close()
 
 	// Re-initialize same transactional_id - should get same PID with bumped epoch
-	pid2, err := coord2.InitProducerId("my-producer", 60000)
+	pid2, err := coord2.InitProducerID("my-producer", 60000)
 	if err != nil {
-		t.Fatalf("InitProducerId after recovery failed: %v", err)
+		t.Fatalf("InitProducerID after recovery failed: %v", err)
 	}
 
-	if pid2.ProducerId != pid1.ProducerId {
-		t.Errorf("expected same PID %d after recovery, got %d", pid1.ProducerId, pid2.ProducerId)
+	if pid2.ProducerID != pid1.ProducerID {
+		t.Errorf("expected same PID %d after recovery, got %d", pid1.ProducerID, pid2.ProducerID)
 	}
 	if pid2.Epoch != pid1.Epoch+1 {
 		t.Errorf("expected epoch %d after recovery, got %d", pid1.Epoch+1, pid2.Epoch)
@@ -565,7 +565,7 @@ func TestTransaction_MultiplePartitions(t *testing.T) {
 	mockBroker.addMockTopic("inventory", 2)
 
 	// Initialize and begin transaction
-	pid, _ := coord.InitProducerId("my-producer", 60000)
+	pid, _ := coord.InitProducerID("my-producer", 60000)
 	_, err := coord.BeginTransaction("my-producer", pid)
 	if err != nil {
 		t.Fatalf("BeginTransaction failed: %v", err)
@@ -617,7 +617,7 @@ func TestZombieFencing_OldEpochRejected(t *testing.T) {
 	mockBroker.addMockTopic("orders", 3)
 
 	// Initialize producer
-	pid1, _ := coord.InitProducerId("my-producer", 60000)
+	pid1, _ := coord.InitProducerID("my-producer", 60000)
 
 	// Begin transaction with epoch 0
 	_, err := coord.BeginTransaction("my-producer", pid1)
@@ -626,7 +626,7 @@ func TestZombieFencing_OldEpochRejected(t *testing.T) {
 	}
 
 	// Simulate producer restart - re-initialize (bumps epoch)
-	pid2, _ := coord.InitProducerId("my-producer", 60000)
+	pid2, _ := coord.InitProducerID("my-producer", 60000)
 
 	// Old producer tries to add partition (should fail - zombie fenced)
 	err = coord.AddPartitionToTransaction("my-producer", pid1, "orders", 0)
@@ -653,14 +653,14 @@ func TestZombieFencing_OldEpochRejected(t *testing.T) {
 func TestIdempotentProducer_NewProducer(t *testing.T) {
 	manager := NewIdempotentProducerManager(DefaultIdempotentProducerManagerConfig())
 
-	pid, err := manager.allocateNewProducerId()
+	pid, err := manager.allocateNewProducerID()
 	if err != nil {
-		t.Fatalf("allocateNewProducerId failed: %v", err)
+		t.Fatalf("allocateNewProducerID failed: %v", err)
 	}
 
 	// First PID should be positive
-	if pid.ProducerId < 0 {
-		t.Errorf("expected positive PID, got %d", pid.ProducerId)
+	if pid.ProducerID < 0 {
+		t.Errorf("expected positive PID, got %d", pid.ProducerID)
 	}
 	if pid.Epoch != 0 {
 		t.Errorf("expected epoch 0, got %d", pid.Epoch)
@@ -672,17 +672,17 @@ func TestIdempotentProducer_SequentialPIDs(t *testing.T) {
 
 	var firstPid int64 = -1
 	for i := 0; i < 10; i++ {
-		pid, err := manager.allocateNewProducerId()
+		pid, err := manager.allocateNewProducerID()
 		if err != nil {
-			t.Fatalf("allocateNewProducerId failed at %d: %v", i, err)
+			t.Fatalf("allocateNewProducerID failed at %d: %v", i, err)
 		}
 		if firstPid == -1 {
-			firstPid = pid.ProducerId
+			firstPid = pid.ProducerID
 		}
 		// Each subsequent PID should be 1 more than the previous
 		expectedPid := firstPid + int64(i)
-		if pid.ProducerId != expectedPid {
-			t.Errorf("expected PID %d, got %d", expectedPid, pid.ProducerId)
+		if pid.ProducerID != expectedPid {
+			t.Errorf("expected PID %d, got %d", expectedPid, pid.ProducerID)
 		}
 	}
 }
@@ -708,8 +708,8 @@ func TestTransactionLog_WriteAndReplay(t *testing.T) {
 
 	// Write some records using proper API
 	initData := InitProducerData{
-		TransactionalId:      "prod-1",
-		ProducerId:           0,
+		TransactionalID:      "prod-1",
+		ProducerID:           0,
 		Epoch:                0,
 		TransactionTimeoutMs: 60000,
 	}
@@ -718,9 +718,9 @@ func TestTransactionLog_WriteAndReplay(t *testing.T) {
 	}
 
 	beginData := BeginTxnData{
-		TransactionalId: "prod-1",
-		TransactionId:   "txn-1",
-		ProducerId:      0,
+		TransactionalID: "prod-1",
+		TransactionID:   "txn-1",
+		ProducerID:      0,
 		Epoch:           0,
 	}
 	if err := txnLog.WriteRecord(WALRecordBeginTxn, beginData); err != nil {
@@ -767,10 +767,10 @@ func TestTransactionLog_Snapshot(t *testing.T) {
 
 	// Create a snapshot
 	snapshot := ProducerStateSnapshot{
-		NextProducerId: 5,
-		TransactionalIds: map[string]TransactionalIdStateSnapshot{
-			"prod-1": {TransactionalId: "prod-1", ProducerId: 0, Epoch: 2},
-			"prod-2": {TransactionalId: "prod-2", ProducerId: 1, Epoch: 0},
+		NextProducerID: 5,
+		TransactionalIDs: map[string]TransactionalIDStateSnapshot{
+			"prod-1": {TransactionalID: "prod-1", ProducerID: 0, Epoch: 2},
+			"prod-2": {TransactionalID: "prod-2", ProducerID: 1, Epoch: 0},
 		},
 		SequenceStates: make(map[string]SequenceStateSnapshot),
 	}
@@ -792,11 +792,11 @@ func TestTransactionLog_Snapshot(t *testing.T) {
 		t.Fatalf("LoadSnapshot failed: %v", err)
 	}
 
-	if loaded.NextProducerId != snapshot.NextProducerId {
-		t.Errorf("expected NextProducerId %d, got %d", snapshot.NextProducerId, loaded.NextProducerId)
+	if loaded.NextProducerID != snapshot.NextProducerID {
+		t.Errorf("expected NextProducerID %d, got %d", snapshot.NextProducerID, loaded.NextProducerID)
 	}
-	if len(loaded.TransactionalIds) != len(snapshot.TransactionalIds) {
-		t.Errorf("expected %d transactional IDs, got %d", len(snapshot.TransactionalIds), len(loaded.TransactionalIds))
+	if len(loaded.TransactionalIDs) != len(snapshot.TransactionalIDs) {
+		t.Errorf("expected %d transactional IDs, got %d", len(snapshot.TransactionalIDs), len(loaded.TransactionalIDs))
 	}
 }
 
@@ -808,13 +808,13 @@ func TestControlRecord_CommitRecord(t *testing.T) {
 	// Test control record payload encoding
 	pid := uint64(12345)
 	epoch := uint16(2)
-	txnId := "my-transaction"
+	txnID := "my-transaction"
 
 	// Create a commit control record manually
 	payload := map[string]interface{}{
-		"producerId":      pid,
+		"producerID":      pid,
 		"epoch":           epoch,
-		"transactionalId": txnId,
+		"transactionalId": txnID,
 	}
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
@@ -827,8 +827,8 @@ func TestControlRecord_CommitRecord(t *testing.T) {
 		t.Fatalf("failed to unmarshal payload: %v", err)
 	}
 
-	if decoded["transactionalId"] != txnId {
-		t.Errorf("expected transactionalId %s, got %v", txnId, decoded["transactionalId"])
+	if decoded["transactionalId"] != txnID {
+		t.Errorf("expected transactionalId %s, got %v", txnID, decoded["transactionalId"])
 	}
 }
 
@@ -857,7 +857,7 @@ func BenchmarkCheckSequence(b *testing.B) {
 	coord, _ := NewTransactionCoordinator(config, mockBroker)
 	defer coord.Close()
 
-	pid, _ := coord.InitProducerId("bench-producer", 60000)
+	pid, _ := coord.InitProducerID("bench-producer", 60000)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -866,7 +866,7 @@ func BenchmarkCheckSequence(b *testing.B) {
 	}
 }
 
-func BenchmarkInitProducerId(b *testing.B) {
+func BenchmarkInitProducerID(b *testing.B) {
 	tmpDir, _ := os.MkdirTemp("", "txn-bench-*")
 	defer os.RemoveAll(tmpDir)
 
@@ -889,8 +889,8 @@ func BenchmarkInitProducerId(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		txnId := filepath.Join("producer", string(rune('a'+i%26)))
-		coord.InitProducerId(txnId, 60000)
+		txnID := filepath.Join("producer", string(rune('a'+i%26)))
+		coord.InitProducerID(txnID, 60000)
 	}
 }
 
@@ -911,8 +911,8 @@ func TestAbortTransactionWithRetry_SuccessOnFirstAttempt(t *testing.T) {
 	mockBroker.addMockTopic("orders", 3)
 
 	// Initialize and begin transaction
-	pid, _ := coord.InitProducerId("retry-producer", 60000)
-	txnId, err := coord.BeginTransaction("retry-producer", pid)
+	pid, _ := coord.InitProducerID("retry-producer", 60000)
+	txnID, err := coord.BeginTransaction("retry-producer", pid)
 	if err != nil {
 		t.Fatalf("BeginTransaction failed: %v", err)
 	}
@@ -924,7 +924,7 @@ func TestAbortTransactionWithRetry_SuccessOnFirstAttempt(t *testing.T) {
 	}
 
 	// Call abortTransactionWithRetry directly (this is called when commit fails)
-	err = coord.abortTransactionWithRetry("retry-producer", txnId, pid)
+	err = coord.abortTransactionWithRetry("retry-producer", txnID, pid)
 	if err != nil {
 		t.Fatalf("abortTransactionWithRetry failed: %v", err)
 	}

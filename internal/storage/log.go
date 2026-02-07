@@ -148,7 +148,7 @@ type Log struct {
 // Creates the first segment starting at offset 0.
 func NewLog(dir string) (*Log, error) {
 	// Create directory if needed
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("failed to create log directory: %w", err)
 	}
 
@@ -193,7 +193,7 @@ func LoadLog(dir string) (*Log, error) {
 	}
 
 	// Parse segment base offsets from filenames
-	var baseOffsets []int64
+	baseOffsets := make([]int64, 0, len(entries))
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
@@ -287,7 +287,7 @@ func (l *Log) Append(msg *Message) (int64, error) {
 
 	// Try to append to active segment
 	offset, err := l.activeSegment.Append(msg)
-	if err == ErrSegmentFull {
+	if errors.Is(err, ErrSegmentFull) {
 		// Segment is full, need to rollover
 		if err := l.rollover(); err != nil {
 			return 0, fmt.Errorf("failed to rollover segment: %w", err)
@@ -354,7 +354,7 @@ func (l *Log) AppendAtOffset(msg *Message, expectedOffset int64) (int64, error) 
 
 	// Normal append at expected offset
 	offset, err := l.activeSegment.Append(msg)
-	if err == ErrSegmentFull {
+	if errors.Is(err, ErrSegmentFull) {
 		if err := l.rollover(); err != nil {
 			return 0, fmt.Errorf("failed to rollover segment: %w", err)
 		}
@@ -444,7 +444,7 @@ func (l *Log) AppendBatch(msgs []*Message) ([]int64, error) {
 	for i, msg := range msgs {
 		// Try fast append (no flush)
 		offset, err := l.activeSegment.AppendFast(msg)
-		if err == ErrSegmentFull {
+		if errors.Is(err, ErrSegmentFull) {
 			// Flush current segment before rollover
 			if flushErr := l.activeSegment.FlushBuffer(); flushErr != nil {
 				return offsets[:i], fmt.Errorf("failed to flush before rollover: %w", flushErr)
@@ -459,7 +459,7 @@ func (l *Log) AppendBatch(msgs []*Message) ([]int64, error) {
 
 		if err != nil {
 			// Flush what we have so far
-			l.activeSegment.FlushBuffer()
+			_ = l.activeSegment.FlushBuffer()
 			return offsets[:i], fmt.Errorf("failed to append message %d: %w", i, err)
 		}
 
@@ -488,7 +488,7 @@ func (l *Log) AppendFast(msg *Message) (int64, error) {
 	}
 
 	offset, err := l.activeSegment.AppendFast(msg)
-	if err == ErrSegmentFull {
+	if errors.Is(err, ErrSegmentFull) {
 		// Flush before rollover
 		if flushErr := l.activeSegment.FlushBuffer(); flushErr != nil {
 			return 0, fmt.Errorf("failed to flush before rollover: %w", flushErr)
@@ -895,7 +895,7 @@ func ListSegmentFiles(dir string) ([]int64, error) {
 		return nil, err
 	}
 
-	var offsets []int64
+	offsets := make([]int64, 0, len(entries))
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".log") {
 			continue

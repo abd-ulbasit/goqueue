@@ -513,7 +513,7 @@ func (s *Server) cancelReassignment(w http.ResponseWriter, r *http.Request) {
 		"message": "reassignment cancellation requested",
 	})
 
-	s.logger.Info("reassignment cancelled", "id", reassignmentID)
+	s.logger.Info("reassignment canceled", "id", reassignmentID)
 }
 
 // =============================================================================

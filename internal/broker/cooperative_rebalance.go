@@ -487,7 +487,7 @@ func (rc *RebalanceContext) ForceCompleteRevocation(memberID string) []TopicPart
 		return nil
 	}
 
-	var partitions []TopicPartition
+	partitions := make([]TopicPartition, 0, len(pending.Partitions))
 	for tp := range pending.Partitions {
 		partitions = append(partitions, tp)
 	}

@@ -322,7 +322,7 @@ type SnapshotWriter struct {
 //   - {snapshotDir}/snapshot-{type}-{offset}-{timestamp}.bin
 func NewSnapshotWriter(snapshotDir string, snapshotType SnapshotType, lastOffset int64) (*SnapshotWriter, error) {
 	// Ensure directory exists
-	if err := os.MkdirAll(snapshotDir, 0755); err != nil {
+	if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
 		return nil, fmt.Errorf("failed to create snapshot directory: %w", err)
 	}
 
@@ -512,7 +512,7 @@ func (r *SnapshotReader) ReadAllEntries() ([]SnapshotEntry, error) {
 
 	for {
 		entry, err := r.ReadEntry()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {

@@ -94,8 +94,8 @@ var (
 	// ErrInvalidReassignment is returned when the reassignment request is invalid.
 	ErrInvalidReassignment = errors.New("invalid reassignment request")
 
-	// ErrReassignmentCancelled is returned when a reassignment is cancelled.
-	ErrReassignmentCancelled = errors.New("reassignment was cancelled")
+	// ErrReassignmentCanceled is returned when a reassignment is canceled.
+	ErrReassignmentCanceled = errors.New("reassignment was canceled")
 
 	// ErrReplicaCatchupTimeout is returned when new replica fails to catch up in time.
 	ErrReplicaCatchupTimeout = errors.New("new replica failed to catch up within timeout")
@@ -124,8 +124,8 @@ const (
 	// ReassignmentStateFailed means reassignment failed.
 	ReassignmentStateFailed ReassignmentState = "failed"
 
-	// ReassignmentStateCancelled means reassignment was cancelled.
-	ReassignmentStateCancelled ReassignmentState = "cancelled"
+	// ReassignmentStateCanceled means reassignment was canceled.
+	ReassignmentStateCanceled ReassignmentState = "canceled"
 )
 
 // PartitionReassignment describes a single partition's reassignment.
@@ -421,8 +421,8 @@ func (rm *ReassignmentManager) runReassignment(ctx context.Context, status *Reas
 	for _, pr := range status.Request.Partitions {
 		select {
 		case <-ctx.Done():
-			rm.updateState(status.ID, ReassignmentStateCancelled)
-			rm.completeReassignment(status.ID, ErrReassignmentCancelled)
+			rm.updateState(status.ID, ReassignmentStateCanceled)
+			rm.completeReassignment(status.ID, ErrReassignmentCanceled)
 			return
 		default:
 		}
@@ -537,7 +537,7 @@ func (rm *ReassignmentManager) reassignPartition(
 //
 // GOROUTINE LEAK FIX:
 // Previously used time.After() which creates a new timer goroutine on each
-// iteration. If context is cancelled, those timer goroutines leak until they
+// iteration. If context is canceled, those timer goroutines leak until they
 // fire. Now uses time.NewTimer with proper cleanup via timer.Stop().
 func (rm *ReassignmentManager) waitForCatchup(
 	ctx context.Context,
@@ -714,10 +714,10 @@ func (rm *ReassignmentManager) completeReassignment(reassignmentID string, err e
 	if err != nil {
 		// Cancellation is semantically different from failure.
 		//
-		// WHY: Callers need to distinguish "operator/user cancelled" from
+		// WHY: Callers need to distinguish "operator/user canceled" from
 		// "reassignment failed due to an error".
-		if errors.Is(err, ErrReassignmentCancelled) || errors.Is(err, context.Canceled) {
-			status.State = ReassignmentStateCancelled
+		if errors.Is(err, ErrReassignmentCanceled) || errors.Is(err, context.Canceled) {
+			status.State = ReassignmentStateCanceled
 		} else {
 			status.State = ReassignmentStateFailed
 		}
@@ -872,7 +872,7 @@ func (rm *ReassignmentManager) setDifference(a, b []cluster.NodeID) []cluster.No
 
 // copyStatus creates a deep copy of ReassignmentStatus.
 func (rm *ReassignmentManager) copyStatus(status *ReassignmentStatus) *ReassignmentStatus {
-	copy := &ReassignmentStatus{
+	statusClone := &ReassignmentStatus{
 		ID:        status.ID,
 		State:     status.State,
 		Request:   status.Request,
@@ -883,7 +883,7 @@ func (rm *ReassignmentManager) copyStatus(status *ReassignmentStatus) *Reassignm
 
 	if status.CompletedAt != nil {
 		t := *status.CompletedAt
-		copy.CompletedAt = &t
+		statusClone.CompletedAt = &t
 	}
 
 	for k, v := range status.Progress {
@@ -892,8 +892,8 @@ func (rm *ReassignmentManager) copyStatus(status *ReassignmentStatus) *Reassignm
 		for nk, nv := range v.ReplicaOffsets {
 			progressCopy.ReplicaOffsets[nk] = nv
 		}
-		copy.Progress[k] = &progressCopy
+		statusClone.Progress[k] = &progressCopy
 	}
 
-	return copy
+	return statusClone
 }

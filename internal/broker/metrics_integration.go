@@ -121,7 +121,7 @@ func InstrumentPublish(topic string, sizeBytes int, startTime time.Time) {
 //
 // Metrics recorded:
 //   - goqueue_broker_messages_failed_total (counter)
-func InstrumentPublishError(topic string, errorType string) {
+func InstrumentPublishError(topic, errorType string) {
 	m := metrics.Get()
 	if m == nil {
 		return
@@ -488,7 +488,7 @@ func InstrumentConnectionClosed() {
 //
 // Metrics recorded:
 //   - goqueue_storage_bytes_written_total (counter)
-func InstrumentStorageWrite(topic string, partition int, bytes int) {
+func InstrumentStorageWrite(topic string, partition, bytes int) {
 	m := metrics.Get()
 	if m == nil {
 		return
@@ -507,7 +507,7 @@ func InstrumentStorageWrite(topic string, partition int, bytes int) {
 //
 // Metrics recorded:
 //   - goqueue_storage_bytes_read_total (counter)
-func InstrumentStorageRead(topic string, partition int, bytes int) {
+func InstrumentStorageRead(topic string, partition, bytes int) {
 	m := metrics.Get()
 	if m == nil {
 		return

@@ -136,6 +136,9 @@ func TestPartitionScaleResult_Structure(t *testing.T) {
 		PartitionsAdded:   []int{4, 5, 6, 7},
 	}
 
+	if result.TopicName != "test-topic" {
+		t.Error("topic name should match")
+	}
 	if !result.Success {
 		t.Error("success should be true")
 	}

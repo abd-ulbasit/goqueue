@@ -195,7 +195,7 @@ func (im *ISRManager) GetFollowerProgress(nodeID NodeID) *FollowerProgress {
 
 // RecordFetch records that a follower fetched from the leader.
 // This is called when leader receives a fetch request.
-func (im *ISRManager) RecordFetch(followerID NodeID, fetchOffset int64, leaderLEO int64) {
+func (im *ISRManager) RecordFetch(followerID NodeID, fetchOffset, leaderLEO int64) {
 	im.mu.Lock()
 	defer im.mu.Unlock()
 

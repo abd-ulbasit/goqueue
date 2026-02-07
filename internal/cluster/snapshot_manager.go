@@ -54,11 +54,13 @@ import (
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -90,7 +92,7 @@ func NewSnapshotManager(dataDir string, logger *slog.Logger) *SnapshotManager {
 	snapshotDir := filepath.Join(dataDir, "snapshots")
 
 	// Ensure snapshot directory exists.
-	if err := os.MkdirAll(snapshotDir, 0755); err != nil {
+	if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
 		logger.Error("failed to create snapshot directory", "error", err)
 	}
 
@@ -113,7 +115,7 @@ func NewSnapshotManager(dataDir string, logger *slog.Logger) *SnapshotManager {
 
 // CreateSnapshot creates a snapshot of a partition.
 // Called by leader when a follower is too far behind.
-func (sm *SnapshotManager) CreateSnapshot(topic string, partition int, logDir string, lastOffset int64, epoch int64) (*Snapshot, error) {
+func (sm *SnapshotManager) CreateSnapshot(topic string, partition int, logDir string, lastOffset, epoch int64) (*Snapshot, error) {
 	key := partitionKey(topic, partition)
 	sm.logger.Info("creating snapshot",
 		"topic", topic,
@@ -276,7 +278,7 @@ func (sm *SnapshotManager) GetSnapshotPath(topic string, partition int) string {
 
 // LoadSnapshot loads a snapshot into the local log directory.
 // This replaces the existing log with the snapshot contents.
-func (sm *SnapshotManager) LoadSnapshot(snapshotPath string, targetDir string, expectedChecksum string) error {
+func (sm *SnapshotManager) LoadSnapshot(snapshotPath, targetDir, expectedChecksum string) error {
 	sm.logger.Info("loading snapshot",
 		"path", snapshotPath,
 		"target", targetDir)
@@ -295,7 +297,7 @@ func (sm *SnapshotManager) LoadSnapshot(snapshotPath string, targetDir string, e
 
 	// Create temporary directory for extraction.
 	tempDir := targetDir + ".snapshot_tmp"
-	if err := os.MkdirAll(tempDir, 0755); err != nil {
+	if err := os.MkdirAll(tempDir, 0o755); err != nil {
 		return fmt.Errorf("failed to create temp directory: %w", err)
 	}
 
@@ -318,7 +320,7 @@ func (sm *SnapshotManager) LoadSnapshot(snapshotPath string, targetDir string, e
 	if err := os.Rename(tempDir, targetDir); err != nil {
 		// Restore backup if rename fails.
 		if _, err := os.Stat(backupDir); err == nil {
-			os.Rename(backupDir, targetDir)
+			_ = os.Rename(backupDir, targetDir)
 		}
 		return fmt.Errorf("failed to move snapshot to target: %w", err)
 	}
@@ -334,7 +336,7 @@ func (sm *SnapshotManager) LoadSnapshot(snapshotPath string, targetDir string, e
 }
 
 // extractSnapshot extracts a gzipped tar archive.
-func (sm *SnapshotManager) extractSnapshot(snapshotPath string, targetDir string) error {
+func (sm *SnapshotManager) extractSnapshot(snapshotPath, targetDir string) error {
 	// Open snapshot file.
 	file, err := os.Open(snapshotPath)
 	if err != nil {
@@ -355,17 +357,25 @@ func (sm *SnapshotManager) extractSnapshot(snapshotPath string, targetDir string
 	// Extract files.
 	for {
 		header, err := tarReader.Next()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
 			return fmt.Errorf("failed to read tar entry: %w", err)
 		}
 
-		targetPath := filepath.Join(targetDir, header.Name)
+		// Validate no directory traversal (gosec G305).
+		// Prevents malicious tar entries like "../../etc/passwd" from escaping
+		// the target directory.
+		cleanTarget := filepath.Clean(filepath.Join(targetDir, header.Name)) //nolint:gosec // G305: path traversal validated by HasPrefix check below
+		cleanDir := filepath.Clean(targetDir) + string(os.PathSeparator)
+		if !strings.HasPrefix(cleanTarget, cleanDir) {
+			return fmt.Errorf("illegal file path in archive: %s", header.Name)
+		}
+		targetPath := cleanTarget
 
 		// Create parent directory.
-		if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
 			return fmt.Errorf("failed to create directory: %w", err)
 		}
 
@@ -375,8 +385,10 @@ func (sm *SnapshotManager) extractSnapshot(snapshotPath string, targetDir string
 			return fmt.Errorf("failed to create file: %w", err)
 		}
 
-		// Copy content.
-		if _, err := io.Copy(outFile, tarReader); err != nil {
+		// Copy content with size limit to prevent decompression bombs (gosec G110).
+		// 10GB max per file — generous for queue data files, prevents DoS.
+		limitedReader := io.LimitReader(tarReader, 10<<30)
+		if _, err := io.Copy(outFile, limitedReader); err != nil {
 			outFile.Close()
 			return fmt.Errorf("failed to extract file: %w", err)
 		}

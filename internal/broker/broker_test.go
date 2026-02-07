@@ -793,9 +793,9 @@ func TestBroker_UncommittedTransactionFiltering(t *testing.T) {
 	coord := broker.GetTransactionCoordinator()
 
 	// Step 1: Initialize a transactional producer
-	pid, err := coord.InitProducerId("test-producer", 60000)
+	pid, err := coord.InitProducerID("test-producer", 60000)
 	if err != nil {
-		t.Fatalf("InitProducerId failed: %v", err)
+		t.Fatalf("InitProducerID failed: %v", err)
 	}
 
 	// Step 2: Begin transaction
@@ -807,7 +807,7 @@ func TestBroker_UncommittedTransactionFiltering(t *testing.T) {
 	// Step 3: Publish messages within the transaction
 	partition1, offset1, dup1, err := broker.PublishTransactional(
 		"txn-test", 0, []byte("key1"), []byte("value1"),
-		pid.ProducerId, pid.Epoch, 0,
+		pid.ProducerID, pid.Epoch, 0,
 	)
 	if err != nil {
 		t.Fatalf("PublishTransactional 1 failed: %v", err)
@@ -824,7 +824,7 @@ func TestBroker_UncommittedTransactionFiltering(t *testing.T) {
 
 	_, offset2, dup2, err := broker.PublishTransactional(
 		"txn-test", 0, []byte("key2"), []byte("value2"),
-		pid.ProducerId, pid.Epoch, 1,
+		pid.ProducerID, pid.Epoch, 1,
 	)
 	if err != nil {
 		t.Fatalf("PublishTransactional 2 failed: %v", err)
@@ -889,9 +889,9 @@ func TestBroker_AbortedTransactionFiltering(t *testing.T) {
 	coord := broker.GetTransactionCoordinator()
 
 	// Initialize producer
-	pid, err := coord.InitProducerId("abort-producer", 60000)
+	pid, err := coord.InitProducerID("abort-producer", 60000)
 	if err != nil {
-		t.Fatalf("InitProducerId failed: %v", err)
+		t.Fatalf("InitProducerID failed: %v", err)
 	}
 
 	// Begin transaction
@@ -903,7 +903,7 @@ func TestBroker_AbortedTransactionFiltering(t *testing.T) {
 	// Publish messages
 	partition, _, _, err := broker.PublishTransactional(
 		"abort-test", 0, []byte("key1"), []byte("value1"),
-		pid.ProducerId, pid.Epoch, 0,
+		pid.ProducerID, pid.Epoch, 0,
 	)
 	if err != nil {
 		t.Fatalf("PublishTransactional failed: %v", err)
@@ -916,7 +916,7 @@ func TestBroker_AbortedTransactionFiltering(t *testing.T) {
 
 	broker.PublishTransactional(
 		"abort-test", 0, []byte("key2"), []byte("value2"),
-		pid.ProducerId, pid.Epoch, 1,
+		pid.ProducerID, pid.Epoch, 1,
 	)
 
 	// Verify messages are hidden during transaction
@@ -976,9 +976,9 @@ func TestBroker_MixedTransactionalAndNormalMessages(t *testing.T) {
 	t.Logf("Normal message at offset %d", offset0)
 
 	// Step 2: Initialize producer and start transaction
-	pid, err := coord.InitProducerId("mixed-producer", 60000)
+	pid, err := coord.InitProducerID("mixed-producer", 60000)
 	if err != nil {
-		t.Fatalf("InitProducerId failed: %v", err)
+		t.Fatalf("InitProducerID failed: %v", err)
 	}
 
 	_, err = coord.BeginTransaction("mixed-producer", pid)
@@ -989,7 +989,7 @@ func TestBroker_MixedTransactionalAndNormalMessages(t *testing.T) {
 	// Publish transactional message
 	partition, offset1, _, err := broker.PublishTransactional(
 		"mixed-test", 0, []byte("key1"), []byte("txn-message"),
-		pid.ProducerId, pid.Epoch, 0,
+		pid.ProducerID, pid.Epoch, 0,
 	)
 	if err != nil {
 		t.Fatalf("PublishTransactional failed: %v", err)

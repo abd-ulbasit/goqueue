@@ -358,7 +358,7 @@ func TestReplicaManager_GetFollowerProgress(t *testing.T) {
 	}
 
 	// Follower progress might be nil initially (no fetches yet)
-	progress = rm.GetFollowerProgress("test-topic", 0, "follower-1")
+	_ = rm.GetFollowerProgress("test-topic", 0, "follower-1")
 	// This is expected to return nil until the follower actually fetches
 	// Just verify it doesn't panic
 }

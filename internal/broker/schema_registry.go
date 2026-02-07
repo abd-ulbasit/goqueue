@@ -352,7 +352,7 @@ func NewSchemaRegistry(config SchemaRegistryConfig) (*SchemaRegistry, error) {
 	}))
 
 	// Create schemas directory
-	if err := os.MkdirAll(config.DataDir, 0755); err != nil {
+	if err := os.MkdirAll(config.DataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("failed to create schemas directory: %w", err)
 	}
 
@@ -416,7 +416,7 @@ func (sr *SchemaRegistry) RegisterSchema(subject, schemaStr string) (*Schema, er
 	//
 	validator, err := NewJSONSchemaValidator(schemaStr)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidSchema, err)
+		return nil, fmt.Errorf("%w: %w", ErrInvalidSchema, err)
 	}
 
 	// =========================================================================
@@ -452,7 +452,7 @@ func (sr *SchemaRegistry) RegisterSchema(subject, schemaStr string) (*Schema, er
 		latestSchema := versions[latestVersion]
 
 		if err := sr.checkCompatibility(latestSchema.Schema, schemaStr, compat); err != nil {
-			return nil, fmt.Errorf("%w: %v", ErrSchemaIncompatible, err)
+			return nil, fmt.Errorf("%w: %w", ErrSchemaIncompatible, err)
 		}
 	}
 
@@ -819,7 +819,7 @@ func (sr *SchemaRegistry) TestCompatibility(subject, schemaStr string, version i
 
 	// Validate schema syntax first
 	if _, err := NewJSONSchemaValidator(schemaStr); err != nil {
-		return false, fmt.Errorf("%w: %v", ErrInvalidSchema, err)
+		return false, fmt.Errorf("%w: %w", ErrInvalidSchema, err)
 	}
 
 	versions, exists := sr.subjects[subject]
@@ -902,7 +902,7 @@ func (sr *SchemaRegistry) ValidateMessage(subject string, message []byte) error 
 
 	// Validate message
 	if err := validator.Validate(message); err != nil {
-		return fmt.Errorf("%w: %v", ErrValidationFailed, err)
+		return fmt.Errorf("%w: %w", ErrValidationFailed, err)
 	}
 
 	return nil
@@ -932,7 +932,7 @@ func (sr *SchemaRegistry) ValidateMessageWithSchemaID(schemaID int64, message []
 	}
 
 	if err := validator.Validate(message); err != nil {
-		return fmt.Errorf("%w: %v", ErrValidationFailed, err)
+		return fmt.Errorf("%w: %w", ErrValidationFailed, err)
 	}
 
 	return nil
@@ -1084,7 +1084,7 @@ func (sr *SchemaRegistry) Stats() SchemaRegistryStats {
 func (sr *SchemaRegistry) persistSchema(schema *Schema) error {
 	// Create subject directory
 	subjectDir := filepath.Join(sr.config.DataDir, schema.Subject)
-	if err := os.MkdirAll(subjectDir, 0755); err != nil {
+	if err := os.MkdirAll(subjectDir, 0o755); err != nil {
 		return err
 	}
 
@@ -1095,13 +1095,13 @@ func (sr *SchemaRegistry) persistSchema(schema *Schema) error {
 		return err
 	}
 
-	return os.WriteFile(filename, data, 0644)
+	return os.WriteFile(filename, data, 0o600)
 }
 
 // persistSubjectConfig writes subject config to disk
 func (sr *SchemaRegistry) persistSubjectConfig(config *SubjectConfig) error {
 	subjectDir := filepath.Join(sr.config.DataDir, config.Subject)
-	if err := os.MkdirAll(subjectDir, 0755); err != nil {
+	if err := os.MkdirAll(subjectDir, 0o755); err != nil {
 		return err
 	}
 
@@ -1111,7 +1111,7 @@ func (sr *SchemaRegistry) persistSubjectConfig(config *SubjectConfig) error {
 		return err
 	}
 
-	return os.WriteFile(filename, data, 0644)
+	return os.WriteFile(filename, data, 0o600)
 }
 
 // persistGlobalConfig writes global config to disk
@@ -1130,7 +1130,7 @@ func (sr *SchemaRegistry) persistGlobalConfig() error {
 		return err
 	}
 
-	return os.WriteFile(filename, data, 0644)
+	return os.WriteFile(filename, data, 0o600)
 }
 
 // loadSchemas loads all schemas from disk on startup

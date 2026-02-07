@@ -67,9 +67,8 @@ import (
 //
 // =============================================================================
 var (
-	version   = "dev"
-	commit    = "unknown"
-	buildTime = "unknown"
+	version = "dev"
+	commit  = "unknown"
 )
 
 func main() {

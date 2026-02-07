@@ -16,6 +16,7 @@
 package broker
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -125,7 +126,7 @@ func TestDelayIndex_GetNotFound(t *testing.T) {
 	defer idx.Close()
 
 	_, err := idx.Get(999)
-	if err != ErrDelayEntryNotFound {
+	if !errors.Is(err, ErrDelayEntryNotFound) {
 		t.Errorf("expected ErrDelayEntryNotFound, got %v", err)
 	}
 }
@@ -155,13 +156,13 @@ func TestDelayIndex_MarkDelivered(t *testing.T) {
 
 	// Get should fail (no longer pending)
 	_, err = idx.Get(100)
-	if err != ErrDelayEntryNotFound {
+	if !errors.Is(err, ErrDelayEntryNotFound) {
 		t.Errorf("expected ErrDelayEntryNotFound after delivery, got %v", err)
 	}
 }
 
-func TestDelayIndex_MarkCancelled(t *testing.T) {
-	// WHAT: Marking entry as cancelled
+func TestDelayIndex_MarkCanceled(t *testing.T) {
+	// WHAT: Marking entry as canceled
 	// WHY: User can cancel scheduled delays
 
 	idx, _ := createTestDelayIndex(t)
@@ -169,9 +170,9 @@ func TestDelayIndex_MarkCancelled(t *testing.T) {
 
 	idx.Add(100, 0, time.Now().Add(1*time.Hour))
 
-	err := idx.MarkCancelled(100)
+	err := idx.MarkCanceled(100)
 	if err != nil {
-		t.Fatalf("MarkCancelled failed: %v", err)
+		t.Fatalf("MarkCanceled failed: %v", err)
 	}
 
 	if idx.PendingCount() != 0 {
@@ -266,7 +267,7 @@ func TestDelayIndex_PersistenceWithStateChanges(t *testing.T) {
 	idx1.Add(300, 2, deliverAt)
 
 	idx1.MarkDelivered(100) // This one is delivered
-	idx1.MarkCancelled(200) // This one is cancelled
+	idx1.MarkCanceled(200)  // This one is canceled
 	// 300 stays pending
 
 	idx1.Close()
@@ -390,7 +391,7 @@ func TestDelayIndex_MaxEntries(t *testing.T) {
 
 	// Next add should fail
 	err := idx.Add(100, 0, deliverAt)
-	if err != ErrDelayIndexFull {
+	if !errors.Is(err, ErrDelayIndexFull) {
 		t.Errorf("expected ErrDelayIndexFull, got %v", err)
 	}
 }
@@ -512,7 +513,7 @@ func TestDelayIndex_EmptyOperations(t *testing.T) {
 
 	// Mark non-existent
 	err := idx.MarkDelivered(999)
-	if err != ErrDelayEntryNotFound {
+	if !errors.Is(err, ErrDelayEntryNotFound) {
 		t.Errorf("expected ErrDelayEntryNotFound, got %v", err)
 	}
 }

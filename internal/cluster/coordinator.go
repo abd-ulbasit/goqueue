@@ -205,8 +205,9 @@ func NewCoordinator(config *ClusterConfig, dataDir string, logger *slog.Logger) 
 // validateConfig validates cluster configuration.
 func validateConfig(config *ClusterConfig) error {
 	if config.NodeID == "" {
-		// Will use hostname, but verify we can get it
-		// Already handled in NewNode
+		// Intentionally empty: NodeID defaults to hostname, which is
+		// resolved and validated inside NewNode. No action needed here.
+		_ = config.NodeID
 	}
 
 	if len(config.Peers) == 0 && config.QuorumSize > 1 {
@@ -280,8 +281,8 @@ func (c *Coordinator) Start(ctx context.Context) error {
 	// =========================================================================
 	//
 	// WHY: The passed ctx may be a timeout context for bootstrap. If we derive
-	// our long-running context from it, our background tasks will be cancelled
-	// when the bootstrap timeout is cancelled (even on success due to defer).
+	// our long-running context from it, our background tasks will be canceled
+	// when the bootstrap timeout is canceled (even on success due to defer).
 	//
 	// FIX: Use context.Background() for the coordinator's long-running context.
 	// The passed ctx is only used for bootstrap operations that need a timeout.
@@ -803,11 +804,9 @@ func (c *Coordinator) handleMembershipEvent(event MembershipEvent) {
 	case EventControllerChanged:
 		if event.NodeID == c.node.ID() {
 			c.emitEvent(EventBecameController, "")
-		} else {
+		} else if !c.elector.IsController() && c.node.Role() == NodeRoleController {
 			// We lost controller role
-			if c.elector.IsController() == false && c.node.Role() == NodeRoleController {
-				c.emitEvent(EventLostController, "")
-			}
+			c.emitEvent(EventLostController, "")
 		}
 
 	case EventNodeJoined:

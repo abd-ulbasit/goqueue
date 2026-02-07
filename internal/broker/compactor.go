@@ -133,7 +133,6 @@ package broker
 import (
 	"fmt"
 	"os"
-	"sync"
 	"time"
 
 	"goqueue/internal/storage"
@@ -173,9 +172,6 @@ type Compactor struct {
 	tombstoneRetention  time.Duration
 	checkInterval       time.Duration
 	stopCh              chan struct{}
-	wg                  sync.WaitGroup
-	mu                  sync.RWMutex
-	running             bool
 }
 
 // CompactionStats tracks compaction metrics.
@@ -337,7 +333,7 @@ func CompactPartition(p *Partition, tombstoneRetention time.Duration) (*Compacti
 	result.Stats.TombstonesRemoved = tombstonesRemoved
 
 	// Step 2: Create temporary log
-	if err := os.MkdirAll(tempDir, 0755); err != nil {
+	if err := os.MkdirAll(tempDir, 0o755); err != nil {
 		result.Error = fmt.Errorf("failed to create temp directory: %w", err)
 		return result, result.Error
 	}
@@ -404,7 +400,7 @@ func CompactPartition(p *Partition, tombstoneRetention time.Duration) (*Compacti
 	// 4c: Rename temp to original
 	if err := os.Rename(tempDir, partitionDir); err != nil {
 		// Rollback: restore original
-		os.Rename(oldDir, partitionDir)
+		_ = os.Rename(oldDir, partitionDir)
 		result.Error = fmt.Errorf("failed to rename temp directory: %w", err)
 		return result, result.Error
 	}

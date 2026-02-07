@@ -58,6 +58,7 @@ package grpc
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"time"
@@ -151,12 +152,13 @@ func (s *publishServiceServer) Publish(
 	var err error
 
 	// Check for delayed delivery
-	if req.Delay != nil || req.DeliverAt != nil {
+	switch {
+	case req.Delay != nil || req.DeliverAt != nil:
 		partition, offset, err = s.publishDelayed(ctx, req)
-	} else if req.Priority > 0 {
+	case req.Priority > 0:
 		// Priority message
 		partition, offset, err = s.publishWithPriority(ctx, req)
-	} else {
+	default:
 		// Normal publish
 		partition, offset, err = s.broker.Publish(req.Topic, req.Key, req.Value)
 	}
@@ -280,7 +282,7 @@ func (s *publishServiceServer) PublishStream(
 		//   - Client closes the stream (io.EOF)
 		//   - Error occurs
 		req, err := stream.Recv()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			// Client closed the stream - graceful end
 			s.logger.Debug("publish stream completed",
 				"messages", messageCount,
@@ -343,13 +345,14 @@ func (s *publishServiceServer) publishStreamMessage(
 	var offset int64
 	var err error
 
-	if req.Delay != nil {
+	switch {
+	case req.Delay != nil:
 		delay := req.Delay.AsDuration()
 		partition, offset, err = s.broker.PublishWithDelay(req.Topic, req.Key, req.Value, delay)
-	} else if req.Priority > 0 {
+	case req.Priority > 0:
 		priority := storage.Priority(req.Priority)
 		partition, offset, err = s.broker.PublishWithPriority(req.Topic, req.Key, req.Value, priority)
-	} else {
+	default:
 		partition, offset, err = s.broker.Publish(req.Topic, req.Key, req.Value)
 	}
 

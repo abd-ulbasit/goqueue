@@ -213,9 +213,9 @@ const (
 //   - goqueue: Uses flags byte to mark control records (simpler)
 //
 // CONTROL RECORD PAYLOAD FORMAT:
-//   - ProducerId (8 bytes) - identifies the producer
+//   - ProducerID (8 bytes) - identifies the producer
 //   - Epoch (2 bytes) - producer epoch for zombie fencing
-//   - TransactionalId length (2 bytes) + TransactionalId (variable)
+//   - TransactionalID length (2 bytes) + TransactionalID (variable)
 const (
 	FlagCompressed        = 1 << 0 // Bit 0: Message payload is compressed
 	FlagHasHeaders        = 1 << 1 // Bit 1: Message has additional headers
@@ -442,10 +442,10 @@ type Message struct {
 //
 // WIRE FORMAT:
 //   ┌────────────────────────────────────────────────────────────────┐
-//   │ ProducerId (8 bytes, uint64, big-endian)                       │
+//   │ ProducerID (8 bytes, uint64, big-endian)                       │
 //   │ Epoch (2 bytes, uint16, big-endian)                            │
-//   │ TransactionalId Length (2 bytes, uint16, big-endian)           │
-//   │ TransactionalId (variable length string)                       │
+//   │ TransactionalID Length (2 bytes, uint16, big-endian)           │
+//   │ TransactionalID (variable length string)                       │
 //   └────────────────────────────────────────────────────────────────┘
 //
 // COMPARISON:
@@ -456,45 +456,45 @@ type Message struct {
 // ControlRecordPayload contains the data stored in a control record's Value field.
 // Control records are transaction markers (commit/abort) written to partition logs.
 type ControlRecordPayload struct {
-	// ProducerId is the unique identifier of the producer that created the transaction.
+	// ProducerID is the unique identifier of the producer that created the transaction.
 	// Used by consumers to track which messages belong to which transaction.
-	ProducerId uint64
+	ProducerID uint64
 
 	// Epoch is the producer's epoch for zombie fencing.
 	// If a consumer sees messages from a producer with an older epoch than the
 	// latest control record, those messages are from a zombie and should be ignored.
 	Epoch uint16
 
-	// TransactionalId is the string identifier the producer used to register
+	// TransactionalID is the string identifier the producer used to register
 	// with the transaction coordinator. Used for debugging and monitoring.
-	TransactionalId string
+	TransactionalID string
 }
 
 // ControlRecordPayloadSize returns the minimum size of a control record payload
-// (without the variable-length TransactionalId).
-const ControlRecordPayloadMinSize = 8 + 2 + 2 // ProducerId + Epoch + TxnIdLen
+// (without the variable-length TransactionalID).
+const ControlRecordPayloadMinSize = 8 + 2 + 2 // ProducerID + Epoch + TxnIdLen
 
 // EncodeControlRecordPayload serializes a control record payload to bytes.
 //
 // WIRE FORMAT:
 //
-//	[0:8]   ProducerId (uint64, big-endian)
+//	[0:8]   ProducerID (uint64, big-endian)
 //	[8:10]  Epoch (uint16, big-endian)
-//	[10:12] TransactionalId length (uint16, big-endian)
-//	[12:N]  TransactionalId (UTF-8 string)
+//	[10:12] TransactionalID length (uint16, big-endian)
+//	[12:N]  TransactionalID (UTF-8 string)
 func (p *ControlRecordPayload) Encode() []byte {
-	txnIdBytes := []byte(p.TransactionalId)
-	buf := make([]byte, ControlRecordPayloadMinSize+len(txnIdBytes))
+	txnIDBytes := []byte(p.TransactionalID)
+	buf := make([]byte, ControlRecordPayloadMinSize+len(txnIDBytes))
 
-	// ProducerId (8 bytes)
-	binary.BigEndian.PutUint64(buf[0:8], p.ProducerId)
+	// ProducerID (8 bytes)
+	binary.BigEndian.PutUint64(buf[0:8], p.ProducerID)
 
 	// Epoch (2 bytes)
 	binary.BigEndian.PutUint16(buf[8:10], p.Epoch)
 
-	// TransactionalId length and value
-	binary.BigEndian.PutUint16(buf[10:12], uint16(len(txnIdBytes)))
-	copy(buf[12:], txnIdBytes)
+	// TransactionalID length and value
+	binary.BigEndian.PutUint16(buf[10:12], uint16(len(txnIDBytes)))
+	copy(buf[12:], txnIDBytes)
 
 	return buf
 }
@@ -508,21 +508,21 @@ func DecodeControlRecordPayload(data []byte) (*ControlRecordPayload, error) {
 			len(data), ControlRecordPayloadMinSize)
 	}
 
-	producerId := binary.BigEndian.Uint64(data[0:8])
+	producerID := binary.BigEndian.Uint64(data[0:8])
 	epoch := binary.BigEndian.Uint16(data[8:10])
-	txnIdLen := binary.BigEndian.Uint16(data[10:12])
+	txnIDLen := binary.BigEndian.Uint16(data[10:12])
 
-	if len(data) < ControlRecordPayloadMinSize+int(txnIdLen) {
+	if len(data) < ControlRecordPayloadMinSize+int(txnIDLen) {
 		return nil, fmt.Errorf("control record payload truncated: %d bytes, need %d",
-			len(data), ControlRecordPayloadMinSize+int(txnIdLen))
+			len(data), ControlRecordPayloadMinSize+int(txnIDLen))
 	}
 
-	transactionalId := string(data[12 : 12+int(txnIdLen)])
+	transactionalID := string(data[12 : 12+int(txnIDLen)])
 
 	return &ControlRecordPayload{
-		ProducerId:      producerId,
+		ProducerID:      producerID,
 		Epoch:           epoch,
-		TransactionalId: transactionalId,
+		TransactionalID: transactionalID,
 	}, nil
 }
 
@@ -575,24 +575,24 @@ func (m *Message) GetControlRecordPayload() (*ControlRecordPayload, error) {
 //
 // PARAMETERS:
 //   - offset: The offset to assign to this control record
-//   - producerId: The producer's unique identifier
+//   - producerID: The producer's unique identifier
 //   - epoch: The producer's current epoch
-//   - transactionalId: The transaction's string identifier
+//   - transactionalID: The transaction's string identifier
 //
 // USAGE:
 // This is called by the TransactionCoordinator when committing a transaction.
 // The control record is written to each partition that participated in the transaction.
-func NewCommitControlRecord(offset int64, producerId uint64, epoch uint16, transactionalId string) *Message {
+func NewCommitControlRecord(offset int64, producerID uint64, epoch uint16, transactionalID string) *Message {
 	payload := &ControlRecordPayload{
-		ProducerId:      producerId,
+		ProducerID:      producerID,
 		Epoch:           epoch,
-		TransactionalId: transactionalId,
+		TransactionalID: transactionalID,
 	}
 
 	return &Message{
 		Offset:    offset,
 		Timestamp: time.Now().UnixNano(),
-		Key:       []byte(transactionalId), // Use txn ID as key for easy lookup
+		Key:       []byte(transactionalID), // Use txn ID as key for easy lookup
 		Value:     payload.Encode(),
 		Flags:     FlagControlRecord | FlagTransactionCommit,
 		Priority:  PriorityCritical, // Control records are high priority
@@ -603,24 +603,24 @@ func NewCommitControlRecord(offset int64, producerId uint64, epoch uint16, trans
 //
 // PARAMETERS:
 //   - offset: The offset to assign to this control record
-//   - producerId: The producer's unique identifier
+//   - producerID: The producer's unique identifier
 //   - epoch: The producer's current epoch
-//   - transactionalId: The transaction's string identifier
+//   - transactionalID: The transaction's string identifier
 //
 // USAGE:
 // This is called by the TransactionCoordinator when aborting a transaction.
 // The control record is written to each partition that participated in the transaction.
-func NewAbortControlRecord(offset int64, producerId uint64, epoch uint16, transactionalId string) *Message {
+func NewAbortControlRecord(offset int64, producerID uint64, epoch uint16, transactionalID string) *Message {
 	payload := &ControlRecordPayload{
-		ProducerId:      producerId,
+		ProducerID:      producerID,
 		Epoch:           epoch,
-		TransactionalId: transactionalId,
+		TransactionalID: transactionalID,
 	}
 
 	return &Message{
 		Offset:    offset,
 		Timestamp: time.Now().UnixNano(),
-		Key:       []byte(transactionalId), // Use txn ID as key for easy lookup
+		Key:       []byte(transactionalID), // Use txn ID as key for easy lookup
 		Value:     payload.Encode(),
 		Flags:     FlagControlRecord, // No FlagTransactionCommit = abort
 		Priority:  PriorityCritical,  // Control records are high priority

@@ -184,7 +184,7 @@ type OffsetManager struct {
 // NewOffsetManager creates a new offset manager.
 func NewOffsetManager(baseDir string, autoCommitEnabled bool, autoCommitIntervalMs int) (*OffsetManager, error) {
 	// Create base directory
-	if err := os.MkdirAll(baseDir, 0755); err != nil {
+	if err := os.MkdirAll(baseDir, 0o755); err != nil {
 		return nil, fmt.Errorf("failed to create offset directory: %w", err)
 	}
 
@@ -424,7 +424,7 @@ const (
 //   - Reprocessing all historical data
 //   - New consumer group starting from scratch
 //   - Disaster recovery
-func (om *OffsetManager) ResetToEarliest(groupID, topic string, partition int, generation int) error {
+func (om *OffsetManager) ResetToEarliest(groupID, topic string, partition, generation int) error {
 	return om.Commit(groupID, topic, partition, 0, generation, "reset:earliest")
 }
 
@@ -587,7 +587,7 @@ func (om *OffsetManager) persistGroup(groupID string) error {
 
 	// Create group directory
 	groupDir := filepath.Join(om.baseDir, groupID)
-	if err := os.MkdirAll(groupDir, 0755); err != nil {
+	if err := os.MkdirAll(groupDir, 0o755); err != nil {
 		return fmt.Errorf("failed to create group directory: %w", err)
 	}
 
@@ -601,7 +601,7 @@ func (om *OffsetManager) persistGroup(groupID string) error {
 	offsetFile := filepath.Join(groupDir, "offsets.json")
 	tempFile := offsetFile + ".tmp"
 
-	if err := os.WriteFile(tempFile, data, 0644); err != nil {
+	if err := os.WriteFile(tempFile, data, 0o600); err != nil {
 		return fmt.Errorf("failed to write temp file: %w", err)
 	}
 
