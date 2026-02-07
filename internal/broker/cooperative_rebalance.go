@@ -587,7 +587,7 @@ func (m *RebalanceMetrics) RecordRevocationTimeout() {
 }
 
 // GetSnapshot returns a copy of the current metrics.
-func (m *RebalanceMetrics) GetSnapshot() RebalanceMetrics {
+func (m *RebalanceMetrics) GetSnapshot() *RebalanceMetrics {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -596,7 +596,7 @@ func (m *RebalanceMetrics) GetSnapshot() RebalanceMetrics {
 		reasonsCopy[k] = v
 	}
 
-	return RebalanceMetrics{
+	return &RebalanceMetrics{
 		TotalRebalances:            m.TotalRebalances,
 		SuccessfulRebalances:       m.SuccessfulRebalances,
 		FailedRebalances:           m.FailedRebalances,
