@@ -492,8 +492,8 @@ func (ServingStatus) EnumDescriptor() ([]byte, []int) {
 // WIRE FORMAT (simplified):
 //
 //	┌──────────────────────────────────────────────────────────────────────────┐
-//	│ Field 1 (topic)   │ Field 2 (partition) │ Field 3 (offset) │ ...        │
-//	│ [tag][len][data]  │ [tag][varint]       │ [tag][varint]    │            │
+//	│ Field 1 (topic)   │ Field 2 (partition) │ Field 3 (offset) │ ...         │
+//	│ [tag][len][data]  │ [tag][varint]       │ [tag][varint]    │             │
 //	└──────────────────────────────────────────────────────────────────────────┘
 //
 // Each field is prefixed with a "tag" = (field_number << 3) | wire_type
@@ -3287,6 +3287,924 @@ func (x *OffsetResetResult) GetError() *Error {
 	return nil
 }
 
+// InitProducerRequest - Initialize a transactional producer.
+//
+// ZOMBIE FENCING:
+//
+//	If the same transactional_id was used by a previous producer instance,
+//	the broker bumps the epoch. The old producer (zombie) is fenced out:
+//	any attempt to use the old epoch returns PRODUCER_FENCED.
+//
+//	Producer A (epoch=1) ──► crash
+//	Producer B (epoch=2) ──► InitProducer(same txn_id) → gets epoch=2
+//	Producer A recovers  ──► any operation → PRODUCER_FENCED (epoch too old)
+type InitProducerRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Stable identifier for this producer across restarts.
+	// Must be unique per logical producer.
+	TransactionalId string `protobuf:"bytes,1,opt,name=transactional_id,json=transactionalId,proto3" json:"transactional_id,omitempty"`
+	// Transaction timeout in milliseconds.
+	// If a transaction doesn't complete within this time, the coordinator
+	// automatically aborts it. Default: 60000 (60s).
+	TransactionTimeoutMs int64 `protobuf:"varint,2,opt,name=transaction_timeout_ms,json=transactionTimeoutMs,proto3" json:"transaction_timeout_ms,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
+}
+
+func (x *InitProducerRequest) Reset() {
+	*x = InitProducerRequest{}
+	mi := &file_goqueue_proto_msgTypes[36]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *InitProducerRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*InitProducerRequest) ProtoMessage() {}
+
+func (x *InitProducerRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_goqueue_proto_msgTypes[36]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use InitProducerRequest.ProtoReflect.Descriptor instead.
+func (*InitProducerRequest) Descriptor() ([]byte, []int) {
+	return file_goqueue_proto_rawDescGZIP(), []int{36}
+}
+
+func (x *InitProducerRequest) GetTransactionalId() string {
+	if x != nil {
+		return x.TransactionalId
+	}
+	return ""
+}
+
+func (x *InitProducerRequest) GetTransactionTimeoutMs() int64 {
+	if x != nil {
+		return x.TransactionTimeoutMs
+	}
+	return 0
+}
+
+type InitProducerResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Assigned producer ID (unique across all producers)
+	ProducerId int64 `protobuf:"varint,1,opt,name=producer_id,json=producerId,proto3" json:"producer_id,omitempty"`
+	// Current epoch for this transactional ID.
+	// Incremented on each InitProducer call (zombie fencing).
+	Epoch int32 `protobuf:"varint,2,opt,name=epoch,proto3" json:"epoch,omitempty"`
+	// Error details, if any
+	Error         *Error `protobuf:"bytes,3,opt,name=error,proto3" json:"error,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *InitProducerResponse) Reset() {
+	*x = InitProducerResponse{}
+	mi := &file_goqueue_proto_msgTypes[37]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *InitProducerResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*InitProducerResponse) ProtoMessage() {}
+
+func (x *InitProducerResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_goqueue_proto_msgTypes[37]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use InitProducerResponse.ProtoReflect.Descriptor instead.
+func (*InitProducerResponse) Descriptor() ([]byte, []int) {
+	return file_goqueue_proto_rawDescGZIP(), []int{37}
+}
+
+func (x *InitProducerResponse) GetProducerId() int64 {
+	if x != nil {
+		return x.ProducerId
+	}
+	return 0
+}
+
+func (x *InitProducerResponse) GetEpoch() int32 {
+	if x != nil {
+		return x.Epoch
+	}
+	return 0
+}
+
+func (x *InitProducerResponse) GetError() *Error {
+	if x != nil {
+		return x.Error
+	}
+	return nil
+}
+
+// BeginTransactionRequest - Start a new transaction.
+type BeginTransactionRequest struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	TransactionalId string                 `protobuf:"bytes,1,opt,name=transactional_id,json=transactionalId,proto3" json:"transactional_id,omitempty"`
+	ProducerId      int64                  `protobuf:"varint,2,opt,name=producer_id,json=producerId,proto3" json:"producer_id,omitempty"`
+	Epoch           int32                  `protobuf:"varint,3,opt,name=epoch,proto3" json:"epoch,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *BeginTransactionRequest) Reset() {
+	*x = BeginTransactionRequest{}
+	mi := &file_goqueue_proto_msgTypes[38]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BeginTransactionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BeginTransactionRequest) ProtoMessage() {}
+
+func (x *BeginTransactionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_goqueue_proto_msgTypes[38]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BeginTransactionRequest.ProtoReflect.Descriptor instead.
+func (*BeginTransactionRequest) Descriptor() ([]byte, []int) {
+	return file_goqueue_proto_rawDescGZIP(), []int{38}
+}
+
+func (x *BeginTransactionRequest) GetTransactionalId() string {
+	if x != nil {
+		return x.TransactionalId
+	}
+	return ""
+}
+
+func (x *BeginTransactionRequest) GetProducerId() int64 {
+	if x != nil {
+		return x.ProducerId
+	}
+	return 0
+}
+
+func (x *BeginTransactionRequest) GetEpoch() int32 {
+	if x != nil {
+		return x.Epoch
+	}
+	return 0
+}
+
+type BeginTransactionResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Unique ID for this transaction instance
+	TransactionId string `protobuf:"bytes,1,opt,name=transaction_id,json=transactionId,proto3" json:"transaction_id,omitempty"`
+	Error         *Error `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BeginTransactionResponse) Reset() {
+	*x = BeginTransactionResponse{}
+	mi := &file_goqueue_proto_msgTypes[39]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BeginTransactionResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BeginTransactionResponse) ProtoMessage() {}
+
+func (x *BeginTransactionResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_goqueue_proto_msgTypes[39]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BeginTransactionResponse.ProtoReflect.Descriptor instead.
+func (*BeginTransactionResponse) Descriptor() ([]byte, []int) {
+	return file_goqueue_proto_rawDescGZIP(), []int{39}
+}
+
+func (x *BeginTransactionResponse) GetTransactionId() string {
+	if x != nil {
+		return x.TransactionId
+	}
+	return ""
+}
+
+func (x *BeginTransactionResponse) GetError() *Error {
+	if x != nil {
+		return x.Error
+	}
+	return nil
+}
+
+// AddPartitionRequest - Register a partition with the transaction.
+type AddPartitionRequest struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	TransactionalId string                 `protobuf:"bytes,1,opt,name=transactional_id,json=transactionalId,proto3" json:"transactional_id,omitempty"`
+	ProducerId      int64                  `protobuf:"varint,2,opt,name=producer_id,json=producerId,proto3" json:"producer_id,omitempty"`
+	Epoch           int32                  `protobuf:"varint,3,opt,name=epoch,proto3" json:"epoch,omitempty"`
+	Topic           string                 `protobuf:"bytes,4,opt,name=topic,proto3" json:"topic,omitempty"`
+	Partition       int32                  `protobuf:"varint,5,opt,name=partition,proto3" json:"partition,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *AddPartitionRequest) Reset() {
+	*x = AddPartitionRequest{}
+	mi := &file_goqueue_proto_msgTypes[40]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AddPartitionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AddPartitionRequest) ProtoMessage() {}
+
+func (x *AddPartitionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_goqueue_proto_msgTypes[40]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AddPartitionRequest.ProtoReflect.Descriptor instead.
+func (*AddPartitionRequest) Descriptor() ([]byte, []int) {
+	return file_goqueue_proto_rawDescGZIP(), []int{40}
+}
+
+func (x *AddPartitionRequest) GetTransactionalId() string {
+	if x != nil {
+		return x.TransactionalId
+	}
+	return ""
+}
+
+func (x *AddPartitionRequest) GetProducerId() int64 {
+	if x != nil {
+		return x.ProducerId
+	}
+	return 0
+}
+
+func (x *AddPartitionRequest) GetEpoch() int32 {
+	if x != nil {
+		return x.Epoch
+	}
+	return 0
+}
+
+func (x *AddPartitionRequest) GetTopic() string {
+	if x != nil {
+		return x.Topic
+	}
+	return ""
+}
+
+func (x *AddPartitionRequest) GetPartition() int32 {
+	if x != nil {
+		return x.Partition
+	}
+	return 0
+}
+
+type AddPartitionResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Error         *Error                 `protobuf:"bytes,1,opt,name=error,proto3" json:"error,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AddPartitionResponse) Reset() {
+	*x = AddPartitionResponse{}
+	mi := &file_goqueue_proto_msgTypes[41]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AddPartitionResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AddPartitionResponse) ProtoMessage() {}
+
+func (x *AddPartitionResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_goqueue_proto_msgTypes[41]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AddPartitionResponse.ProtoReflect.Descriptor instead.
+func (*AddPartitionResponse) Descriptor() ([]byte, []int) {
+	return file_goqueue_proto_rawDescGZIP(), []int{41}
+}
+
+func (x *AddPartitionResponse) GetError() *Error {
+	if x != nil {
+		return x.Error
+	}
+	return nil
+}
+
+// CommitTransactionRequest - Commit the active transaction.
+type CommitTransactionRequest struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	TransactionalId string                 `protobuf:"bytes,1,opt,name=transactional_id,json=transactionalId,proto3" json:"transactional_id,omitempty"`
+	ProducerId      int64                  `protobuf:"varint,2,opt,name=producer_id,json=producerId,proto3" json:"producer_id,omitempty"`
+	Epoch           int32                  `protobuf:"varint,3,opt,name=epoch,proto3" json:"epoch,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *CommitTransactionRequest) Reset() {
+	*x = CommitTransactionRequest{}
+	mi := &file_goqueue_proto_msgTypes[42]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CommitTransactionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CommitTransactionRequest) ProtoMessage() {}
+
+func (x *CommitTransactionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_goqueue_proto_msgTypes[42]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CommitTransactionRequest.ProtoReflect.Descriptor instead.
+func (*CommitTransactionRequest) Descriptor() ([]byte, []int) {
+	return file_goqueue_proto_rawDescGZIP(), []int{42}
+}
+
+func (x *CommitTransactionRequest) GetTransactionalId() string {
+	if x != nil {
+		return x.TransactionalId
+	}
+	return ""
+}
+
+func (x *CommitTransactionRequest) GetProducerId() int64 {
+	if x != nil {
+		return x.ProducerId
+	}
+	return 0
+}
+
+func (x *CommitTransactionRequest) GetEpoch() int32 {
+	if x != nil {
+		return x.Epoch
+	}
+	return 0
+}
+
+type CommitTransactionResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Error         *Error                 `protobuf:"bytes,1,opt,name=error,proto3" json:"error,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CommitTransactionResponse) Reset() {
+	*x = CommitTransactionResponse{}
+	mi := &file_goqueue_proto_msgTypes[43]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CommitTransactionResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CommitTransactionResponse) ProtoMessage() {}
+
+func (x *CommitTransactionResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_goqueue_proto_msgTypes[43]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CommitTransactionResponse.ProtoReflect.Descriptor instead.
+func (*CommitTransactionResponse) Descriptor() ([]byte, []int) {
+	return file_goqueue_proto_rawDescGZIP(), []int{43}
+}
+
+func (x *CommitTransactionResponse) GetError() *Error {
+	if x != nil {
+		return x.Error
+	}
+	return nil
+}
+
+// AbortTransactionRequest - Abort the active transaction.
+type AbortTransactionRequest struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	TransactionalId string                 `protobuf:"bytes,1,opt,name=transactional_id,json=transactionalId,proto3" json:"transactional_id,omitempty"`
+	ProducerId      int64                  `protobuf:"varint,2,opt,name=producer_id,json=producerId,proto3" json:"producer_id,omitempty"`
+	Epoch           int32                  `protobuf:"varint,3,opt,name=epoch,proto3" json:"epoch,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *AbortTransactionRequest) Reset() {
+	*x = AbortTransactionRequest{}
+	mi := &file_goqueue_proto_msgTypes[44]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AbortTransactionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AbortTransactionRequest) ProtoMessage() {}
+
+func (x *AbortTransactionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_goqueue_proto_msgTypes[44]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AbortTransactionRequest.ProtoReflect.Descriptor instead.
+func (*AbortTransactionRequest) Descriptor() ([]byte, []int) {
+	return file_goqueue_proto_rawDescGZIP(), []int{44}
+}
+
+func (x *AbortTransactionRequest) GetTransactionalId() string {
+	if x != nil {
+		return x.TransactionalId
+	}
+	return ""
+}
+
+func (x *AbortTransactionRequest) GetProducerId() int64 {
+	if x != nil {
+		return x.ProducerId
+	}
+	return 0
+}
+
+func (x *AbortTransactionRequest) GetEpoch() int32 {
+	if x != nil {
+		return x.Epoch
+	}
+	return 0
+}
+
+type AbortTransactionResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Error         *Error                 `protobuf:"bytes,1,opt,name=error,proto3" json:"error,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AbortTransactionResponse) Reset() {
+	*x = AbortTransactionResponse{}
+	mi := &file_goqueue_proto_msgTypes[45]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AbortTransactionResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AbortTransactionResponse) ProtoMessage() {}
+
+func (x *AbortTransactionResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_goqueue_proto_msgTypes[45]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AbortTransactionResponse.ProtoReflect.Descriptor instead.
+func (*AbortTransactionResponse) Descriptor() ([]byte, []int) {
+	return file_goqueue_proto_rawDescGZIP(), []int{45}
+}
+
+func (x *AbortTransactionResponse) GetError() *Error {
+	if x != nil {
+		return x.Error
+	}
+	return nil
+}
+
+// ListTransactionsRequest - List active transactions.
+type ListTransactionsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListTransactionsRequest) Reset() {
+	*x = ListTransactionsRequest{}
+	mi := &file_goqueue_proto_msgTypes[46]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListTransactionsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListTransactionsRequest) ProtoMessage() {}
+
+func (x *ListTransactionsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_goqueue_proto_msgTypes[46]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListTransactionsRequest.ProtoReflect.Descriptor instead.
+func (*ListTransactionsRequest) Descriptor() ([]byte, []int) {
+	return file_goqueue_proto_rawDescGZIP(), []int{46}
+}
+
+type ListTransactionsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Transactions  []*TransactionInfo     `protobuf:"bytes,1,rep,name=transactions,proto3" json:"transactions,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListTransactionsResponse) Reset() {
+	*x = ListTransactionsResponse{}
+	mi := &file_goqueue_proto_msgTypes[47]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListTransactionsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListTransactionsResponse) ProtoMessage() {}
+
+func (x *ListTransactionsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_goqueue_proto_msgTypes[47]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListTransactionsResponse.ProtoReflect.Descriptor instead.
+func (*ListTransactionsResponse) Descriptor() ([]byte, []int) {
+	return file_goqueue_proto_rawDescGZIP(), []int{47}
+}
+
+func (x *ListTransactionsResponse) GetTransactions() []*TransactionInfo {
+	if x != nil {
+		return x.Transactions
+	}
+	return nil
+}
+
+// DescribeTransactionRequest - Get details about a specific transaction.
+type DescribeTransactionRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	TransactionId string                 `protobuf:"bytes,1,opt,name=transaction_id,json=transactionId,proto3" json:"transaction_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DescribeTransactionRequest) Reset() {
+	*x = DescribeTransactionRequest{}
+	mi := &file_goqueue_proto_msgTypes[48]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DescribeTransactionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DescribeTransactionRequest) ProtoMessage() {}
+
+func (x *DescribeTransactionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_goqueue_proto_msgTypes[48]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DescribeTransactionRequest.ProtoReflect.Descriptor instead.
+func (*DescribeTransactionRequest) Descriptor() ([]byte, []int) {
+	return file_goqueue_proto_rawDescGZIP(), []int{48}
+}
+
+func (x *DescribeTransactionRequest) GetTransactionId() string {
+	if x != nil {
+		return x.TransactionId
+	}
+	return ""
+}
+
+type DescribeTransactionResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Transaction   *TransactionInfo       `protobuf:"bytes,1,opt,name=transaction,proto3" json:"transaction,omitempty"`
+	Error         *Error                 `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DescribeTransactionResponse) Reset() {
+	*x = DescribeTransactionResponse{}
+	mi := &file_goqueue_proto_msgTypes[49]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DescribeTransactionResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DescribeTransactionResponse) ProtoMessage() {}
+
+func (x *DescribeTransactionResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_goqueue_proto_msgTypes[49]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DescribeTransactionResponse.ProtoReflect.Descriptor instead.
+func (*DescribeTransactionResponse) Descriptor() ([]byte, []int) {
+	return file_goqueue_proto_rawDescGZIP(), []int{49}
+}
+
+func (x *DescribeTransactionResponse) GetTransaction() *TransactionInfo {
+	if x != nil {
+		return x.Transaction
+	}
+	return nil
+}
+
+func (x *DescribeTransactionResponse) GetError() *Error {
+	if x != nil {
+		return x.Error
+	}
+	return nil
+}
+
+// TransactionInfo - Details about a single transaction.
+type TransactionInfo struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	TransactionId   string                 `protobuf:"bytes,1,opt,name=transaction_id,json=transactionId,proto3" json:"transaction_id,omitempty"`
+	TransactionalId string                 `protobuf:"bytes,2,opt,name=transactional_id,json=transactionalId,proto3" json:"transactional_id,omitempty"`
+	ProducerId      int64                  `protobuf:"varint,3,opt,name=producer_id,json=producerId,proto3" json:"producer_id,omitempty"`
+	Epoch           int32                  `protobuf:"varint,4,opt,name=epoch,proto3" json:"epoch,omitempty"`
+	State           string                 `protobuf:"bytes,5,opt,name=state,proto3" json:"state,omitempty"`
+	StartTime       *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=start_time,json=startTime,proto3" json:"start_time,omitempty"`
+	LastUpdateTime  *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=last_update_time,json=lastUpdateTime,proto3" json:"last_update_time,omitempty"`
+	TimeoutMs       int64                  `protobuf:"varint,8,opt,name=timeout_ms,json=timeoutMs,proto3" json:"timeout_ms,omitempty"`
+	// Partitions involved in this transaction
+	Partitions    []*TransactionPartition `protobuf:"bytes,9,rep,name=partitions,proto3" json:"partitions,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TransactionInfo) Reset() {
+	*x = TransactionInfo{}
+	mi := &file_goqueue_proto_msgTypes[50]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TransactionInfo) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TransactionInfo) ProtoMessage() {}
+
+func (x *TransactionInfo) ProtoReflect() protoreflect.Message {
+	mi := &file_goqueue_proto_msgTypes[50]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TransactionInfo.ProtoReflect.Descriptor instead.
+func (*TransactionInfo) Descriptor() ([]byte, []int) {
+	return file_goqueue_proto_rawDescGZIP(), []int{50}
+}
+
+func (x *TransactionInfo) GetTransactionId() string {
+	if x != nil {
+		return x.TransactionId
+	}
+	return ""
+}
+
+func (x *TransactionInfo) GetTransactionalId() string {
+	if x != nil {
+		return x.TransactionalId
+	}
+	return ""
+}
+
+func (x *TransactionInfo) GetProducerId() int64 {
+	if x != nil {
+		return x.ProducerId
+	}
+	return 0
+}
+
+func (x *TransactionInfo) GetEpoch() int32 {
+	if x != nil {
+		return x.Epoch
+	}
+	return 0
+}
+
+func (x *TransactionInfo) GetState() string {
+	if x != nil {
+		return x.State
+	}
+	return ""
+}
+
+func (x *TransactionInfo) GetStartTime() *timestamppb.Timestamp {
+	if x != nil {
+		return x.StartTime
+	}
+	return nil
+}
+
+func (x *TransactionInfo) GetLastUpdateTime() *timestamppb.Timestamp {
+	if x != nil {
+		return x.LastUpdateTime
+	}
+	return nil
+}
+
+func (x *TransactionInfo) GetTimeoutMs() int64 {
+	if x != nil {
+		return x.TimeoutMs
+	}
+	return 0
+}
+
+func (x *TransactionInfo) GetPartitions() []*TransactionPartition {
+	if x != nil {
+		return x.Partitions
+	}
+	return nil
+}
+
+// TransactionPartition - A topic-partition pair in a transaction.
+type TransactionPartition struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Topic         string                 `protobuf:"bytes,1,opt,name=topic,proto3" json:"topic,omitempty"`
+	Partitions    []int32                `protobuf:"varint,2,rep,packed,name=partitions,proto3" json:"partitions,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TransactionPartition) Reset() {
+	*x = TransactionPartition{}
+	mi := &file_goqueue_proto_msgTypes[51]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TransactionPartition) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TransactionPartition) ProtoMessage() {}
+
+func (x *TransactionPartition) ProtoReflect() protoreflect.Message {
+	mi := &file_goqueue_proto_msgTypes[51]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TransactionPartition.ProtoReflect.Descriptor instead.
+func (*TransactionPartition) Descriptor() ([]byte, []int) {
+	return file_goqueue_proto_rawDescGZIP(), []int{51}
+}
+
+func (x *TransactionPartition) GetTopic() string {
+	if x != nil {
+		return x.Topic
+	}
+	return ""
+}
+
+func (x *TransactionPartition) GetPartitions() []int32 {
+	if x != nil {
+		return x.Partitions
+	}
+	return nil
+}
+
 // HealthCheckRequest - Health check request
 type HealthCheckRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -3298,7 +4216,7 @@ type HealthCheckRequest struct {
 
 func (x *HealthCheckRequest) Reset() {
 	*x = HealthCheckRequest{}
-	mi := &file_goqueue_proto_msgTypes[36]
+	mi := &file_goqueue_proto_msgTypes[52]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3310,7 +4228,7 @@ func (x *HealthCheckRequest) String() string {
 func (*HealthCheckRequest) ProtoMessage() {}
 
 func (x *HealthCheckRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_goqueue_proto_msgTypes[36]
+	mi := &file_goqueue_proto_msgTypes[52]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3323,7 +4241,7 @@ func (x *HealthCheckRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HealthCheckRequest.ProtoReflect.Descriptor instead.
 func (*HealthCheckRequest) Descriptor() ([]byte, []int) {
-	return file_goqueue_proto_rawDescGZIP(), []int{36}
+	return file_goqueue_proto_rawDescGZIP(), []int{52}
 }
 
 func (x *HealthCheckRequest) GetService() string {
@@ -3343,7 +4261,7 @@ type HealthCheckResponse struct {
 
 func (x *HealthCheckResponse) Reset() {
 	*x = HealthCheckResponse{}
-	mi := &file_goqueue_proto_msgTypes[37]
+	mi := &file_goqueue_proto_msgTypes[53]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3355,7 +4273,7 @@ func (x *HealthCheckResponse) String() string {
 func (*HealthCheckResponse) ProtoMessage() {}
 
 func (x *HealthCheckResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_goqueue_proto_msgTypes[37]
+	mi := &file_goqueue_proto_msgTypes[53]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3368,7 +4286,7 @@ func (x *HealthCheckResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HealthCheckResponse.ProtoReflect.Descriptor instead.
 func (*HealthCheckResponse) Descriptor() ([]byte, []int) {
-	return file_goqueue_proto_rawDescGZIP(), []int{37}
+	return file_goqueue_proto_rawDescGZIP(), []int{53}
 }
 
 func (x *HealthCheckResponse) GetStatus() ServingStatus {
@@ -3629,7 +4547,74 @@ const file_goqueue_proto_rawDesc = "" +
 	"old_offset\x18\x03 \x01(\x03R\toldOffset\x12\x1d\n" +
 	"\n" +
 	"new_offset\x18\x04 \x01(\x03R\tnewOffset\x12'\n" +
-	"\x05error\x18\x05 \x01(\v2\x11.goqueue.v1.ErrorR\x05error\".\n" +
+	"\x05error\x18\x05 \x01(\v2\x11.goqueue.v1.ErrorR\x05error\"v\n" +
+	"\x13InitProducerRequest\x12)\n" +
+	"\x10transactional_id\x18\x01 \x01(\tR\x0ftransactionalId\x124\n" +
+	"\x16transaction_timeout_ms\x18\x02 \x01(\x03R\x14transactionTimeoutMs\"v\n" +
+	"\x14InitProducerResponse\x12\x1f\n" +
+	"\vproducer_id\x18\x01 \x01(\x03R\n" +
+	"producerId\x12\x14\n" +
+	"\x05epoch\x18\x02 \x01(\x05R\x05epoch\x12'\n" +
+	"\x05error\x18\x03 \x01(\v2\x11.goqueue.v1.ErrorR\x05error\"{\n" +
+	"\x17BeginTransactionRequest\x12)\n" +
+	"\x10transactional_id\x18\x01 \x01(\tR\x0ftransactionalId\x12\x1f\n" +
+	"\vproducer_id\x18\x02 \x01(\x03R\n" +
+	"producerId\x12\x14\n" +
+	"\x05epoch\x18\x03 \x01(\x05R\x05epoch\"j\n" +
+	"\x18BeginTransactionResponse\x12%\n" +
+	"\x0etransaction_id\x18\x01 \x01(\tR\rtransactionId\x12'\n" +
+	"\x05error\x18\x02 \x01(\v2\x11.goqueue.v1.ErrorR\x05error\"\xab\x01\n" +
+	"\x13AddPartitionRequest\x12)\n" +
+	"\x10transactional_id\x18\x01 \x01(\tR\x0ftransactionalId\x12\x1f\n" +
+	"\vproducer_id\x18\x02 \x01(\x03R\n" +
+	"producerId\x12\x14\n" +
+	"\x05epoch\x18\x03 \x01(\x05R\x05epoch\x12\x14\n" +
+	"\x05topic\x18\x04 \x01(\tR\x05topic\x12\x1c\n" +
+	"\tpartition\x18\x05 \x01(\x05R\tpartition\"?\n" +
+	"\x14AddPartitionResponse\x12'\n" +
+	"\x05error\x18\x01 \x01(\v2\x11.goqueue.v1.ErrorR\x05error\"|\n" +
+	"\x18CommitTransactionRequest\x12)\n" +
+	"\x10transactional_id\x18\x01 \x01(\tR\x0ftransactionalId\x12\x1f\n" +
+	"\vproducer_id\x18\x02 \x01(\x03R\n" +
+	"producerId\x12\x14\n" +
+	"\x05epoch\x18\x03 \x01(\x05R\x05epoch\"D\n" +
+	"\x19CommitTransactionResponse\x12'\n" +
+	"\x05error\x18\x01 \x01(\v2\x11.goqueue.v1.ErrorR\x05error\"{\n" +
+	"\x17AbortTransactionRequest\x12)\n" +
+	"\x10transactional_id\x18\x01 \x01(\tR\x0ftransactionalId\x12\x1f\n" +
+	"\vproducer_id\x18\x02 \x01(\x03R\n" +
+	"producerId\x12\x14\n" +
+	"\x05epoch\x18\x03 \x01(\x05R\x05epoch\"C\n" +
+	"\x18AbortTransactionResponse\x12'\n" +
+	"\x05error\x18\x01 \x01(\v2\x11.goqueue.v1.ErrorR\x05error\"\x19\n" +
+	"\x17ListTransactionsRequest\"[\n" +
+	"\x18ListTransactionsResponse\x12?\n" +
+	"\ftransactions\x18\x01 \x03(\v2\x1b.goqueue.v1.TransactionInfoR\ftransactions\"C\n" +
+	"\x1aDescribeTransactionRequest\x12%\n" +
+	"\x0etransaction_id\x18\x01 \x01(\tR\rtransactionId\"\x85\x01\n" +
+	"\x1bDescribeTransactionResponse\x12=\n" +
+	"\vtransaction\x18\x01 \x01(\v2\x1b.goqueue.v1.TransactionInfoR\vtransaction\x12'\n" +
+	"\x05error\x18\x02 \x01(\v2\x11.goqueue.v1.ErrorR\x05error\"\x92\x03\n" +
+	"\x0fTransactionInfo\x12%\n" +
+	"\x0etransaction_id\x18\x01 \x01(\tR\rtransactionId\x12)\n" +
+	"\x10transactional_id\x18\x02 \x01(\tR\x0ftransactionalId\x12\x1f\n" +
+	"\vproducer_id\x18\x03 \x01(\x03R\n" +
+	"producerId\x12\x14\n" +
+	"\x05epoch\x18\x04 \x01(\x05R\x05epoch\x12\x14\n" +
+	"\x05state\x18\x05 \x01(\tR\x05state\x129\n" +
+	"\n" +
+	"start_time\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\tstartTime\x12D\n" +
+	"\x10last_update_time\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\x0elastUpdateTime\x12\x1d\n" +
+	"\n" +
+	"timeout_ms\x18\b \x01(\x03R\ttimeoutMs\x12@\n" +
+	"\n" +
+	"partitions\x18\t \x03(\v2 .goqueue.v1.TransactionPartitionR\n" +
+	"partitions\"L\n" +
+	"\x14TransactionPartition\x12\x14\n" +
+	"\x05topic\x18\x01 \x01(\tR\x05topic\x12\x1e\n" +
+	"\n" +
+	"partitions\x18\x02 \x03(\x05R\n" +
+	"partitions\".\n" +
 	"\x12HealthCheckRequest\x12\x18\n" +
 	"\aservice\x18\x01 \x01(\tR\aservice\"H\n" +
 	"\x13HealthCheckResponse\x121\n" +
@@ -3698,7 +4683,15 @@ const file_goqueue_proto_rawDesc = "" +
 	"\rOffsetService\x12T\n" +
 	"\rCommitOffsets\x12 .goqueue.v1.CommitOffsetsRequest\x1a!.goqueue.v1.CommitOffsetsResponse\x12Q\n" +
 	"\fFetchOffsets\x12\x1f.goqueue.v1.FetchOffsetsRequest\x1a .goqueue.v1.FetchOffsetsResponse\x12Q\n" +
-	"\fResetOffsets\x12\x1f.goqueue.v1.ResetOffsetsRequest\x1a .goqueue.v1.ResetOffsetsResponse2\xa5\x01\n" +
+	"\fResetOffsets\x12\x1f.goqueue.v1.ResetOffsetsRequest\x1a .goqueue.v1.ResetOffsetsResponse2\xa1\x05\n" +
+	"\x12TransactionService\x12Q\n" +
+	"\fInitProducer\x12\x1f.goqueue.v1.InitProducerRequest\x1a .goqueue.v1.InitProducerResponse\x12]\n" +
+	"\x10BeginTransaction\x12#.goqueue.v1.BeginTransactionRequest\x1a$.goqueue.v1.BeginTransactionResponse\x12Q\n" +
+	"\fAddPartition\x12\x1f.goqueue.v1.AddPartitionRequest\x1a .goqueue.v1.AddPartitionResponse\x12`\n" +
+	"\x11CommitTransaction\x12$.goqueue.v1.CommitTransactionRequest\x1a%.goqueue.v1.CommitTransactionResponse\x12]\n" +
+	"\x10AbortTransaction\x12#.goqueue.v1.AbortTransactionRequest\x1a$.goqueue.v1.AbortTransactionResponse\x12]\n" +
+	"\x10ListTransactions\x12#.goqueue.v1.ListTransactionsRequest\x1a$.goqueue.v1.ListTransactionsResponse\x12f\n" +
+	"\x13DescribeTransaction\x12&.goqueue.v1.DescribeTransactionRequest\x1a'.goqueue.v1.DescribeTransactionResponse2\xa5\x01\n" +
 	"\rHealthService\x12H\n" +
 	"\x05Check\x12\x1e.goqueue.v1.HealthCheckRequest\x1a\x1f.goqueue.v1.HealthCheckResponse\x12J\n" +
 	"\x05Watch\x12\x1e.goqueue.v1.HealthCheckRequest\x1a\x1f.goqueue.v1.HealthCheckResponse0\x01B\x8b\x01\n" +
@@ -3719,101 +4712,117 @@ func file_goqueue_proto_rawDescGZIP() []byte {
 }
 
 var file_goqueue_proto_enumTypes = make([]protoimpl.EnumInfo, 6)
-var file_goqueue_proto_msgTypes = make([]protoimpl.MessageInfo, 42)
+var file_goqueue_proto_msgTypes = make([]protoimpl.MessageInfo, 58)
 var file_goqueue_proto_goTypes = []any{
-	(ErrorCode)(0),                   // 0: goqueue.v1.ErrorCode
-	(AckMode)(0),                     // 1: goqueue.v1.AckMode
-	(ConsumeStartPosition)(0),        // 2: goqueue.v1.ConsumeStartPosition
-	(RebalanceType)(0),               // 3: goqueue.v1.RebalanceType
-	(OffsetResetStrategy)(0),         // 4: goqueue.v1.OffsetResetStrategy
-	(ServingStatus)(0),               // 5: goqueue.v1.ServingStatus
-	(*Message)(nil),                  // 6: goqueue.v1.Message
-	(*Error)(nil),                    // 7: goqueue.v1.Error
-	(*PublishRequest)(nil),           // 8: goqueue.v1.PublishRequest
-	(*PublishResponse)(nil),          // 9: goqueue.v1.PublishResponse
-	(*PublishStreamRequest)(nil),     // 10: goqueue.v1.PublishStreamRequest
-	(*PublishStreamResponse)(nil),    // 11: goqueue.v1.PublishStreamResponse
-	(*ConsumeRequest)(nil),           // 12: goqueue.v1.ConsumeRequest
-	(*SubscribeRequest)(nil),         // 13: goqueue.v1.SubscribeRequest
-	(*ConsumeResponse)(nil),          // 14: goqueue.v1.ConsumeResponse
-	(*MessageBatch)(nil),             // 15: goqueue.v1.MessageBatch
-	(*Heartbeat)(nil),                // 16: goqueue.v1.Heartbeat
-	(*Assignment)(nil),               // 17: goqueue.v1.Assignment
-	(*TopicPartition)(nil),           // 18: goqueue.v1.TopicPartition
-	(*RebalanceNotification)(nil),    // 19: goqueue.v1.RebalanceNotification
-	(*AckRequest)(nil),               // 20: goqueue.v1.AckRequest
-	(*AckResponse)(nil),              // 21: goqueue.v1.AckResponse
-	(*NackRequest)(nil),              // 22: goqueue.v1.NackRequest
-	(*NackResponse)(nil),             // 23: goqueue.v1.NackResponse
-	(*RejectRequest)(nil),            // 24: goqueue.v1.RejectRequest
-	(*RejectResponse)(nil),           // 25: goqueue.v1.RejectResponse
-	(*ExtendVisibilityRequest)(nil),  // 26: goqueue.v1.ExtendVisibilityRequest
-	(*ExtendVisibilityResponse)(nil), // 27: goqueue.v1.ExtendVisibilityResponse
-	(*BatchAckRequest)(nil),          // 28: goqueue.v1.BatchAckRequest
-	(*OffsetAck)(nil),                // 29: goqueue.v1.OffsetAck
-	(*BatchAckResponse)(nil),         // 30: goqueue.v1.BatchAckResponse
-	(*AckError)(nil),                 // 31: goqueue.v1.AckError
-	(*CommitOffsetsRequest)(nil),     // 32: goqueue.v1.CommitOffsetsRequest
-	(*OffsetCommit)(nil),             // 33: goqueue.v1.OffsetCommit
-	(*CommitOffsetsResponse)(nil),    // 34: goqueue.v1.CommitOffsetsResponse
-	(*OffsetCommitResult)(nil),       // 35: goqueue.v1.OffsetCommitResult
-	(*FetchOffsetsRequest)(nil),      // 36: goqueue.v1.FetchOffsetsRequest
-	(*FetchOffsetsResponse)(nil),     // 37: goqueue.v1.FetchOffsetsResponse
-	(*OffsetFetchResult)(nil),        // 38: goqueue.v1.OffsetFetchResult
-	(*ResetOffsetsRequest)(nil),      // 39: goqueue.v1.ResetOffsetsRequest
-	(*ResetOffsetsResponse)(nil),     // 40: goqueue.v1.ResetOffsetsResponse
-	(*OffsetResetResult)(nil),        // 41: goqueue.v1.OffsetResetResult
-	(*HealthCheckRequest)(nil),       // 42: goqueue.v1.HealthCheckRequest
-	(*HealthCheckResponse)(nil),      // 43: goqueue.v1.HealthCheckResponse
-	nil,                              // 44: goqueue.v1.Message.HeadersEntry
-	nil,                              // 45: goqueue.v1.Error.DetailsEntry
-	nil,                              // 46: goqueue.v1.PublishRequest.HeadersEntry
-	nil,                              // 47: goqueue.v1.PublishStreamRequest.HeadersEntry
-	(*timestamppb.Timestamp)(nil),    // 48: google.protobuf.Timestamp
-	(*durationpb.Duration)(nil),      // 49: google.protobuf.Duration
+	(ErrorCode)(0),                      // 0: goqueue.v1.ErrorCode
+	(AckMode)(0),                        // 1: goqueue.v1.AckMode
+	(ConsumeStartPosition)(0),           // 2: goqueue.v1.ConsumeStartPosition
+	(RebalanceType)(0),                  // 3: goqueue.v1.RebalanceType
+	(OffsetResetStrategy)(0),            // 4: goqueue.v1.OffsetResetStrategy
+	(ServingStatus)(0),                  // 5: goqueue.v1.ServingStatus
+	(*Message)(nil),                     // 6: goqueue.v1.Message
+	(*Error)(nil),                       // 7: goqueue.v1.Error
+	(*PublishRequest)(nil),              // 8: goqueue.v1.PublishRequest
+	(*PublishResponse)(nil),             // 9: goqueue.v1.PublishResponse
+	(*PublishStreamRequest)(nil),        // 10: goqueue.v1.PublishStreamRequest
+	(*PublishStreamResponse)(nil),       // 11: goqueue.v1.PublishStreamResponse
+	(*ConsumeRequest)(nil),              // 12: goqueue.v1.ConsumeRequest
+	(*SubscribeRequest)(nil),            // 13: goqueue.v1.SubscribeRequest
+	(*ConsumeResponse)(nil),             // 14: goqueue.v1.ConsumeResponse
+	(*MessageBatch)(nil),                // 15: goqueue.v1.MessageBatch
+	(*Heartbeat)(nil),                   // 16: goqueue.v1.Heartbeat
+	(*Assignment)(nil),                  // 17: goqueue.v1.Assignment
+	(*TopicPartition)(nil),              // 18: goqueue.v1.TopicPartition
+	(*RebalanceNotification)(nil),       // 19: goqueue.v1.RebalanceNotification
+	(*AckRequest)(nil),                  // 20: goqueue.v1.AckRequest
+	(*AckResponse)(nil),                 // 21: goqueue.v1.AckResponse
+	(*NackRequest)(nil),                 // 22: goqueue.v1.NackRequest
+	(*NackResponse)(nil),                // 23: goqueue.v1.NackResponse
+	(*RejectRequest)(nil),               // 24: goqueue.v1.RejectRequest
+	(*RejectResponse)(nil),              // 25: goqueue.v1.RejectResponse
+	(*ExtendVisibilityRequest)(nil),     // 26: goqueue.v1.ExtendVisibilityRequest
+	(*ExtendVisibilityResponse)(nil),    // 27: goqueue.v1.ExtendVisibilityResponse
+	(*BatchAckRequest)(nil),             // 28: goqueue.v1.BatchAckRequest
+	(*OffsetAck)(nil),                   // 29: goqueue.v1.OffsetAck
+	(*BatchAckResponse)(nil),            // 30: goqueue.v1.BatchAckResponse
+	(*AckError)(nil),                    // 31: goqueue.v1.AckError
+	(*CommitOffsetsRequest)(nil),        // 32: goqueue.v1.CommitOffsetsRequest
+	(*OffsetCommit)(nil),                // 33: goqueue.v1.OffsetCommit
+	(*CommitOffsetsResponse)(nil),       // 34: goqueue.v1.CommitOffsetsResponse
+	(*OffsetCommitResult)(nil),          // 35: goqueue.v1.OffsetCommitResult
+	(*FetchOffsetsRequest)(nil),         // 36: goqueue.v1.FetchOffsetsRequest
+	(*FetchOffsetsResponse)(nil),        // 37: goqueue.v1.FetchOffsetsResponse
+	(*OffsetFetchResult)(nil),           // 38: goqueue.v1.OffsetFetchResult
+	(*ResetOffsetsRequest)(nil),         // 39: goqueue.v1.ResetOffsetsRequest
+	(*ResetOffsetsResponse)(nil),        // 40: goqueue.v1.ResetOffsetsResponse
+	(*OffsetResetResult)(nil),           // 41: goqueue.v1.OffsetResetResult
+	(*InitProducerRequest)(nil),         // 42: goqueue.v1.InitProducerRequest
+	(*InitProducerResponse)(nil),        // 43: goqueue.v1.InitProducerResponse
+	(*BeginTransactionRequest)(nil),     // 44: goqueue.v1.BeginTransactionRequest
+	(*BeginTransactionResponse)(nil),    // 45: goqueue.v1.BeginTransactionResponse
+	(*AddPartitionRequest)(nil),         // 46: goqueue.v1.AddPartitionRequest
+	(*AddPartitionResponse)(nil),        // 47: goqueue.v1.AddPartitionResponse
+	(*CommitTransactionRequest)(nil),    // 48: goqueue.v1.CommitTransactionRequest
+	(*CommitTransactionResponse)(nil),   // 49: goqueue.v1.CommitTransactionResponse
+	(*AbortTransactionRequest)(nil),     // 50: goqueue.v1.AbortTransactionRequest
+	(*AbortTransactionResponse)(nil),    // 51: goqueue.v1.AbortTransactionResponse
+	(*ListTransactionsRequest)(nil),     // 52: goqueue.v1.ListTransactionsRequest
+	(*ListTransactionsResponse)(nil),    // 53: goqueue.v1.ListTransactionsResponse
+	(*DescribeTransactionRequest)(nil),  // 54: goqueue.v1.DescribeTransactionRequest
+	(*DescribeTransactionResponse)(nil), // 55: goqueue.v1.DescribeTransactionResponse
+	(*TransactionInfo)(nil),             // 56: goqueue.v1.TransactionInfo
+	(*TransactionPartition)(nil),        // 57: goqueue.v1.TransactionPartition
+	(*HealthCheckRequest)(nil),          // 58: goqueue.v1.HealthCheckRequest
+	(*HealthCheckResponse)(nil),         // 59: goqueue.v1.HealthCheckResponse
+	nil,                                 // 60: goqueue.v1.Message.HeadersEntry
+	nil,                                 // 61: goqueue.v1.Error.DetailsEntry
+	nil,                                 // 62: goqueue.v1.PublishRequest.HeadersEntry
+	nil,                                 // 63: goqueue.v1.PublishStreamRequest.HeadersEntry
+	(*timestamppb.Timestamp)(nil),       // 64: google.protobuf.Timestamp
+	(*durationpb.Duration)(nil),         // 65: google.protobuf.Duration
 }
 var file_goqueue_proto_depIdxs = []int32{
-	48, // 0: goqueue.v1.Message.timestamp:type_name -> google.protobuf.Timestamp
-	48, // 1: goqueue.v1.Message.deliver_at:type_name -> google.protobuf.Timestamp
-	44, // 2: goqueue.v1.Message.headers:type_name -> goqueue.v1.Message.HeadersEntry
+	64, // 0: goqueue.v1.Message.timestamp:type_name -> google.protobuf.Timestamp
+	64, // 1: goqueue.v1.Message.deliver_at:type_name -> google.protobuf.Timestamp
+	60, // 2: goqueue.v1.Message.headers:type_name -> goqueue.v1.Message.HeadersEntry
 	0,  // 3: goqueue.v1.Error.code:type_name -> goqueue.v1.ErrorCode
-	45, // 4: goqueue.v1.Error.details:type_name -> goqueue.v1.Error.DetailsEntry
-	49, // 5: goqueue.v1.Error.retry_after:type_name -> google.protobuf.Duration
-	46, // 6: goqueue.v1.PublishRequest.headers:type_name -> goqueue.v1.PublishRequest.HeadersEntry
-	49, // 7: goqueue.v1.PublishRequest.delay:type_name -> google.protobuf.Duration
-	48, // 8: goqueue.v1.PublishRequest.deliver_at:type_name -> google.protobuf.Timestamp
+	61, // 4: goqueue.v1.Error.details:type_name -> goqueue.v1.Error.DetailsEntry
+	65, // 5: goqueue.v1.Error.retry_after:type_name -> google.protobuf.Duration
+	62, // 6: goqueue.v1.PublishRequest.headers:type_name -> goqueue.v1.PublishRequest.HeadersEntry
+	65, // 7: goqueue.v1.PublishRequest.delay:type_name -> google.protobuf.Duration
+	64, // 8: goqueue.v1.PublishRequest.deliver_at:type_name -> google.protobuf.Timestamp
 	1,  // 9: goqueue.v1.PublishRequest.ack_mode:type_name -> goqueue.v1.AckMode
-	48, // 10: goqueue.v1.PublishResponse.timestamp:type_name -> google.protobuf.Timestamp
+	64, // 10: goqueue.v1.PublishResponse.timestamp:type_name -> google.protobuf.Timestamp
 	7,  // 11: goqueue.v1.PublishResponse.error:type_name -> goqueue.v1.Error
-	47, // 12: goqueue.v1.PublishStreamRequest.headers:type_name -> goqueue.v1.PublishStreamRequest.HeadersEntry
-	49, // 13: goqueue.v1.PublishStreamRequest.delay:type_name -> google.protobuf.Duration
+	63, // 12: goqueue.v1.PublishStreamRequest.headers:type_name -> goqueue.v1.PublishStreamRequest.HeadersEntry
+	65, // 13: goqueue.v1.PublishStreamRequest.delay:type_name -> google.protobuf.Duration
 	1,  // 14: goqueue.v1.PublishStreamRequest.ack_mode:type_name -> goqueue.v1.AckMode
-	48, // 15: goqueue.v1.PublishStreamResponse.timestamp:type_name -> google.protobuf.Timestamp
+	64, // 15: goqueue.v1.PublishStreamResponse.timestamp:type_name -> google.protobuf.Timestamp
 	7,  // 16: goqueue.v1.PublishStreamResponse.error:type_name -> goqueue.v1.Error
 	2,  // 17: goqueue.v1.ConsumeRequest.start_position:type_name -> goqueue.v1.ConsumeStartPosition
-	48, // 18: goqueue.v1.ConsumeRequest.start_timestamp:type_name -> google.protobuf.Timestamp
-	49, // 19: goqueue.v1.ConsumeRequest.max_wait:type_name -> google.protobuf.Duration
+	64, // 18: goqueue.v1.ConsumeRequest.start_timestamp:type_name -> google.protobuf.Timestamp
+	65, // 19: goqueue.v1.ConsumeRequest.max_wait:type_name -> google.protobuf.Duration
 	2,  // 20: goqueue.v1.SubscribeRequest.start_position:type_name -> goqueue.v1.ConsumeStartPosition
-	49, // 21: goqueue.v1.SubscribeRequest.max_wait:type_name -> google.protobuf.Duration
-	49, // 22: goqueue.v1.SubscribeRequest.session_timeout:type_name -> google.protobuf.Duration
-	49, // 23: goqueue.v1.SubscribeRequest.heartbeat_interval:type_name -> google.protobuf.Duration
+	65, // 21: goqueue.v1.SubscribeRequest.max_wait:type_name -> google.protobuf.Duration
+	65, // 22: goqueue.v1.SubscribeRequest.session_timeout:type_name -> google.protobuf.Duration
+	65, // 23: goqueue.v1.SubscribeRequest.heartbeat_interval:type_name -> google.protobuf.Duration
 	15, // 24: goqueue.v1.ConsumeResponse.messages:type_name -> goqueue.v1.MessageBatch
 	16, // 25: goqueue.v1.ConsumeResponse.heartbeat:type_name -> goqueue.v1.Heartbeat
 	17, // 26: goqueue.v1.ConsumeResponse.assignment:type_name -> goqueue.v1.Assignment
 	19, // 27: goqueue.v1.ConsumeResponse.rebalance:type_name -> goqueue.v1.RebalanceNotification
 	7,  // 28: goqueue.v1.ConsumeResponse.error:type_name -> goqueue.v1.Error
 	6,  // 29: goqueue.v1.MessageBatch.messages:type_name -> goqueue.v1.Message
-	48, // 30: goqueue.v1.Heartbeat.timestamp:type_name -> google.protobuf.Timestamp
+	64, // 30: goqueue.v1.Heartbeat.timestamp:type_name -> google.protobuf.Timestamp
 	18, // 31: goqueue.v1.Assignment.partitions:type_name -> goqueue.v1.TopicPartition
 	3,  // 32: goqueue.v1.RebalanceNotification.type:type_name -> goqueue.v1.RebalanceType
 	18, // 33: goqueue.v1.RebalanceNotification.partitions:type_name -> goqueue.v1.TopicPartition
 	7,  // 34: goqueue.v1.AckResponse.error:type_name -> goqueue.v1.Error
-	49, // 35: goqueue.v1.NackRequest.visibility_timeout:type_name -> google.protobuf.Duration
-	48, // 36: goqueue.v1.NackResponse.next_visible_at:type_name -> google.protobuf.Timestamp
+	65, // 35: goqueue.v1.NackRequest.visibility_timeout:type_name -> google.protobuf.Duration
+	64, // 36: goqueue.v1.NackResponse.next_visible_at:type_name -> google.protobuf.Timestamp
 	7,  // 37: goqueue.v1.NackResponse.error:type_name -> goqueue.v1.Error
 	7,  // 38: goqueue.v1.RejectResponse.error:type_name -> goqueue.v1.Error
-	49, // 39: goqueue.v1.ExtendVisibilityRequest.visibility_timeout:type_name -> google.protobuf.Duration
-	48, // 40: goqueue.v1.ExtendVisibilityResponse.new_deadline:type_name -> google.protobuf.Timestamp
+	65, // 39: goqueue.v1.ExtendVisibilityRequest.visibility_timeout:type_name -> google.protobuf.Duration
+	64, // 40: goqueue.v1.ExtendVisibilityResponse.new_deadline:type_name -> google.protobuf.Timestamp
 	7,  // 41: goqueue.v1.ExtendVisibilityResponse.error:type_name -> goqueue.v1.Error
 	29, // 42: goqueue.v1.BatchAckRequest.offsets:type_name -> goqueue.v1.OffsetAck
 	31, // 43: goqueue.v1.BatchAckResponse.failures:type_name -> goqueue.v1.AckError
@@ -3826,44 +4835,69 @@ var file_goqueue_proto_depIdxs = []int32{
 	7,  // 50: goqueue.v1.OffsetFetchResult.error:type_name -> goqueue.v1.Error
 	4,  // 51: goqueue.v1.ResetOffsetsRequest.strategy:type_name -> goqueue.v1.OffsetResetStrategy
 	18, // 52: goqueue.v1.ResetOffsetsRequest.partitions:type_name -> goqueue.v1.TopicPartition
-	48, // 53: goqueue.v1.ResetOffsetsRequest.timestamp:type_name -> google.protobuf.Timestamp
+	64, // 53: goqueue.v1.ResetOffsetsRequest.timestamp:type_name -> google.protobuf.Timestamp
 	33, // 54: goqueue.v1.ResetOffsetsRequest.offsets:type_name -> goqueue.v1.OffsetCommit
 	41, // 55: goqueue.v1.ResetOffsetsResponse.results:type_name -> goqueue.v1.OffsetResetResult
 	7,  // 56: goqueue.v1.OffsetResetResult.error:type_name -> goqueue.v1.Error
-	5,  // 57: goqueue.v1.HealthCheckResponse.status:type_name -> goqueue.v1.ServingStatus
-	8,  // 58: goqueue.v1.PublishService.Publish:input_type -> goqueue.v1.PublishRequest
-	10, // 59: goqueue.v1.PublishService.PublishStream:input_type -> goqueue.v1.PublishStreamRequest
-	12, // 60: goqueue.v1.ConsumeService.Consume:input_type -> goqueue.v1.ConsumeRequest
-	13, // 61: goqueue.v1.ConsumeService.Subscribe:input_type -> goqueue.v1.SubscribeRequest
-	20, // 62: goqueue.v1.AckService.Ack:input_type -> goqueue.v1.AckRequest
-	22, // 63: goqueue.v1.AckService.Nack:input_type -> goqueue.v1.NackRequest
-	24, // 64: goqueue.v1.AckService.Reject:input_type -> goqueue.v1.RejectRequest
-	26, // 65: goqueue.v1.AckService.ExtendVisibility:input_type -> goqueue.v1.ExtendVisibilityRequest
-	28, // 66: goqueue.v1.AckService.BatchAck:input_type -> goqueue.v1.BatchAckRequest
-	32, // 67: goqueue.v1.OffsetService.CommitOffsets:input_type -> goqueue.v1.CommitOffsetsRequest
-	36, // 68: goqueue.v1.OffsetService.FetchOffsets:input_type -> goqueue.v1.FetchOffsetsRequest
-	39, // 69: goqueue.v1.OffsetService.ResetOffsets:input_type -> goqueue.v1.ResetOffsetsRequest
-	42, // 70: goqueue.v1.HealthService.Check:input_type -> goqueue.v1.HealthCheckRequest
-	42, // 71: goqueue.v1.HealthService.Watch:input_type -> goqueue.v1.HealthCheckRequest
-	9,  // 72: goqueue.v1.PublishService.Publish:output_type -> goqueue.v1.PublishResponse
-	11, // 73: goqueue.v1.PublishService.PublishStream:output_type -> goqueue.v1.PublishStreamResponse
-	14, // 74: goqueue.v1.ConsumeService.Consume:output_type -> goqueue.v1.ConsumeResponse
-	14, // 75: goqueue.v1.ConsumeService.Subscribe:output_type -> goqueue.v1.ConsumeResponse
-	21, // 76: goqueue.v1.AckService.Ack:output_type -> goqueue.v1.AckResponse
-	23, // 77: goqueue.v1.AckService.Nack:output_type -> goqueue.v1.NackResponse
-	25, // 78: goqueue.v1.AckService.Reject:output_type -> goqueue.v1.RejectResponse
-	27, // 79: goqueue.v1.AckService.ExtendVisibility:output_type -> goqueue.v1.ExtendVisibilityResponse
-	30, // 80: goqueue.v1.AckService.BatchAck:output_type -> goqueue.v1.BatchAckResponse
-	34, // 81: goqueue.v1.OffsetService.CommitOffsets:output_type -> goqueue.v1.CommitOffsetsResponse
-	37, // 82: goqueue.v1.OffsetService.FetchOffsets:output_type -> goqueue.v1.FetchOffsetsResponse
-	40, // 83: goqueue.v1.OffsetService.ResetOffsets:output_type -> goqueue.v1.ResetOffsetsResponse
-	43, // 84: goqueue.v1.HealthService.Check:output_type -> goqueue.v1.HealthCheckResponse
-	43, // 85: goqueue.v1.HealthService.Watch:output_type -> goqueue.v1.HealthCheckResponse
-	72, // [72:86] is the sub-list for method output_type
-	58, // [58:72] is the sub-list for method input_type
-	58, // [58:58] is the sub-list for extension type_name
-	58, // [58:58] is the sub-list for extension extendee
-	0,  // [0:58] is the sub-list for field type_name
+	7,  // 57: goqueue.v1.InitProducerResponse.error:type_name -> goqueue.v1.Error
+	7,  // 58: goqueue.v1.BeginTransactionResponse.error:type_name -> goqueue.v1.Error
+	7,  // 59: goqueue.v1.AddPartitionResponse.error:type_name -> goqueue.v1.Error
+	7,  // 60: goqueue.v1.CommitTransactionResponse.error:type_name -> goqueue.v1.Error
+	7,  // 61: goqueue.v1.AbortTransactionResponse.error:type_name -> goqueue.v1.Error
+	56, // 62: goqueue.v1.ListTransactionsResponse.transactions:type_name -> goqueue.v1.TransactionInfo
+	56, // 63: goqueue.v1.DescribeTransactionResponse.transaction:type_name -> goqueue.v1.TransactionInfo
+	7,  // 64: goqueue.v1.DescribeTransactionResponse.error:type_name -> goqueue.v1.Error
+	64, // 65: goqueue.v1.TransactionInfo.start_time:type_name -> google.protobuf.Timestamp
+	64, // 66: goqueue.v1.TransactionInfo.last_update_time:type_name -> google.protobuf.Timestamp
+	57, // 67: goqueue.v1.TransactionInfo.partitions:type_name -> goqueue.v1.TransactionPartition
+	5,  // 68: goqueue.v1.HealthCheckResponse.status:type_name -> goqueue.v1.ServingStatus
+	8,  // 69: goqueue.v1.PublishService.Publish:input_type -> goqueue.v1.PublishRequest
+	10, // 70: goqueue.v1.PublishService.PublishStream:input_type -> goqueue.v1.PublishStreamRequest
+	12, // 71: goqueue.v1.ConsumeService.Consume:input_type -> goqueue.v1.ConsumeRequest
+	13, // 72: goqueue.v1.ConsumeService.Subscribe:input_type -> goqueue.v1.SubscribeRequest
+	20, // 73: goqueue.v1.AckService.Ack:input_type -> goqueue.v1.AckRequest
+	22, // 74: goqueue.v1.AckService.Nack:input_type -> goqueue.v1.NackRequest
+	24, // 75: goqueue.v1.AckService.Reject:input_type -> goqueue.v1.RejectRequest
+	26, // 76: goqueue.v1.AckService.ExtendVisibility:input_type -> goqueue.v1.ExtendVisibilityRequest
+	28, // 77: goqueue.v1.AckService.BatchAck:input_type -> goqueue.v1.BatchAckRequest
+	32, // 78: goqueue.v1.OffsetService.CommitOffsets:input_type -> goqueue.v1.CommitOffsetsRequest
+	36, // 79: goqueue.v1.OffsetService.FetchOffsets:input_type -> goqueue.v1.FetchOffsetsRequest
+	39, // 80: goqueue.v1.OffsetService.ResetOffsets:input_type -> goqueue.v1.ResetOffsetsRequest
+	42, // 81: goqueue.v1.TransactionService.InitProducer:input_type -> goqueue.v1.InitProducerRequest
+	44, // 82: goqueue.v1.TransactionService.BeginTransaction:input_type -> goqueue.v1.BeginTransactionRequest
+	46, // 83: goqueue.v1.TransactionService.AddPartition:input_type -> goqueue.v1.AddPartitionRequest
+	48, // 84: goqueue.v1.TransactionService.CommitTransaction:input_type -> goqueue.v1.CommitTransactionRequest
+	50, // 85: goqueue.v1.TransactionService.AbortTransaction:input_type -> goqueue.v1.AbortTransactionRequest
+	52, // 86: goqueue.v1.TransactionService.ListTransactions:input_type -> goqueue.v1.ListTransactionsRequest
+	54, // 87: goqueue.v1.TransactionService.DescribeTransaction:input_type -> goqueue.v1.DescribeTransactionRequest
+	58, // 88: goqueue.v1.HealthService.Check:input_type -> goqueue.v1.HealthCheckRequest
+	58, // 89: goqueue.v1.HealthService.Watch:input_type -> goqueue.v1.HealthCheckRequest
+	9,  // 90: goqueue.v1.PublishService.Publish:output_type -> goqueue.v1.PublishResponse
+	11, // 91: goqueue.v1.PublishService.PublishStream:output_type -> goqueue.v1.PublishStreamResponse
+	14, // 92: goqueue.v1.ConsumeService.Consume:output_type -> goqueue.v1.ConsumeResponse
+	14, // 93: goqueue.v1.ConsumeService.Subscribe:output_type -> goqueue.v1.ConsumeResponse
+	21, // 94: goqueue.v1.AckService.Ack:output_type -> goqueue.v1.AckResponse
+	23, // 95: goqueue.v1.AckService.Nack:output_type -> goqueue.v1.NackResponse
+	25, // 96: goqueue.v1.AckService.Reject:output_type -> goqueue.v1.RejectResponse
+	27, // 97: goqueue.v1.AckService.ExtendVisibility:output_type -> goqueue.v1.ExtendVisibilityResponse
+	30, // 98: goqueue.v1.AckService.BatchAck:output_type -> goqueue.v1.BatchAckResponse
+	34, // 99: goqueue.v1.OffsetService.CommitOffsets:output_type -> goqueue.v1.CommitOffsetsResponse
+	37, // 100: goqueue.v1.OffsetService.FetchOffsets:output_type -> goqueue.v1.FetchOffsetsResponse
+	40, // 101: goqueue.v1.OffsetService.ResetOffsets:output_type -> goqueue.v1.ResetOffsetsResponse
+	43, // 102: goqueue.v1.TransactionService.InitProducer:output_type -> goqueue.v1.InitProducerResponse
+	45, // 103: goqueue.v1.TransactionService.BeginTransaction:output_type -> goqueue.v1.BeginTransactionResponse
+	47, // 104: goqueue.v1.TransactionService.AddPartition:output_type -> goqueue.v1.AddPartitionResponse
+	49, // 105: goqueue.v1.TransactionService.CommitTransaction:output_type -> goqueue.v1.CommitTransactionResponse
+	51, // 106: goqueue.v1.TransactionService.AbortTransaction:output_type -> goqueue.v1.AbortTransactionResponse
+	53, // 107: goqueue.v1.TransactionService.ListTransactions:output_type -> goqueue.v1.ListTransactionsResponse
+	55, // 108: goqueue.v1.TransactionService.DescribeTransaction:output_type -> goqueue.v1.DescribeTransactionResponse
+	59, // 109: goqueue.v1.HealthService.Check:output_type -> goqueue.v1.HealthCheckResponse
+	59, // 110: goqueue.v1.HealthService.Watch:output_type -> goqueue.v1.HealthCheckResponse
+	90, // [90:111] is the sub-list for method output_type
+	69, // [69:90] is the sub-list for method input_type
+	69, // [69:69] is the sub-list for extension type_name
+	69, // [69:69] is the sub-list for extension extendee
+	0,  // [0:69] is the sub-list for field type_name
 }
 
 func init() { file_goqueue_proto_init() }
@@ -3884,9 +4918,9 @@ func file_goqueue_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_goqueue_proto_rawDesc), len(file_goqueue_proto_rawDesc)),
 			NumEnums:      6,
-			NumMessages:   42,
+			NumMessages:   58,
 			NumExtensions: 0,
-			NumServices:   5,
+			NumServices:   6,
 		},
 		GoTypes:           file_goqueue_proto_goTypes,
 		DependencyIndexes: file_goqueue_proto_depIdxs,

@@ -161,6 +161,29 @@ const (
 
 	// WALRecordUpdateSequence records sequence number update
 	WALRecordUpdateSequence WALRecordType = "update_sequence"
+
+	// WALRecordTxnPublish records a transactional publish with offset info.
+	//
+	// WHY THIS RECORD?
+	// During recovery, we need to rebuild the UncommittedTracker to know
+	// which offsets belong to in-progress transactions. Without this record,
+	// the WAL only tracks transaction lifecycle (begin/commit/abort) but not
+	// the specific message offsets written as part of each transaction.
+	//
+	// WHEN THIS IS WRITTEN:
+	//   After a successful transactional publish (PublishTransactional)
+	//
+	// DURING RECOVERY:
+	//   - If the transaction is still ongoing → add offset to UncommittedTracker
+	//   - If the transaction was committed → ignore (offsets are visible)
+	//   - If the transaction was aborted → add offset to AbortedTracker
+	//
+	// COMPARISON:
+	//   - Kafka: Doesn't need this because it uses LSO (Last Stable Offset)
+	//     and scans control records in the log segments themselves
+	//   - goqueue: We track offsets in-memory, so we need WAL records to
+	//     rebuild that state after restart
+	WALRecordTxnPublish WALRecordType = "txn_publish"
 )
 
 // =============================================================================
@@ -237,6 +260,26 @@ type UpdateSequenceData struct {
 	Partition  int    `json:"partition"`
 	Sequence   int32  `json:"sequence"`
 	Offset     int64  `json:"offset"`
+}
+
+// TxnPublishData is the payload for WALRecordTxnPublish.
+//
+// Records the specific offset written during a transactional publish.
+// This data is essential for rebuilding the UncommittedTracker during recovery.
+//
+// FIELDS:
+//   - TransactionalId: Identifies the producer (for looking up transaction state)
+//   - TransactionId: The specific transaction this publish belongs to
+//   - Topic/Partition/Offset: Where the message was written
+//   - ProducerId/Epoch: Producer identity for the UncommittedTracker
+type TxnPublishData struct {
+	TransactionalId string `json:"transactionalId"`
+	TransactionId   string `json:"transactionId"`
+	Topic           string `json:"topic"`
+	Partition       int    `json:"partition"`
+	Offset          int64  `json:"offset"`
+	ProducerId      int64  `json:"producerId"`
+	Epoch           int16  `json:"epoch"`
 }
 
 // =============================================================================
@@ -741,6 +784,28 @@ func (l *TransactionLog) WriteUpdateSequence(pid int64, topic string, partition 
 	})
 }
 
+// WriteTxnPublish records a transactional publish with offset information.
+//
+// WHEN CALLED:
+//
+//	After a successful PublishTransactional in the broker.
+//
+// PURPOSE:
+//
+//	Enables recovery to rebuild the UncommittedTracker by knowing exactly
+//	which offsets belong to which transaction.
+func (l *TransactionLog) WriteTxnPublish(transactionalId, transactionId, topic string, partition int, offset int64, producerId int64, epoch int16) error {
+	return l.WriteRecord(WALRecordTxnPublish, TxnPublishData{
+		TransactionalId: transactionalId,
+		TransactionId:   transactionId,
+		Topic:           topic,
+		Partition:       partition,
+		Offset:          offset,
+		ProducerId:      producerId,
+		Epoch:           epoch,
+	})
+}
+
 // =============================================================================
 // WAL RECORD PARSING HELPERS
 // =============================================================================
@@ -797,6 +862,13 @@ func ParseExpireProducerData(raw json.RawMessage) (ExpireProducerData, error) {
 // ParseUpdateSequenceData parses update_sequence record data.
 func ParseUpdateSequenceData(raw json.RawMessage) (UpdateSequenceData, error) {
 	var data UpdateSequenceData
+	err := json.Unmarshal(raw, &data)
+	return data, err
+}
+
+// ParseTxnPublishData parses txn_publish record data.
+func ParseTxnPublishData(raw json.RawMessage) (TxnPublishData, error) {
+	var data TxnPublishData
 	err := json.Unmarshal(raw, &data)
 	return data, err
 }

@@ -557,6 +557,33 @@ func NewBroker(config BrokerConfig) (*Broker, error) {
 		startedAt:          time.Now(),
 	}
 
+	// =========================================================================
+	// RESTORE ABORTED TRACKER FROM DISK (M26 - Persistence)
+	// =========================================================================
+	//
+	// Load previously persisted aborted offsets. Without this, consumers
+	// would see messages from aborted transactions after a broker restart.
+	//
+	// The aborted tracker is saved to disk on every abort operation
+	// (see MarkTransactionAborted). Here we restore that state.
+	// =========================================================================
+	abortedFilePath := AbortedTrackerFilePath(config.DataDir)
+	if err := broker.abortedTracker.LoadFromFile(abortedFilePath); err != nil {
+		logger.Error("failed to load aborted tracker from disk",
+			"path", abortedFilePath,
+			"error", err)
+		// Non-fatal: start with empty tracker. Previously aborted messages
+		// may briefly be visible until the next abort persists the state.
+	} else {
+		stats := broker.abortedTracker.Stats()
+		if stats.TotalAbortedOffsets > 0 {
+			logger.Info("restored aborted tracker from disk",
+				"path", abortedFilePath,
+				"aborted_offsets", stats.TotalAbortedOffsets,
+				"topics", len(stats.ByTopic))
+		}
+	}
+
 	// Create ACK manager for per-message acknowledgment (M4)
 	// Must be created after broker struct exists (circular dependency)
 	broker.ackManager = NewAckManager(broker, reliabilityConfig)
@@ -1629,8 +1656,44 @@ func (b *Broker) PublishWithTrace(topic string, key, value []byte, traceCtx Trac
 	}
 
 	// We ARE the leader (or single-node mode) - write locally
-	// Perform publish (includes partitioning and persistence)
-	partition, offset, err = t.Publish(key, value)
+	// =========================================================================
+	// TRACE CONTINUITY: Inject traceparent header into message
+	// =========================================================================
+	//
+	// WHY:
+	// Without storing the trace context in message headers, the consume path
+	// has no way to link consumed messages back to their original publish trace.
+	// This breaks end-to-end observability.
+	//
+	// HOW IT WORKS:
+	//   1. Publisher creates or propagates a trace context
+	//   2. We inject the traceparent header into the message (stored on disk)
+	//   3. Consumer reads message → extracts traceparent → continues trace
+	//
+	// COMPARISON:
+	//   - Kafka: Producer injects headers (via interceptors), consumer extracts
+	//   - SQS: X-Ray trace ID in system attributes
+	//   - goqueue: traceparent header (W3C standard, same as Kafka best practice)
+	//
+	// =========================================================================
+	if !ctx.TraceID.IsZero() {
+		// Build message with traceparent header for trace continuity
+		msg := storage.NewMessage(key, value)
+		msg.Headers = map[string]string{
+			"traceparent": ctx.Traceparent(),
+		}
+		msg.Flags |= storage.FlagHasHeaders
+
+		// Determine partition (same logic as Topic.Publish)
+		partition = t.DeterminePartition(key)
+
+		// Write to partition with headers
+		offset, err = t.PublishMessageToPartition(partition, msg)
+	} else {
+		// No trace context - standard publish (no extra header overhead)
+		partition, offset, err = t.Publish(key, value)
+	}
+
 	if err != nil {
 		// Record error span
 		if !ctx.TraceID.IsZero() {
@@ -2147,6 +2210,56 @@ func (b *Broker) MarkTransactionAborted(offsets []partitionOffset) {
 	b.abortedTracker.MarkAborted(offsets)
 	b.logger.Debug("marked offsets as aborted",
 		"count", len(offsets))
+
+	// =========================================================================
+	// PERSIST ABORTED TRACKER TO DISK (M26 - Persistence)
+	// =========================================================================
+	//
+	// Save aborted state after every abort so it survives restarts.
+	// Aborts are infrequent in normal operation, so the write cost is acceptable.
+	//
+	// CRASH SAFETY:
+	//   If we crash between MarkAborted and Save, the in-memory state is lost.
+	//   On next restart, those offsets won't be filtered. To fully close this
+	//   window, we'd need to write the WAL record first (write-ahead pattern).
+	//   For now, this is acceptable since aborts are rare and the window is tiny.
+	// =========================================================================
+	abortedFilePath := AbortedTrackerFilePath(b.config.DataDir)
+	if err := b.abortedTracker.Save(abortedFilePath); err != nil {
+		b.logger.Error("failed to persist aborted tracker",
+			"path", abortedFilePath,
+			"error", err)
+	}
+}
+
+// TrackUncommittedOffset registers a single message offset as part of an
+// in-progress transaction. Delegates to UncommittedTracker.Track().
+//
+// ============================================================================
+// RECOVERY USAGE
+// ============================================================================
+//
+// Called during WAL recovery when the coordinator replays txn_publish records
+// and discovers transactions that were in-progress at crash time. Without
+// this, the UncommittedTracker would be empty after restart and in-progress
+// transaction messages would be visible to read_committed consumers (BUG).
+//
+// NORMAL OPERATION: The broker calls uncommittedTracker.Track() directly
+// in PublishTransactional(). This method exists solely for the coordinator
+// to rebuild tracker state during recovery.
+//
+// COMPARISON:
+//   - Kafka: Rebuilds from __transaction_state log + partition markers
+//   - SQS: No transactions, not applicable
+//   - RabbitMQ: Publisher confirms + journal replay, no read isolation
+//   - goqueue: WAL txn_publish records → replay into UncommittedTracker
+//
+// ============================================================================
+func (b *Broker) TrackUncommittedOffset(topic string, partition int, offset int64, txnId string, producerId int64, epoch int16) {
+	if b.uncommittedTracker == nil {
+		return
+	}
+	b.uncommittedTracker.Track(topic, partition, offset, txnId, producerId, epoch)
 }
 
 // PublishTransactional writes a message as part of an active transaction.
@@ -2306,6 +2419,24 @@ func (b *Broker) PublishTransactional(
 				"partition", actualPartition,
 				"offset", offset,
 				"txn_id", state.CurrentTransactionId)
+
+			// =========================================================================
+			// WRITE WAL RECORD FOR TRANSACTIONAL PUBLISH (M26 - Recovery)
+			// =========================================================================
+			//
+			// Record the offset in the transaction WAL so we can rebuild the
+			// UncommittedTracker during recovery. Without this, restarted brokers
+			// can't tell which offsets belong to in-progress transactions.
+			// =========================================================================
+			b.transactionCoordinator.RecordTxnPublish(
+				state.TransactionalId,
+				state.CurrentTransactionId,
+				topic,
+				actualPartition,
+				offset,
+				producerId,
+				epoch,
+			)
 		}
 	}
 
@@ -2517,13 +2648,43 @@ func (b *Broker) Consume(topic string, partition int, fromOffset int64, maxMessa
 			Priority:  sm.Priority,
 		}
 
-		// Record consume.fetched span for each message
-		// Note: We don't have trace context from message headers yet (M7 enhancement)
-		// For now, create a new trace for each consumed message
-		ctx := b.tracer.StartTrace(topic, partition, sm.Offset)
-		if !ctx.TraceID.IsZero() {
-			span := NewSpan(ctx.TraceID, SpanEventConsumeFetched, topic, partition, sm.Offset)
+		// =====================================================================
+		// TRACE CONTINUITY: Extract traceparent from stored message headers
+		// =====================================================================
+		//
+		// WHY:
+		// End-to-end tracing requires that the consume span links back to the
+		// same TraceID as the publish span. The traceparent header was injected
+		// during publish (M25) and stored on disk with the message.
+		//
+		// FLOW:
+		//   Publish:  traceparent → message headers → disk
+		//   Consume:  disk → message headers → extract traceparent → child span
+		//
+		// COMPARISON:
+		//   - Kafka: Consumer interceptors extract headers for trace propagation
+		//   - SQS: X-Ray SDK extracts trace from system attributes
+		//   - goqueue: Native header extraction (no external SDK needed)
+		//
+		// =====================================================================
+		var consumeTraceCtx TraceContext
+		if traceparent, ok := sm.Headers["traceparent"]; ok && traceparent != "" {
+			// Continue the trace from publish - extract the stored context
+			parentCtx, err := ParseTraceparent(traceparent)
+			if err == nil {
+				// Create a child span context (same TraceID, new SpanID)
+				consumeTraceCtx = parentCtx.NewChildContext()
+			}
+		}
+		// Fall back to creating a new trace if no header found
+		if consumeTraceCtx.TraceID.IsZero() {
+			consumeTraceCtx = b.tracer.StartTrace(topic, partition, sm.Offset)
+		}
+
+		if !consumeTraceCtx.TraceID.IsZero() {
+			span := NewSpan(consumeTraceCtx.TraceID, SpanEventConsumeFetched, topic, partition, sm.Offset)
 			span.WithAttribute("priority", fmt.Sprintf("%d", sm.Priority))
+			span.WithAttribute("trace_continuity", fmt.Sprintf("%v", sm.Headers["traceparent"] != ""))
 			b.tracer.RecordSpan(span)
 		}
 	}

@@ -70,3 +70,29 @@ data:
       acks: {{ .Values.config.producer.acks | quote }}
       retries: {{ .Values.config.producer.retries }}
       retryBackoff: {{ .Values.config.producer.retryBackoff | quote }}
+    
+    {{- if .Values.tracing }}
+    tracing:
+      enabled: {{ .Values.tracing.enabled }}
+      samplingRate: {{ .Values.tracing.samplingRate }}
+      ringBufferCapacity: {{ .Values.tracing.ringBufferCapacity }}
+      fileExport:
+        enabled: {{ .Values.tracing.fileExport.enabled }}
+        maxFileSize: {{ .Values.tracing.fileExport.maxFileSize }}
+      {{- if and .Values.tracing.otlp .Values.tracing.otlp.enabled }}
+      otlp:
+        enabled: true
+        endpoint: {{ .Values.tracing.otlp.endpoint | quote }}
+        protocol: {{ .Values.tracing.otlp.protocol | quote }}
+        insecure: {{ .Values.tracing.otlp.insecure }}
+        batchSize: {{ .Values.tracing.otlp.batchSize }}
+        flushInterval: {{ .Values.tracing.otlp.flushInterval | quote }}
+        serviceName: {{ .Values.tracing.otlp.serviceName | quote }}
+        {{- if .Values.tracing.otlp.headers }}
+        headers:
+          {{- range $key, $val := .Values.tracing.otlp.headers }}
+          {{ $key }}: {{ $val | quote }}
+          {{- end }}
+        {{- end }}
+      {{- end }}
+    {{- end }}

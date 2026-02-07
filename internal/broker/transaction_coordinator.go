@@ -189,6 +189,9 @@ var (
 
 	// ErrNoTransactionInProgress means no transaction is active
 	ErrNoTransactionInProgress = errors.New("no transaction in progress")
+
+	// ErrTransactionsNotEnabled means the coordinator is nil/disabled
+	ErrTransactionsNotEnabled = errors.New("transactions not enabled on this broker")
 )
 
 // =============================================================================
@@ -344,6 +347,15 @@ type TransactionBroker interface {
 	// These offsets will remain invisible to consumers forever.
 	// Called only when a transaction aborts (not on commit).
 	MarkTransactionAborted(offsets []partitionOffset)
+
+	// TrackUncommittedOffset registers a single message offset as part of an
+	// in-progress transaction. Used during WAL recovery to rebuild the
+	// UncommittedTracker for transactions that were active at crash time.
+	//
+	// RECOVERY FLOW:
+	//   WAL replay sees txn_publish records → calls this for in-progress txns
+	//   → UncommittedTracker is rebuilt → read_committed isolation maintained
+	TrackUncommittedOffset(topic string, partition int, offset int64, txnId string, producerId int64, epoch int16)
 }
 
 // =============================================================================
@@ -1063,6 +1075,45 @@ func (tc *TransactionCoordinator) CheckSequence(pid ProducerIdAndEpoch, topic st
 	return tc.producerManager.CheckAndUpdateSequence(pid, topic, partition, sequence, offset)
 }
 
+// RecordTxnPublish writes a WAL record for a transactional publish.
+//
+// THIS IS CRITICAL FOR RECOVERY:
+// Without this record, the UncommittedTracker can't be rebuilt after restart.
+// Consumers would then see uncommitted messages from in-progress transactions,
+// violating read_committed isolation.
+//
+// PARAMETERS:
+//   - transactionalId: The producer's transactional ID
+//   - transactionId: The specific transaction this publish belongs to
+//   - topic: Topic where the message was published
+//   - partition: Partition where the message was written
+//   - offset: Offset assigned to the message
+//   - producerId: Producer's unique identifier
+//   - epoch: Producer's current epoch
+//
+// WHEN CALLED:
+//
+//	After a successful PublishTransactional where the offset is tracked
+//	in the UncommittedTracker.
+func (tc *TransactionCoordinator) RecordTxnPublish(transactionalId, transactionId, topic string, partition int, offset int64, producerId int64, epoch int16) {
+	tc.closeMu.RLock()
+	if tc.closed {
+		tc.closeMu.RUnlock()
+		return
+	}
+	tc.closeMu.RUnlock()
+
+	if err := tc.transactionLog.WriteTxnPublish(transactionalId, transactionId, topic, partition, offset, producerId, epoch); err != nil {
+		tc.logger.Error("failed to write txn_publish WAL record",
+			"transactionalId", transactionalId,
+			"transactionId", transactionId,
+			"topic", topic,
+			"partition", partition,
+			"offset", offset,
+			"error", err)
+	}
+}
+
 // =============================================================================
 // BACKGROUND TASKS
 // =============================================================================
@@ -1178,6 +1229,37 @@ func (tc *TransactionCoordinator) takeSnapshot() {
 // RECOVERY
 // =============================================================================
 
+// recoveryState tracks publish offsets during WAL replay for rebuilding
+// the UncommittedTracker and AbortedTracker.
+//
+// FLOW:
+//  1. During WAL replay, txn_publish records accumulate offsets by txnId
+//  2. complete_commit records remove those offsets (they're visible)
+//  3. complete_abort records move offsets to abortedTracker
+//  4. After replay, remaining offsets belong to in-progress transactions
+//     → they go into the UncommittedTracker
+//
+// WHY IN-MEMORY ACCUMULATION:
+//
+//	We could handle this incrementally (track on publish, clear on
+//	commit/abort), but accumulating then processing gives us a cleaner
+//	implementation and a chance to cross-check recovery state.
+type recoveryState struct {
+	// publishesByTxn maps transactionId -> list of TxnPublishData
+	publishesByTxn map[string][]TxnPublishData
+
+	// completedTxns tracks which transactions completed (committed or aborted)
+	// Value is true for committed, false for aborted
+	completedTxns map[string]bool
+}
+
+func newRecoveryState() *recoveryState {
+	return &recoveryState{
+		publishesByTxn: make(map[string][]TxnPublishData),
+		completedTxns:  make(map[string]bool),
+	}
+}
+
 // recover loads state from persistent storage.
 func (tc *TransactionCoordinator) recover() error {
 	// Load snapshot
@@ -1196,8 +1278,24 @@ func (tc *TransactionCoordinator) recover() error {
 		}
 	}
 
-	// Replay WAL
-	count, err := tc.transactionLog.ReplayWAL(tc.replayRecord)
+	// =========================================================================
+	// REPLAY WAL WITH OFFSET TRACKING (M26 - Recovery)
+	// =========================================================================
+	//
+	// The WAL replay now serves two purposes:
+	//   1. Restore transaction lifecycle state (original behavior)
+	//   2. Track publish offsets for rebuilding UncommittedTracker
+	//
+	// During replay, we accumulate all txn_publish records. After replay:
+	//   - Offsets from committed transactions → already visible to consumers
+	//   - Offsets from aborted transactions → mark in AbortedTracker
+	//   - Offsets from in-progress transactions → track in UncommittedTracker
+	//
+	// =========================================================================
+	rs := newRecoveryState()
+	count, err := tc.transactionLog.ReplayWAL(func(record WALRecord) error {
+		return tc.replayRecordWithRecovery(record, rs)
+	})
 	if err != nil {
 		return fmt.Errorf("failed to replay WAL: %w", err)
 	}
@@ -1205,10 +1303,113 @@ func (tc *TransactionCoordinator) recover() error {
 	tc.logger.Info("WAL replayed",
 		"records", count)
 
+	// Rebuild tracker state from accumulated publish offsets
+	tc.rebuildTrackers(rs)
+
 	// Recover any transactions that were in-progress
 	tc.recoverInProgressTransactions()
 
 	return nil
+}
+
+// replayRecordWithRecovery wraps replayRecord and also accumulates publish
+// offsets for tracker recovery.
+func (tc *TransactionCoordinator) replayRecordWithRecovery(record WALRecord, rs *recoveryState) error {
+	// Handle txn_publish records for recovery
+	if record.Type == WALRecordTxnPublish {
+		data, err := ParseTxnPublishData(record.Data)
+		if err != nil {
+			tc.logger.Warn("failed to parse txn_publish WAL record (skipping)",
+				"error", err)
+			return nil // Non-fatal: skip corrupted publish records
+		}
+		rs.publishesByTxn[data.TransactionId] = append(
+			rs.publishesByTxn[data.TransactionId], data)
+		return nil
+	}
+
+	// Track completed transactions (committed or aborted)
+	switch record.Type {
+	case WALRecordCompleteCommit:
+		data, err := ParseCompleteCommitData(record.Data)
+		if err == nil {
+			state := tc.producerManager.GetTransactionalState(data.TransactionalId)
+			if state != nil && state.CurrentTransactionId != "" {
+				rs.completedTxns[state.CurrentTransactionId] = true // committed
+			}
+		}
+	case WALRecordCompleteAbort:
+		data, err := ParseCompleteCommitData(record.Data)
+		if err == nil {
+			state := tc.producerManager.GetTransactionalState(data.TransactionalId)
+			if state != nil && state.CurrentTransactionId != "" {
+				rs.completedTxns[state.CurrentTransactionId] = false // aborted
+			}
+		}
+	}
+
+	// Original replay logic for transaction lifecycle
+	return tc.replayRecord(record)
+}
+
+// rebuildTrackers uses accumulated recovery state to restore the
+// UncommittedTracker and supplement the AbortedTracker.
+//
+// FLOW:
+//
+//	For each transaction's publish offsets:
+//	  - If committed → do nothing (messages are visible)
+//	  - If aborted → mark in AbortedTracker (messages stay invisible)
+//	  - If in-progress → track in UncommittedTracker (hidden until commit)
+func (tc *TransactionCoordinator) rebuildTrackers(rs *recoveryState) {
+	var uncommittedCount, abortedCount int
+
+	for txnId, publishes := range rs.publishesByTxn {
+		committed, isCompleted := rs.completedTxns[txnId]
+
+		if isCompleted && committed {
+			// Transaction committed → offsets are visible, nothing to do
+			continue
+		}
+
+		if isCompleted && !committed {
+			// Transaction aborted → mark offsets as permanently invisible
+			offsets := make([]partitionOffset, len(publishes))
+			for i, p := range publishes {
+				offsets[i] = partitionOffset{
+					Topic:     p.Topic,
+					Partition: p.Partition,
+					Offset:    p.Offset,
+				}
+			}
+			tc.broker.MarkTransactionAborted(offsets)
+			abortedCount += len(offsets)
+			continue
+		}
+
+		// Transaction is still in-progress → track as uncommitted
+		// These offsets will be hidden from read_committed consumers until
+		// the transaction either commits (clear tracker) or aborts (move to
+		// aborted tracker). If the coordinator times out these transactions,
+		// the normal abort flow handles the tracker transition.
+		for _, p := range publishes {
+			tc.broker.TrackUncommittedOffset(
+				p.Topic, p.Partition, p.Offset,
+				p.TransactionId, p.ProducerId, p.Epoch,
+			)
+		}
+		uncommittedCount += len(publishes)
+	}
+
+	if abortedCount > 0 {
+		tc.logger.Info("recovered aborted offsets from WAL",
+			"aborted_offsets", abortedCount)
+	}
+	if uncommittedCount > 0 {
+		tc.logger.Info("recovered uncommitted offsets from WAL",
+			"uncommitted_offsets", uncommittedCount,
+			"note", "these will be resolved by timeout checker")
+	}
 }
 
 // replayRecord processes a single WAL record during recovery.

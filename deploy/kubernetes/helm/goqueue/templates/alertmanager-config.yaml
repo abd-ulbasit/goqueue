@@ -1,0 +1,321 @@
+# =============================================================================
+# ALERTMANAGER CONFIGURATION SECRET
+# =============================================================================
+#
+# WHY A SECRET (NOT CONFIGMAP)?
+# Alertmanager config contains sensitive data like:
+#   - Slack webhook URLs (can post to your channels)
+#   - PagerDuty API keys (can page your team)
+#   - Email credentials (SMTP passwords)
+# 
+# COMPARISON WITH OTHER SYSTEMS:
+#   - Datadog: Webhook configs stored in UI
+#   - PagerDuty: Integration keys in environment
+#   - CloudWatch: SNS topic ARNs (IAM controlled)
+#   - Prometheus: Alertmanager config (this file)
+#
+# HOW ALERTMANAGER ROUTING WORKS:
+#
+#   ┌─────────────────────────────────────────────────────────────────────────┐
+#   │                    ALERTMANAGER ROUTING TREE                            │
+#   │                                                                         │
+#   │   Incoming Alert                                                        │
+#   │       │                                                                 │
+#   │       ▼                                                                 │
+#   │   ┌─────────────┐                                                       │
+#   │   │   Route     │ ◄── Default receiver                                  │
+#   │   │  (root)     │                                                       │
+#   │   └──────┬──────┘                                                       │
+#   │          │                                                              │
+#   │   ┌──────┴──────────────────────────────────────────┐                   │
+#   │   │                                                 │                   │
+#   │   ▼                                                 ▼                   │
+#   │ severity=critical                             severity=warning          │
+#   │   │                                                 │                   │
+#   │   ▼                                                 ▼                   │
+#   │ ┌──────────┐                                   ┌──────────┐             │
+#   │ │ PagerDuty│                                   │  Slack   │             │
+#   │ │ + Slack  │                                   │  only    │             │
+#   │ └──────────┘                                   └──────────┘             │
+#   │                                                                         │
+#   └─────────────────────────────────────────────────────────────────────────┘
+#
+# ALERT GROUPING:
+# Alerts are grouped to prevent notification storms. If 10 pods fail,
+# you get ONE notification with all 10, not 10 separate pages.
+#
+# INHIBITION:
+# Higher severity alerts suppress lower severity for same issue.
+# E.g., "ClusterDown" inhibits "NodeDown" for same cluster.
+#
+{{- if .Values.alertmanager.enabled }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "goqueue.fullname" . }}-alertmanager-config
+  namespace: {{ .Values.alertmanager.namespace | default .Release.Namespace }}
+  labels:
+    {{- include "goqueue.labels" . | nindent 4 }}
+    # Label for Alertmanager to pick up this config
+    alertmanager: {{ .Values.alertmanager.alertmanagerLabel | default "main" }}
+type: Opaque
+stringData:
+  alertmanager.yaml: |
+    # =========================================================================
+    # GOQUEUE ALERTMANAGER CONFIGURATION
+    # =========================================================================
+    #
+    # This configuration routes alerts based on severity to appropriate channels.
+    # Configure receivers below with your actual webhook URLs and API keys.
+    #
+    # ENVIRONMENT-SPECIFIC SETTINGS:
+    #   - Development: Slack only, no paging
+    #   - Staging: Slack + email
+    #   - Production: PagerDuty + Slack + email
+    #
+    global:
+      # How long to wait before sending initial notification after alert fires
+      # This allows grouping multiple alerts together
+      resolve_timeout: 5m
+      
+      {{- if .Values.alertmanager.global.slackApiUrl }}
+      # Slack webhook URL for posting messages
+      # Get from: https://api.slack.com/messaging/webhooks
+      slack_api_url: {{ .Values.alertmanager.global.slackApiUrl | quote }}
+      {{- end }}
+      
+      {{- if .Values.alertmanager.global.pagerdutyUrl }}
+      # PagerDuty Events API v2 URL
+      pagerduty_url: {{ .Values.alertmanager.global.pagerdutyUrl | quote }}
+      {{- end }}
+      
+      {{- if .Values.alertmanager.global.smtp }}
+      # SMTP configuration for email alerts
+      smtp_smarthost: {{ .Values.alertmanager.global.smtp.smarthost | quote }}
+      smtp_from: {{ .Values.alertmanager.global.smtp.from | quote }}
+      smtp_auth_username: {{ .Values.alertmanager.global.smtp.username | quote }}
+      smtp_auth_password: {{ .Values.alertmanager.global.smtp.password | quote }}
+      smtp_require_tls: {{ .Values.alertmanager.global.smtp.requireTls | default true }}
+      {{- end }}
+
+    # =========================================================================
+    # NOTIFICATION TEMPLATES
+    # =========================================================================
+    # Custom templates for alert messages
+    templates:
+      - '/etc/alertmanager/templates/*.tmpl'
+
+    # =========================================================================
+    # INHIBITION RULES
+    # =========================================================================
+    # Inhibition rules suppress certain alerts when others are firing.
+    # This prevents alert storms (e.g., don't page for each pod when node is down).
+    inhibit_rules:
+      # If cluster is down, suppress individual node alerts
+      - source_matchers:
+          - alertname = GoQueueClusterUnhealthy
+        target_matchers:
+          - alertname =~ "GoQueueNode.*"
+        # Only inhibit if same cluster
+        equal: ['cluster']
+      
+      # Critical alerts suppress warning alerts for same alertname
+      - source_matchers:
+          - severity = critical
+        target_matchers:
+          - severity = warning
+        equal: ['alertname', 'topic', 'consumer_group']
+      
+      # Offline partitions suppress under-replicated (more severe includes less)
+      - source_matchers:
+          - alertname = GoQueueOfflinePartitions
+        target_matchers:
+          - alertname = GoQueueUnderReplicatedPartitions
+        equal: ['topic']
+
+    # =========================================================================
+    # ROUTING TREE
+    # =========================================================================
+    # The route tree defines how alerts are routed to receivers.
+    route:
+      # Default receiver (catches everything not matched below)
+      receiver: {{ .Values.alertmanager.defaultReceiver | default "slack-notifications" }}
+      
+      # How long to wait for new alerts to group together
+      # Prevents sending many similar alerts separately
+      group_wait: {{ .Values.alertmanager.groupWait | default "30s" }}
+      
+      # How long to wait before sending a notification about new alerts
+      # in a group that already had a notification sent
+      group_interval: {{ .Values.alertmanager.groupInterval | default "5m" }}
+      
+      # How often to re-send a notification if alert is still firing
+      repeat_interval: {{ .Values.alertmanager.repeatInterval | default "4h" }}
+      
+      # Group alerts by these labels (reduces notification volume)
+      group_by: ['alertname', 'severity', 'topic']
+      
+      # Child routes for specific alert types
+      routes:
+        # =====================================================================
+        # CRITICAL ALERTS → PagerDuty + Slack
+        # =====================================================================
+        # These are "wake someone up at 3am" alerts
+        - matchers:
+            - severity = critical
+          receiver: {{ .Values.alertmanager.criticalReceiver | default "pagerduty-critical" }}
+          # Don't wait to group critical alerts - notify immediately
+          group_wait: 10s
+          # Re-send every 15 minutes if still firing
+          repeat_interval: 15m
+          continue: true  # Also send to next matching route
+        
+        # Critical also goes to Slack for visibility
+        - matchers:
+            - severity = critical
+          receiver: slack-critical
+        
+        # =====================================================================
+        # WARNING ALERTS → Slack only
+        # =====================================================================
+        # These are "look at during business hours" alerts
+        - matchers:
+            - severity = warning
+          receiver: slack-warnings
+          # Business hours only (optional - requires Alertmanager >= 0.22)
+          # active_time_intervals:
+          #   - business-hours
+        
+        # =====================================================================
+        # CONSUMER LAG ALERTS → Dedicated channel
+        # =====================================================================
+        # Consumer lag often needs different team attention (data platform)
+        - matchers:
+            - alertname =~ "GoQueue.*ConsumerLag.*"
+          receiver: {{ .Values.alertmanager.consumerLagReceiver | default "slack-consumer-lag" }}
+        
+        # =====================================================================
+        # STORAGE ALERTS → Infrastructure team
+        # =====================================================================
+        - matchers:
+            - alertname =~ "GoQueue.*(Disk|Storage|Fsync).*"
+          receiver: {{ .Values.alertmanager.storageReceiver | default "slack-infrastructure" }}
+
+    # =========================================================================
+    # RECEIVERS
+    # =========================================================================
+    # Receivers define where and how to send notifications.
+    receivers:
+      # =====================================================================
+      # PAGERDUTY RECEIVERS
+      # =====================================================================
+      # PagerDuty triggers incident creation and on-call paging
+      {{- if .Values.alertmanager.pagerduty.enabled }}
+      - name: pagerduty-critical
+        pagerduty_configs:
+          - routing_key: {{ .Values.alertmanager.pagerduty.routingKey | quote }}
+            severity: critical
+            # Include GoQueue-specific details in incident
+            details:
+              firing: '{{ "{{" }} template "pagerduty.goqueue.firing" . {{ "}}" }}'
+              runbook: '{{ "{{" }} template "pagerduty.goqueue.runbook" . {{ "}}" }}'
+              dashboard: "https://grafana.{{ .Values.alertmanager.domain }}/d/goqueue-overview"
+            # Link to runbook in incident
+            links:
+              - href: '{{ "{{" }} template "pagerduty.goqueue.runbook" . {{ "}}" }}'
+                text: "Runbook"
+      {{- end }}
+      
+      # =====================================================================
+      # SLACK RECEIVERS
+      # =====================================================================
+      {{- if .Values.alertmanager.slack.enabled }}
+      - name: slack-notifications
+        slack_configs:
+          - channel: {{ .Values.alertmanager.slack.channel | default "#goqueue-alerts" | quote }}
+            send_resolved: true
+            title: '{{ "{{" }} template "slack.goqueue.title" . {{ "}}" }}'
+            text: '{{ "{{" }} template "slack.goqueue.text" . {{ "}}" }}'
+            color: '{{ "{{" }} template "slack.goqueue.color" . {{ "}}" }}'
+            actions:
+              - type: button
+                text: "📊 Dashboard"
+                url: "https://grafana.{{ .Values.alertmanager.domain }}/d/goqueue-overview"
+              - type: button
+                text: "📖 Runbook"
+                url: '{{ "{{" }} template "slack.goqueue.runbook" . {{ "}}" }}'
+      
+      - name: slack-critical
+        slack_configs:
+          - channel: {{ .Values.alertmanager.slack.criticalChannel | default "#goqueue-critical" | quote }}
+            send_resolved: true
+            title: '🚨 CRITICAL: {{ "{{" }} template "slack.goqueue.title" . {{ "}}" }}'
+            text: '{{ "{{" }} template "slack.goqueue.text" . {{ "}}" }}'
+            color: 'danger'
+      
+      - name: slack-warnings
+        slack_configs:
+          - channel: {{ .Values.alertmanager.slack.warningChannel | default "#goqueue-alerts" | quote }}
+            send_resolved: true
+            title: '⚠️ {{ "{{" }} template "slack.goqueue.title" . {{ "}}" }}'
+            text: '{{ "{{" }} template "slack.goqueue.text" . {{ "}}" }}'
+            color: 'warning'
+      
+      - name: slack-consumer-lag
+        slack_configs:
+          - channel: {{ .Values.alertmanager.slack.consumerLagChannel | default "#data-platform" | quote }}
+            send_resolved: true
+            title: '📉 Consumer Lag: {{ "{{" }} template "slack.goqueue.title" . {{ "}}" }}'
+            text: |
+              *Consumer Group:* {{ "{{" }} .GroupLabels.consumer_group {{ "}}" }}
+              *Topic:* {{ "{{" }} .GroupLabels.topic {{ "}}" }}
+              *Current Lag:* {{ "{{" }} .Annotations.description {{ "}}" }}
+              
+              <https://grafana.{{ .Values.alertmanager.domain }}/d/goqueue-consumer-groups|View Dashboard>
+      
+      - name: slack-infrastructure
+        slack_configs:
+          - channel: {{ .Values.alertmanager.slack.infrastructureChannel | default "#infrastructure" | quote }}
+            send_resolved: true
+            title: '🔧 Infrastructure: {{ "{{" }} template "slack.goqueue.title" . {{ "}}" }}'
+            text: '{{ "{{" }} template "slack.goqueue.text" . {{ "}}" }}'
+      {{- end }}
+      
+      # =====================================================================
+      # EMAIL RECEIVERS
+      # =====================================================================
+      {{- if .Values.alertmanager.email.enabled }}
+      - name: email-notifications
+        email_configs:
+          - to: {{ .Values.alertmanager.email.to | quote }}
+            send_resolved: true
+            headers:
+              Subject: '[GoQueue {{ "{{" }} .Status | toUpper {{ "}}" }}] {{ "{{" }} .GroupLabels.alertname {{ "}}" }}'
+            html: '{{ "{{" }} template "email.goqueue.html" . {{ "}}" }}'
+      
+      - name: email-critical
+        email_configs:
+          - to: {{ .Values.alertmanager.email.criticalTo | default .Values.alertmanager.email.to | quote }}
+            send_resolved: true
+            headers:
+              Subject: '🚨 [GoQueue CRITICAL] {{ "{{" }} .GroupLabels.alertname {{ "}}" }}'
+            html: '{{ "{{" }} template "email.goqueue.html" . {{ "}}" }}'
+      {{- end }}
+      
+      # =====================================================================
+      # WEBHOOK RECEIVERS (for custom integrations)
+      # =====================================================================
+      {{- if .Values.alertmanager.webhook.enabled }}
+      - name: webhook
+        webhook_configs:
+          - url: {{ .Values.alertmanager.webhook.url | quote }}
+            send_resolved: true
+            http_config:
+              {{- if .Values.alertmanager.webhook.bearerToken }}
+              bearer_token: {{ .Values.alertmanager.webhook.bearerToken | quote }}
+              {{- end }}
+      {{- end }}
+      
+      # Default null receiver (for silencing)
+      - name: "null"
+{{- end }}

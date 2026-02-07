@@ -69,6 +69,10 @@
 package broker
 
 import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 )
 
@@ -465,4 +469,213 @@ func (at *AbortedTracker) Stats() AbortedStats {
 	}
 
 	return stats
+}
+
+// =============================================================================
+// ABORTED TRACKER PERSISTENCE
+// =============================================================================
+//
+// WHY PERSIST ABORTED OFFSETS?
+// Without persistence, all aborted offsets are lost on restart. Consumers
+// would then see messages from aborted transactions — violating read_committed
+// isolation guarantees.
+//
+// PERSISTENCE STRATEGY:
+// ┌─────────────────────────────────────────────────────────────────────────────┐
+// │                                                                             │
+// │  Option 1: Write-per-abort (our approach)                                   │
+// │    - Save entire aborted state to JSON after each MarkAborted               │
+// │    - Pro: Simple, correct, survives any crash after save                    │
+// │    - Con: O(n) write where n = total aborted offsets                        │
+// │    - Acceptable because aborts should be rare in normal operation           │
+// │                                                                             │
+// │  Option 2: Append-only log                                                  │
+// │    - Append new aborted offsets to a WAL                                    │
+// │    - Pro: O(1) write per abort                                              │
+// │    - Con: Needs compaction, complex replay                                  │
+// │                                                                             │
+// │  Option 3: Rebuild from transaction WAL                                     │
+// │    - Replay all abort records and reconstruct state                         │
+// │    - Pro: No extra file, single source of truth                             │
+// │    - Con: Requires WAL to record publish offsets (which it currently        │
+// │          doesn't) and full replay on every restart                          │
+// │                                                                             │
+// │  COMPARISON:                                                                │
+// │    - Kafka: Rebuilds from log segments + control records (option 3)        │
+// │    - RabbitMQ: No transactions, so no aborted state                        │
+// │    - SQS: Messages are truly deleted, no abort concept                     │
+// │                                                                             │
+// └─────────────────────────────────────────────────────────────────────────────┘
+//
+// FILE FORMAT:
+//   {dataDir}/transactions/aborted_offsets.json
+//
+//   {
+//     "version": 1,
+//     "aborted": {
+//       "orders": {        // topic
+//         "0": [1, 5, 9],  // partition -> sorted offsets
+//         "1": [3, 7]
+//       }
+//     }
+//   }
+//
+// =============================================================================
+
+// abortedTrackerSnapshot is the JSON-serializable format for persisted state.
+type abortedTrackerSnapshot struct {
+	// Version for forward compatibility
+	Version int `json:"version"`
+
+	// Aborted maps topic -> partition (as string) -> list of offsets
+	// Partition keys are strings because JSON doesn't support int keys.
+	Aborted map[string]map[string][]int64 `json:"aborted"`
+}
+
+// Save persists the aborted tracker state to a JSON file.
+//
+// ATOMICITY:
+// Uses write-to-temp-then-rename pattern for crash-safe writes.
+// If the process crashes during write, the old file is still intact.
+//
+// ┌────────────────────────────────────────────────────────────────────────────┐
+// │  WRITE FLOW:                                                               │
+// │                                                                            │
+// │  1. Marshal state to JSON                                                  │
+// │  2. Write to temp file: aborted_offsets.json.tmp                           │
+// │  3. Sync temp file to disk (fsync)                                         │
+// │  4. Atomic rename: tmp → aborted_offsets.json                              │
+// │                                                                            │
+// │  If crash at step 2-3: temp file is incomplete, original is fine           │
+// │  If crash at step 4:   rename is atomic on most filesystems                │
+// └────────────────────────────────────────────────────────────────────────────┘
+func (at *AbortedTracker) Save(filePath string) error {
+	at.mu.RLock()
+
+	// Convert internal map to serializable format
+	snapshot := abortedTrackerSnapshot{
+		Version: 1,
+		Aborted: make(map[string]map[string][]int64),
+	}
+
+	for topic, partitions := range at.aborted {
+		snapshot.Aborted[topic] = make(map[string][]int64)
+		for partition, offsets := range partitions {
+			offsetList := make([]int64, 0, len(offsets))
+			for offset := range offsets {
+				offsetList = append(offsetList, offset)
+			}
+			snapshot.Aborted[topic][fmt.Sprintf("%d", partition)] = offsetList
+		}
+	}
+
+	at.mu.RUnlock()
+
+	// Marshal to JSON with indentation for debuggability
+	data, err := json.MarshalIndent(snapshot, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal aborted tracker: %w", err)
+	}
+
+	// Ensure directory exists
+	dir := filepath.Dir(filePath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("failed to create directory %s: %w", dir, err)
+	}
+
+	// Write to temp file first (crash-safe pattern)
+	tmpPath := filePath + ".tmp"
+	f, err := os.Create(tmpPath)
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("failed to write temp file: %w", err)
+	}
+
+	// Fsync to ensure data is on disk before rename
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("failed to sync temp file: %w", err)
+	}
+
+	if err := f.Close(); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("failed to close temp file: %w", err)
+	}
+
+	// Atomic rename
+	if err := os.Rename(tmpPath, filePath); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("failed to rename temp file: %w", err)
+	}
+
+	return nil
+}
+
+// LoadFromFile restores aborted tracker state from a persisted JSON file.
+//
+// BEHAVIOR:
+//   - If file doesn't exist: Returns nil (empty tracker, no error)
+//   - If file is corrupt: Returns error (operator should investigate)
+//   - If file is valid: Restores all aborted offsets
+//
+// WHEN CALLED:
+//
+//	During broker initialization, before any consume operations.
+func (at *AbortedTracker) LoadFromFile(filePath string) error {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// No persisted state — this is normal for first run
+			return nil
+		}
+		return fmt.Errorf("failed to read aborted tracker file: %w", err)
+	}
+
+	var snapshot abortedTrackerSnapshot
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		return fmt.Errorf("failed to unmarshal aborted tracker: %w", err)
+	}
+
+	if snapshot.Version != 1 {
+		return fmt.Errorf("unsupported aborted tracker version: %d", snapshot.Version)
+	}
+
+	at.mu.Lock()
+	defer at.mu.Unlock()
+
+	// Restore internal state from snapshot
+	for topic, partitions := range snapshot.Aborted {
+		if at.aborted[topic] == nil {
+			at.aborted[topic] = make(map[int]map[int64]struct{})
+		}
+
+		for partStr, offsets := range partitions {
+			var partition int
+			if _, err := fmt.Sscanf(partStr, "%d", &partition); err != nil {
+				return fmt.Errorf("invalid partition key %q: %w", partStr, err)
+			}
+
+			if at.aborted[topic][partition] == nil {
+				at.aborted[topic][partition] = make(map[int64]struct{})
+			}
+
+			for _, offset := range offsets {
+				at.aborted[topic][partition][offset] = struct{}{}
+			}
+		}
+	}
+
+	return nil
+}
+
+// AbortedTrackerFilePath returns the standard file path for storing aborted
+// tracker state within the given data directory.
+func AbortedTrackerFilePath(dataDir string) string {
+	return filepath.Join(dataDir, "transactions", "aborted_offsets.json")
 }

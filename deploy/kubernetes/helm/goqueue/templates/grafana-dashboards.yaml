@@ -384,4 +384,428 @@ data:
       "version": 1,
       "weekStart": ""
     }
+---
+# =============================================================================
+# GOQUEUE SLO/SLA DASHBOARD CONFIGMAP
+# =============================================================================
+#
+# This dashboard tracks Service Level Objectives and Error Budgets:
+#   - Publish Success Rate (SLO target: 99.9%)
+#   - P99 Publish Latency (SLO target: <100ms)
+#   - Error Budget consumption and burn rate
+#   - Consumer lag and cluster health SLIs
+#
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "goqueue.fullname" . }}-slo-dashboard
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "goqueue.labels" . | nindent 4 }}
+    {{ .Values.grafana.dashboards.label }}: {{ .Values.grafana.dashboards.labelValue | quote }}
+  {{- with .Values.grafana.dashboards.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+data:
+  goqueue-slo.json: |
+    {
+      "annotations": { "list": [] },
+      "description": "GoQueue SLO/SLA Dashboard - Service Level Objectives and Error Budgets",
+      "editable": true,
+      "fiscalYearStartMonth": 0,
+      "graphTooltip": 1,
+      "id": null,
+      "links": [],
+      "liveNow": false,
+      "panels": [
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+          "id": 100,
+          "panels": [],
+          "title": "SLO Summary",
+          "type": "row"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "description": "Percentage of successful publish requests",
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "thresholds" },
+              "mappings": [],
+              "max": 100,
+              "min": 0,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "red", "value": null },
+                  { "color": "yellow", "value": 99 },
+                  { "color": "green", "value": 99.9 }
+                ]
+              },
+              "unit": "percent"
+            },
+            "overrides": []
+          },
+          "gridPos": { "h": 6, "w": 6, "x": 0, "y": 1 },
+          "id": 1,
+          "options": {
+            "orientation": "auto",
+            "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+            "showThresholdLabels": false,
+            "showThresholdMarkers": true
+          },
+          "targets": [
+            {
+              "expr": "100 * (1 - sum(rate(goqueue_broker_messages_failed_total[1h])) / sum(rate(goqueue_broker_messages_published_total[1h])))",
+              "legendFormat": "Availability",
+              "refId": "A"
+            }
+          ],
+          "title": "Publish Success Rate (SLO: 99.9%)",
+          "type": "gauge"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "description": "P99 publish latency (target: <100ms)",
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "thresholds" },
+              "mappings": [],
+              "max": 0.5,
+              "min": 0,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "yellow", "value": 0.05 },
+                  { "color": "red", "value": 0.1 }
+                ]
+              },
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "gridPos": { "h": 6, "w": 6, "x": 6, "y": 1 },
+          "id": 2,
+          "options": {
+            "orientation": "auto",
+            "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+            "showThresholdLabels": false,
+            "showThresholdMarkers": true
+          },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.99, sum(rate(goqueue_broker_publish_latency_seconds_bucket[5m])) by (le))",
+              "legendFormat": "P99 Latency",
+              "refId": "A"
+            }
+          ],
+          "title": "P99 Publish Latency (SLO: <100ms)",
+          "type": "gauge"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "description": "Error budget remaining (SLO: 99.9% = 0.1% error budget)",
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "thresholds" },
+              "mappings": [],
+              "max": 100,
+              "min": 0,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "red", "value": null },
+                  { "color": "yellow", "value": 25 },
+                  { "color": "green", "value": 50 }
+                ]
+              },
+              "unit": "percent"
+            },
+            "overrides": []
+          },
+          "gridPos": { "h": 6, "w": 6, "x": 12, "y": 1 },
+          "id": 3,
+          "options": {
+            "orientation": "auto",
+            "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+            "showThresholdLabels": false,
+            "showThresholdMarkers": true
+          },
+          "targets": [
+            {
+              "expr": "100 * (1 - (sum(rate(goqueue_broker_messages_failed_total[24h])) / sum(rate(goqueue_broker_messages_published_total[24h]))) / 0.001)",
+              "legendFormat": "Error Budget",
+              "refId": "A"
+            }
+          ],
+          "title": "Error Budget Remaining (24h)",
+          "type": "gauge"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "description": "Number of healthy cluster nodes",
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "thresholds" },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "red", "value": null },
+                  { "color": "yellow", "value": 2 },
+                  { "color": "green", "value": 3 }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": { "h": 6, "w": 6, "x": 18, "y": 1 },
+          "id": 4,
+          "options": {
+            "colorMode": "value",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "count(up{job=\"goqueue\"} == 1)",
+              "legendFormat": "Healthy",
+              "refId": "A"
+            }
+          ],
+          "title": "Cluster Health",
+          "type": "stat"
+        },
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 7 },
+          "id": 101,
+          "panels": [],
+          "title": "Error Budget Trends",
+          "type": "row"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "description": "Error budget burn rate over time",
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": {
+                "axisLabel": "Burn Rate",
+                "axisPlacement": "auto",
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "showPoints": "never",
+                "thresholdsStyle": { "mode": "line" }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "yellow", "value": 1 },
+                  { "color": "red", "value": 2 }
+                ]
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+          "id": 5,
+          "options": {
+            "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" },
+            "tooltip": { "mode": "multi" }
+          },
+          "targets": [
+            {
+              "expr": "(sum(rate(goqueue_broker_messages_failed_total[1h])) / sum(rate(goqueue_broker_messages_published_total[1h]))) / 0.001",
+              "legendFormat": "1h Burn Rate",
+              "refId": "A"
+            },
+            {
+              "expr": "(sum(rate(goqueue_broker_messages_failed_total[6h])) / sum(rate(goqueue_broker_messages_published_total[6h]))) / 0.001",
+              "legendFormat": "6h Burn Rate",
+              "refId": "B"
+            }
+          ],
+          "title": "Error Budget Burn Rate",
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "description": "Success rate over time",
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "thresholds" },
+              "custom": {
+                "axisLabel": "Success Rate",
+                "axisPlacement": "auto",
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "showPoints": "never",
+                "thresholdsStyle": { "mode": "area" }
+              },
+              "mappings": [],
+              "max": 100,
+              "min": 95,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "red", "value": null },
+                  { "color": "yellow", "value": 99 },
+                  { "color": "green", "value": 99.9 }
+                ]
+              },
+              "unit": "percent"
+            },
+            "overrides": []
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+          "id": 6,
+          "options": {
+            "legend": { "calcs": ["mean", "min"], "displayMode": "table", "placement": "bottom" },
+            "tooltip": { "mode": "multi" }
+          },
+          "targets": [
+            {
+              "expr": "100 * (1 - sum(rate(goqueue_broker_messages_failed_total[5m])) / sum(rate(goqueue_broker_messages_published_total[5m])))",
+              "legendFormat": "Success Rate",
+              "refId": "A"
+            }
+          ],
+          "title": "Publish Success Rate Over Time",
+          "type": "timeseries"
+        },
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 16 },
+          "id": 102,
+          "panels": [],
+          "title": "Latency SLIs",
+          "type": "row"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "description": "Publish latency percentiles",
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": {
+                "axisLabel": "Latency",
+                "axisPlacement": "auto",
+                "drawStyle": "line",
+                "fillOpacity": 0,
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "showPoints": "never",
+                "thresholdsStyle": { "mode": "line" }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "red", "value": 0.1 }
+                ]
+              },
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 17 },
+          "id": 7,
+          "options": {
+            "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" },
+            "tooltip": { "mode": "multi" }
+          },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.50, sum(rate(goqueue_broker_publish_latency_seconds_bucket[5m])) by (le))",
+              "legendFormat": "P50",
+              "refId": "A"
+            },
+            {
+              "expr": "histogram_quantile(0.90, sum(rate(goqueue_broker_publish_latency_seconds_bucket[5m])) by (le))",
+              "legendFormat": "P90",
+              "refId": "B"
+            },
+            {
+              "expr": "histogram_quantile(0.99, sum(rate(goqueue_broker_publish_latency_seconds_bucket[5m])) by (le))",
+              "legendFormat": "P99",
+              "refId": "C"
+            }
+          ],
+          "title": "Publish Latency Percentiles",
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "description": "Consumer lag by group",
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": {
+                "axisLabel": "Lag (messages)",
+                "axisPlacement": "auto",
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "showPoints": "never",
+                "thresholdsStyle": { "mode": "line" }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "yellow", "value": 10000 },
+                  { "color": "red", "value": 100000 }
+                ]
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 17 },
+          "id": 8,
+          "options": {
+            "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" },
+            "tooltip": { "mode": "multi" }
+          },
+          "targets": [
+            {
+              "expr": "sum(goqueue_storage_log_end_offset) by (topic) - sum(goqueue_consumer_committed_offset) by (topic, consumer_group)",
+              "legendFormat": "{{`{{consumer_group}}`}} / {{`{{topic}}`}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Consumer Lag by Group",
+          "type": "timeseries"
+        }
+      ],
+      "refresh": "30s",
+      "schemaVersion": 38,
+      "style": "dark",
+      "tags": ["goqueue", "slo", "sla"],
+      "templating": { "list": [] },
+      "time": { "from": "now-24h", "to": "now" },
+      "timepicker": {},
+      "timezone": "",
+      "title": "GoQueue SLO/SLA",
+      "uid": "goqueue-slo",
+      "version": 1,
+      "weekStart": ""
+    }
 {{- end }}

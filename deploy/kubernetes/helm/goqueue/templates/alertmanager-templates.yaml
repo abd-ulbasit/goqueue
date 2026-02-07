@@ -1,0 +1,112 @@
+# =============================================================================
+# ALERTMANAGER NOTIFICATION TEMPLATES
+# =============================================================================
+#
+# Custom templates for formatting alert notifications. These templates
+# create consistent, actionable alert messages across all notification channels.
+#
+# WHY CUSTOM TEMPLATES?
+#   - Default templates are generic and hard to read
+#   - Custom templates include GoQueue-specific context
+#   - Direct links to dashboards and runbooks
+#   - Consistent format across Slack, PagerDuty, email
+#
+# TEMPLATE SYNTAX:
+#   {{ "{{" }} .variable {{ "}}" }} - Access a variable
+#   {{ "{{" }} range .items {{ "}}" }} - Loop
+#   {{ "{{" }} if .condition {{ "}}" }} - Conditional
+#   {{ "{{" }} template "name" . {{ "}}" }} - Include another template
+#
+{{- if .Values.alertmanager.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "goqueue.fullname" . }}-alertmanager-templates
+  namespace: {{ .Values.alertmanager.namespace | default .Release.Namespace }}
+  labels:
+    {{- include "goqueue.labels" . | nindent 4 }}
+data:
+  goqueue.tmpl: |
+    {{ "{{" }} define "slack.goqueue.title" {{ "}}" }}
+    [{{ "{{" }} .Status | toUpper {{ "}}" }}{{ "{{" }} if eq .Status "firing" {{ "}}" }}:{{ "{{" }} .Alerts.Firing | len {{ "}}" }}{{ "{{" }} end {{ "}}" }}] {{ "{{" }} .GroupLabels.alertname {{ "}}" }}
+    {{ "{{" }} end {{ "}}" }}
+
+    {{ "{{" }} define "slack.goqueue.text" {{ "}}" }}
+    {{ "{{" }} range .Alerts {{ "}}" }}
+    *Alert:* {{ "{{" }} .Annotations.summary {{ "}}" }}
+    *Severity:* {{ "{{" }} .Labels.severity {{ "}}" }}
+    *Description:* {{ "{{" }} .Annotations.description {{ "}}" }}
+    {{ "{{" }} if .Labels.topic {{ "}}" }}*Topic:* {{ "{{" }} .Labels.topic {{ "}}" }}{{ "{{" }} end {{ "}}" }}
+    {{ "{{" }} if .Labels.consumer_group {{ "}}" }}*Consumer Group:* {{ "{{" }} .Labels.consumer_group {{ "}}" }}{{ "{{" }} end {{ "}}" }}
+    {{ "{{" }} if .Labels.instance {{ "}}" }}*Instance:* {{ "{{" }} .Labels.instance {{ "}}" }}{{ "{{" }} end {{ "}}" }}
+    {{ "{{" }} if .Annotations.runbook_url {{ "}}" }}*Runbook:* <{{ "{{" }} .Annotations.runbook_url {{ "}}" }}|View Runbook>{{ "{{" }} end {{ "}}" }}
+    {{ "{{" }} end {{ "}}" }}
+    {{ "{{" }} end {{ "}}" }}
+
+    {{ "{{" }} define "slack.goqueue.color" {{ "}}" }}
+    {{ "{{" }} if eq .Status "firing" {{ "}}" }}
+    {{ "{{" }}- if eq (index .Alerts 0).Labels.severity "critical" {{ "}}" }}danger{{ "{{" }} else if eq (index .Alerts 0).Labels.severity "warning" {{ "}}" }}warning{{ "{{" }} else {{ "}}" }}#439FE0{{ "{{" }} end -{{ "}}" }}
+    {{ "{{" }} else {{ "}}" }}good{{ "{{" }} end {{ "}}" }}
+    {{ "{{" }} end {{ "}}" }}
+
+    {{ "{{" }} define "slack.goqueue.runbook" {{ "}}" }}
+    {{ "{{" }} if (index .Alerts 0).Annotations.runbook_url {{ "}}" }}{{ "{{" }} (index .Alerts 0).Annotations.runbook_url {{ "}}" }}{{ "{{" }} else {{ "}}" }}https://goqueue.dev/docs/runbooks{{ "{{" }} end {{ "}}" }}
+    {{ "{{" }} end {{ "}}" }}
+
+    {{ "{{" }} define "pagerduty.goqueue.firing" {{ "}}" }}
+    {{ "{{" }} range .Alerts.Firing {{ "}}" }}
+    - {{ "{{" }} .Annotations.summary {{ "}}" }}
+      Severity: {{ "{{" }} .Labels.severity {{ "}}" }}
+      {{ "{{" }} if .Labels.topic {{ "}}" }}Topic: {{ "{{" }} .Labels.topic {{ "}}" }}{{ "{{" }} end {{ "}}" }}
+      {{ "{{" }} if .Labels.consumer_group {{ "}}" }}Consumer Group: {{ "{{" }} .Labels.consumer_group {{ "}}" }}{{ "{{" }} end {{ "}}" }}
+    {{ "{{" }} end {{ "}}" }}
+    {{ "{{" }} end {{ "}}" }}
+
+    {{ "{{" }} define "pagerduty.goqueue.runbook" {{ "}}" }}
+    {{ "{{" }} if (index .Alerts 0).Annotations.runbook_url {{ "}}" }}{{ "{{" }} (index .Alerts 0).Annotations.runbook_url {{ "}}" }}{{ "{{" }} else {{ "}}" }}https://goqueue.dev/docs/runbooks{{ "{{" }} end {{ "}}" }}
+    {{ "{{" }} end {{ "}}" }}
+
+    {{ "{{" }} define "email.goqueue.html" {{ "}}" }}
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+        .alert { padding: 15px; margin: 10px 0; border-radius: 4px; }
+        .critical { background-color: #f8d7da; border-left: 4px solid #dc3545; }
+        .warning { background-color: #fff3cd; border-left: 4px solid #ffc107; }
+        .resolved { background-color: #d4edda; border-left: 4px solid #28a745; }
+        .label { font-weight: bold; }
+        .actions { margin-top: 20px; }
+        .btn { display: inline-block; padding: 10px 20px; background: #007bff; color: white; text-decoration: none; border-radius: 4px; }
+      </style>
+    </head>
+    <body>
+      <h2>GoQueue Alert: {{ "{{" }} .GroupLabels.alertname {{ "}}" }}</h2>
+      <p><strong>Status:</strong> {{ "{{" }} .Status | toUpper {{ "}}" }}</p>
+      
+      {{ "{{" }} range .Alerts {{ "}}" }}
+      <div class="alert {{ "{{" }} .Labels.severity {{ "}}" }}{{ "{{" }} if eq $.Status "resolved" {{ "}}" }} resolved{{ "{{" }} end {{ "}}" }}">
+        <p><span class="label">Summary:</span> {{ "{{" }} .Annotations.summary {{ "}}" }}</p>
+        <p><span class="label">Description:</span> {{ "{{" }} .Annotations.description {{ "}}" }}</p>
+        <p><span class="label">Severity:</span> {{ "{{" }} .Labels.severity {{ "}}" }}</p>
+        {{ "{{" }} if .Labels.topic {{ "}}" }}<p><span class="label">Topic:</span> {{ "{{" }} .Labels.topic {{ "}}" }}</p>{{ "{{" }} end {{ "}}" }}
+        {{ "{{" }} if .Labels.consumer_group {{ "}}" }}<p><span class="label">Consumer Group:</span> {{ "{{" }} .Labels.consumer_group {{ "}}" }}</p>{{ "{{" }} end {{ "}}" }}
+        {{ "{{" }} if .Labels.instance {{ "}}" }}<p><span class="label">Instance:</span> {{ "{{" }} .Labels.instance {{ "}}" }}</p>{{ "{{" }} end {{ "}}" }}
+        <p><span class="label">Started:</span> {{ "{{" }} .StartsAt.Format "2006-01-02 15:04:05 MST" {{ "}}" }}</p>
+        {{ "{{" }} if eq $.Status "resolved" {{ "}}" }}
+        <p><span class="label">Resolved:</span> {{ "{{" }} .EndsAt.Format "2006-01-02 15:04:05 MST" {{ "}}" }}</p>
+        {{ "{{" }} end {{ "}}" }}
+      </div>
+      {{ "{{" }} end {{ "}}" }}
+      
+      <div class="actions">
+        <a href="https://grafana.{{ .Values.alertmanager.domain }}/d/goqueue-overview" class="btn">View Dashboard</a>
+        {{ "{{" }} if (index .Alerts 0).Annotations.runbook_url {{ "}}" }}
+        <a href="{{ "{{" }} (index .Alerts 0).Annotations.runbook_url {{ "}}" }}" class="btn">View Runbook</a>
+        {{ "{{" }} end {{ "}}" }}
+      </div>
+    </body>
+    </html>
+    {{ "{{" }} end {{ "}}" }}
+{{- end }}

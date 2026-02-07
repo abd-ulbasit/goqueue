@@ -297,6 +297,344 @@ kubectl get nodes
 3. Check disk pressure
 4. If stuck, delete pod for recreation
 
+#### Alert: GoQueueCriticalConsumerLag
+
+**Severity**: Critical  
+**Threshold**: > 100,000 messages behind for 2 minutes
+
+**Meaning**: Consumer group is critically behind. Messages are being delayed significantly, potentially impacting business operations.
+
+**Comparison with Other Systems**:
+- Kafka: Burrow monitors consumer lag, alerts at configurable thresholds
+- SQS: ApproximateAgeOfOldestMessage metric
+- RabbitMQ: queue_size monitoring
+
+**Investigation**:
+```bash
+# Check current lag across all consumer groups
+kubectl exec -n goqueue goqueue-0 -- goqueue-cli group list
+
+# Check specific consumer group
+kubectl exec -n goqueue goqueue-0 -- goqueue-cli group describe <group-name>
+
+# Check if consumers are connected
+kubectl exec -n goqueue goqueue-0 -- goqueue-admin connections list
+
+# Check consumer pod health
+kubectl get pods -n <consumer-namespace> -l app=<consumer-app>
+
+# Check consumer logs for errors
+kubectl logs -n <consumer-namespace> -l app=<consumer-app> --tail=100 | grep -i error
+```
+
+**Root Causes**:
+| Cause | Diagnosis | Fix |
+|-------|-----------|-----|
+| Consumer crashed | Pod not running | Restart/fix consumer |
+| Processing too slow | CPU high, low throughput | Scale consumers horizontally |
+| Downstream bottleneck | Consumer waiting on DB/API | Fix downstream service |
+| Poison message | Same message retrying | Move to DLQ, fix handler |
+| Network partition | Connection drops | Check network/firewall |
+
+**Resolution**:
+1. **Immediate**: Scale up consumer replicas if processing is slow
+2. Check for poison messages causing repeated failures
+3. Verify downstream services (databases, APIs) are healthy
+4. Consider temporarily pausing low-priority consumers to prioritize critical ones
+5. If persistent, increase `max.poll.records` or batch size
+
+#### Alert: GoQueueNoOffsetCommits
+
+**Severity**: Critical  
+**Threshold**: No commits for 10 minutes
+
+**Meaning**: Consumer group has stopped committing offsets entirely. This typically indicates all consumers are dead or stuck.
+
+**Investigation**:
+```bash
+# Check last commit timestamp
+kubectl exec -n goqueue goqueue-0 -- goqueue-cli group describe <group-name>
+
+# Check if consumers are connected
+kubectl exec -n goqueue goqueue-0 -- goqueue-admin connections list | grep <group-name>
+
+# Check consumer pods
+kubectl get pods -n <consumer-namespace> -l app=<consumer-app> -o wide
+
+# Check consumer logs for deadlock/hang
+kubectl logs -n <consumer-namespace> <consumer-pod> --tail=200
+```
+
+**Root Causes**:
+- All consumer pods crashed or evicted
+- Consumer code stuck in infinite loop or deadlock
+- Network partition between consumers and broker
+- Broker itself down (check cluster health first)
+
+**Resolution**:
+1. Restart consumer pods if they're stuck
+2. Check for deadlocks in consumer code (thread dumps)
+3. Verify network connectivity: `kubectl exec <consumer-pod> -- curl http://goqueue:8080/healthz`
+4. Check if broker is accepting connections
+
+#### Alert: GoQueueNodeDown
+
+**Severity**: Critical  
+**Threshold**: Unhealthy nodes > 0 for 30 seconds
+
+**Meaning**: One or more GoQueue broker nodes are down, reducing cluster capacity and potentially causing partition unavailability.
+
+**Investigation**:
+```bash
+# Check pod status
+kubectl get pods -n goqueue -l app.kubernetes.io/name=goqueue
+
+# Check specific pod events
+kubectl describe pod -n goqueue <pod-name>
+
+# Check node health
+kubectl get nodes
+
+# Check cluster membership from a healthy node
+kubectl exec -n goqueue goqueue-0 -- goqueue-admin cluster members
+```
+
+**Root Causes**:
+| Cause | Diagnosis | Fix |
+|-------|-----------|-----|
+| OOMKilled | `kubectl describe pod` shows OOM | Increase memory limits |
+| Node failure | Node in NotReady state | Wait for node recovery |
+| Disk full | Pod stuck, disk 100% | Clear space, expand PVC |
+| Health check fail | Pod restarting | Check logs for cause |
+| Eviction | Evicted status | Check node pressure |
+
+**Resolution**:
+1. If OOMKilled: Increase memory limits in Helm values
+2. If node failure: Pod will reschedule automatically
+3. If disk full: Free space or expand PVC
+4. If persistent crashes: Check logs for root cause
+
+#### Alert: GoQueueOfflinePartitions
+
+**Severity**: Critical  
+**Threshold**: > 0 offline partitions for 30 seconds
+
+**Meaning**: One or more partitions have no leader and cannot accept reads or writes. **DATA IS UNAVAILABLE.**
+
+**Why This Is Critical**:
+- Producers cannot publish to affected partitions
+- Consumers cannot read from affected partitions
+- Messages are being dropped or queuing in producers
+
+**Investigation**:
+```bash
+# Check which partitions are offline
+kubectl exec -n goqueue goqueue-0 -- goqueue-admin partitions list --offline
+
+# Check cluster health
+kubectl exec -n goqueue goqueue-0 -- goqueue-admin cluster status
+
+# Check if replicas exist but aren't taking leadership
+kubectl exec -n goqueue goqueue-0 -- goqueue-admin partitions describe <topic> <partition>
+```
+
+**Root Causes**:
+- All replicas for a partition are down (worst case)
+- Leader died and no ISR replica can take over
+- Unclean leader election is disabled and leader failed with no ISR
+
+**Resolution**:
+1. **Check if any replica is available**: If yes, it should auto-elect
+2. **If no replicas available**: Wait for pods to recover
+3. **If stuck**: Enable unclean leader election (DATA LOSS RISK):
+   ```bash
+   kubectl exec -n goqueue goqueue-0 -- goqueue-admin config set unclean.leader.election.enable true
+   ```
+4. After recovery: Check for data consistency
+
+#### Alert: GoQueueUnderReplicatedPartitions
+
+**Severity**: Warning → Critical  
+**Threshold**: > 0 under-replicated partitions for 5 minutes
+
+**Meaning**: Some partitions have fewer in-sync replicas (ISR) than the configured replication factor. Data durability is at risk.
+
+**Comparison**:
+- Kafka: `kafka.server:type=ReplicaManager,name=UnderReplicatedPartitions`
+- RabbitMQ: `rabbitmq_queue_messages_ready_total` (similar concept)
+
+**Investigation**:
+```bash
+# Check under-replicated partitions
+kubectl exec -n goqueue goqueue-0 -- goqueue-admin partitions list --under-replicated
+
+# Check ISR for specific partition
+kubectl exec -n goqueue goqueue-0 -- goqueue-admin partitions describe <topic> <partition>
+
+# Check follower lag
+kubectl exec -n goqueue goqueue-0 -- goqueue-admin replication status
+```
+
+**Root Causes**:
+| Cause | Diagnosis | Fix |
+|-------|-----------|-----|
+| Follower down | Pod not running | Wait for pod recovery |
+| Follower slow | High replication lag | Check follower disk/network |
+| Network partition | Connection drops | Check network |
+| New follower | Just added, catching up | Wait for sync |
+
+**Resolution**:
+1. If follower is down: Wait for pod to recover
+2. If follower is slow: Check disk I/O, network bandwidth
+3. If persistent: Consider reducing producer throughput temporarily
+
+#### Alert: GoQueueHighDiskSpace
+
+**Severity**: Warning (80%) → Critical (90%)
+
+**Meaning**: Broker disk is filling up. If it reaches 100%, the broker will stop accepting writes.
+
+**Investigation**:
+```bash
+# Check disk usage
+kubectl exec -n goqueue goqueue-0 -- df -h /data
+
+# Check which topics are using most space
+kubectl exec -n goqueue goqueue-0 -- goqueue-admin storage stats
+
+# Check retention settings
+kubectl exec -n goqueue goqueue-0 -- goqueue-cli topic list --all
+```
+
+**Resolution**:
+1. **Reduce retention**: Lower `retention.ms` for high-volume topics
+2. **Delete data**: Remove old/unused topics
+3. **Expand storage**: Increase PVC size (see Maintenance)
+4. **Enable compaction**: For key-based topics
+
+#### Alert: GoQueueFsyncErrors
+
+**Severity**: Critical
+
+**Meaning**: fsync operations are failing. **DATA DURABILITY IS AT RISK.** Messages may not be persisted to disk.
+
+**Investigation**:
+```bash
+# Check disk health
+kubectl exec -n goqueue goqueue-0 -- dmesg | grep -i error
+
+# Check disk I/O errors
+kubectl exec -n goqueue goqueue-0 -- iostat -x 1 5
+
+# Check filesystem
+kubectl exec -n goqueue goqueue-0 -- df -h
+```
+
+**Root Causes**:
+- Disk hardware failure
+- Filesystem corruption
+- Out of disk space (different alert but related)
+- Network storage (EBS) connectivity issue
+
+**Resolution**:
+1. **Immediate**: Stop writes to affected broker
+2. Check underlying storage health (EBS, GCE PD, etc.)
+3. If hardware failure: Replace disk
+4. If connectivity: Check AWS/GCP status
+
+#### Alert: GoQueueHighFsyncLatency
+
+**Severity**: Warning  
+**Threshold**: p99 > 100ms for 5 minutes
+
+**Meaning**: Disk writes are slow. This increases end-to-end latency and may cause timeouts.
+
+**Investigation**:
+```bash
+# Check disk I/O stats
+kubectl exec -n goqueue goqueue-0 -- iostat -x 1 10
+
+# Check await time (time spent waiting for I/O)
+# await > 10ms indicates disk contention
+
+# Check if IOPS is at limit (for cloud disks)
+# AWS: Check CloudWatch for EBS IOPS
+```
+
+**Resolution**:
+1. Upgrade storage class (gp2 → gp3, HDD → SSD)
+2. Increase IOPS provisioning on cloud disks
+3. Enable write-back caching (if durability allows)
+4. Reduce fsync frequency (trade durability for speed)
+
+#### Alert: GoQueueHighErrorRate
+
+**Severity**: Warning  
+**Threshold**: > 1% of publishes failing for 5 minutes
+
+**Meaning**: A significant portion of publish attempts are failing.
+
+**Investigation**:
+```bash
+# Check error breakdown by type
+kubectl exec -n goqueue goqueue-0 -- goqueue-admin metrics | grep error
+
+# Check recent logs
+kubectl logs -n goqueue goqueue-0 --tail=100 | grep -i error
+
+# Check if specific topic is affected
+kubectl exec -n goqueue goqueue-0 -- goqueue-admin topics stats
+```
+
+**Root Causes**:
+| Error Type | Cause | Fix |
+|------------|-------|-----|
+| ValidationError | Bad message format | Fix producer code |
+| TopicNotFound | Topic doesn't exist | Create topic |
+| RateLimited | Too many requests | Increase quota or reduce rate |
+| InternalError | Broker issue | Check logs |
+| SchemaValidationError | Message doesn't match schema | Fix producer |
+
+**Resolution**:
+1. Check error type distribution in metrics
+2. Fix producers sending invalid messages
+3. Increase rate limits if legitimate traffic
+4. Create missing topics
+
+#### Alert: GoQueueFrequentRebalances
+
+**Severity**: Warning  
+**Threshold**: > 5 rebalances in 5 minutes
+
+**Meaning**: Consumer groups are rebalancing frequently, causing processing pauses and reduced throughput.
+
+**Investigation**:
+```bash
+# Check rebalance history
+kubectl exec -n goqueue goqueue-0 -- goqueue-cli group describe <group-name>
+
+# Check consumer stability
+kubectl get pods -n <consumer-namespace> -l app=<consumer-app> --watch
+
+# Check consumer logs for session timeouts
+kubectl logs -n <consumer-namespace> <consumer-pod> | grep -i "rebalance\|timeout\|heartbeat"
+```
+
+**Root Causes**:
+| Cause | Diagnosis | Fix |
+|-------|-----------|-----|
+| Consumers crashing | Pods restarting | Fix consumer bugs |
+| Session timeout | Slow heartbeat | Increase session.timeout.ms |
+| Long processing | poll interval exceeded | Increase max.poll.interval.ms |
+| Network instability | Connection drops | Check network |
+| Rapid scaling | Many pods joining/leaving | Slow down deployment |
+
+**Resolution**:
+1. Increase `session.timeout.ms` (default 30s)
+2. Increase `max.poll.interval.ms` for slow processing
+3. Fix consumer code if crashing
+4. Use rolling deployment with slow rollout
+
 ---
 
 ## Troubleshooting

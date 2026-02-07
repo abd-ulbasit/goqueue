@@ -141,3 +141,62 @@ topics:
     delivery:
       visibilityTimeout: "60s"
       maxRetries: 5
+
+# Distributed tracing configuration (M25)
+# ┌─────────────────────────────────────────────────────────────────────────────┐
+# │ TRACING ARCHITECTURE                                                        │
+# │                                                                             │
+# │ GoQueue has built-in W3C Trace Context support for end-to-end visibility.  │
+# │                                                                             │
+# │ Trace data flows through multiple storage tiers:                            │
+# │   1. Ring Buffer (in-memory, fast queries, lost on restart)                 │
+# │   2. File Export (persistent JSON, survives restart)                         │
+# │   3. OTLP Export (production: Grafana Tempo, Jaeger, etc.)                  │
+# │                                                                             │
+# │ Producer ──► Broker ──► Consumer                                            │
+# │   [traceparent header propagated through message headers]                   │
+# │                 │                                                           │
+# │                 ▼                                                           │
+# │           ┌──────────┐   OTLP    ┌───────────┐                             │
+# │           │ Exporter │──────────►│  Tempo /  │                             │
+# │           └──────────┘           │  Jaeger   │                             │
+# │                                  └───────────┘                             │
+# │                                                                             │
+# │ COMPARISON:                                                                 │
+# │   - Kafka: No built-in tracing, requires external instrumentation          │
+# │   - RabbitMQ: Plugin-based tracing, logs to file                            │
+# │   - SQS: AWS X-Ray integration (proprietary)                               │
+# │   - goqueue: Native W3C tracing with OTLP export                           │
+# └─────────────────────────────────────────────────────────────────────────────┘
+tracing:
+  # Enable/disable tracing globally
+  enabled: true
+
+  # Sampling rate: 0.0 (none) to 1.0 (all traces)
+  # Production recommendation: 0.1 (10%) to reduce overhead
+  samplingRate: 1.0
+
+  # Ring buffer capacity (number of spans kept in memory)
+  ringBufferCapacity: 100000
+
+  # File-based export (persistent, survives restart)
+  fileExport:
+    enabled: true
+    maxFileSize: 10485760  # 10MB per file before rotation
+
+  # OTLP export (production: send to Grafana Tempo, Jaeger, etc.)
+  otlp:
+    enabled: false
+    endpoint: "localhost:4317"  # gRPC endpoint (Tempo/Jaeger OTLP receiver)
+    protocol: "grpc"           # "grpc" or "http"
+    insecure: true             # Disable TLS (for local/internal endpoints)
+    # headers:                 # Optional auth headers
+    #   Authorization: "Bearer <token>"
+    batchSize: 512             # Spans per batch
+    flushInterval: "5s"        # How often to flush batches
+    serviceName: "goqueue"     # Service name in traces
+
+  # Per-topic tracing overrides
+  # topics:
+  #   events:
+  #     enabled: false  # Disable tracing for high-volume topic
