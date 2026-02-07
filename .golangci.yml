@@ -34,10 +34,6 @@
 
 run:
   timeout: 5m
-  # Skip generated code — linting protobuf output is pointless
-  skip-dirs:
-    - api/proto/gen
-    - vendor
 
 # =============================================================================
 # LINTER SELECTION
@@ -203,6 +199,11 @@ issues:
   max-same-issues: 0
 
   exclude-rules:
+    # Generated protobuf code: skip all linters
+    - path: api/proto/gen/
+      linters:
+        - all
+
     # Test files: relax errcheck and gosec (test code is less strict)
     - path: _test\.go
       linters:

@@ -51,24 +51,24 @@ DESCRIPTION  := Production-grade message queue in Go
 # │ VERSION INJECTION (ldflags)                                                 │
 # │                                                                             │
 # │ Go binaries don't know their version at runtime unless we inject it.        │
-# │ We use -ldflags "-X" to set Go variables at compile time.                  │
+# │ We use -ldflags "-X" to set Go variables at compile time.                   │
 # │                                                                             │
 # │ HOW IT WORKS:                                                               │
-# │   go build -ldflags "-X main.version=1.0.0" → main.version == "1.0.0"     │
+# │   go build -ldflags "-X main.version=1.0.0" → main.version == "1.0.0"       │
 # │                                                                             │
 # │ THREE PIECES OF BUILD METADATA:                                             │
-# │   1. version:   Semantic version (from git tag or "dev")                   │
+# │   1. version:   Semantic version (from git tag or "dev")                    │
 # │   2. commit:    Git SHA (identifies exact source code)                      │
-# │   3. buildTime: When the binary was built (ISO 8601)                       │
+# │   3. buildTime: When the binary was built (ISO 8601)                        │
 # │                                                                             │
 # │ COMPARISON:                                                                 │
-# │   - Kafka: Sets version in gradle.properties                               │
-# │   - NATS: Uses -ldflags -X (same approach)                                │
-# │   - etcd: Uses -ldflags -X (same approach)                                │
-# │   - Docker/Moby: Uses -ldflags -X (same approach)                         │
+# │   - Kafka: Sets version in gradle.properties                                │
+# │   - NATS: Uses -ldflags -X (same approach)                                  │
+# │   - etcd: Uses -ldflags -X (same approach)                                  │
+# │   - Docker/Moby: Uses -ldflags -X (same approach)                           │
 # │                                                                             │
 # │ USAGE IN CODE:                                                              │
-# │   var version = "dev"  // overridden by ldflags at build time              │
+# │   var version = "dev"  // overridden by ldflags at build time               │
 # └─────────────────────────────────────────────────────────────────────────────┘
 VERSION    ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 COMMIT     ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
