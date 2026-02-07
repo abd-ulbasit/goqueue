@@ -103,6 +103,11 @@ func TestAckManager_VisibilityExpiry_QueuesRetry_AndQueueBackpressureRoutesToDLQ
 	cfg.MaxRetries = 1
 	am := replaceAckManager(t, b, cfg)
 
+	// Stop the background retryProcessor goroutine before replacing retryQueue
+	// to avoid a data race (goroutine reads am.retryQueue while we write it).
+	am.cancel()
+	am.wg.Wait()
+
 	// Force retryQueue to be unbuffered so onVisibilityExpired's non-blocking send
 	// will fall through to DLQ routing.
 	am.retryQueue = make(chan *InFlightMessage)
