@@ -225,6 +225,29 @@ COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
 # └─────────────────────────────────────────────────────────────────────────────┘
 EXPOSE 8080 9000 7000
 
+# ┌─────────────────────────────────────────────────────────────────────────────┐
+# │ HEALTHCHECK                                                                 │
+# │                                                                             │
+# │ Docker HEALTHCHECK tells the runtime how to verify the container is working.│
+# │                                                                             │
+# │ WHY:                                                                        │
+# │   - Docker marks container as "unhealthy" if check fails                   │
+# │   - docker-compose can use health status for depends_on                    │
+# │   - Kubernetes ignores HEALTHCHECK (uses its own probes), but it's useful  │
+# │     for standalone Docker and docker-compose deployments                   │
+# │                                                                             │
+# │ NOTE: Distroless has no curl/wget, so we use the goqueue binary itself.    │
+# │ The /healthz endpoint returns 200 when the broker is alive.                │
+# │                                                                             │
+# │ COMPARISON:                                                                 │
+# │   - Kafka: No built-in HEALTHCHECK (JVM-based, uses JMX)                  │
+# │   - RabbitMQ: rabbitmq-diagnostics check_port_connectivity                │
+# │   - NATS: nats-server --health (built-in health command)                   │
+# │   - goqueue: HTTP GET /healthz via goqueue-cli or direct binary            │
+# └─────────────────────────────────────────────────────────────────────────────┘
+HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
+  CMD ["/usr/local/bin/goqueue-cli", "health", "--server", "http://localhost:8080"]
+
 # Data directory (mount PVC here in Kubernetes)
 VOLUME ["/data"]
 

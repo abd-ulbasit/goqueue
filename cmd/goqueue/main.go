@@ -34,14 +34,48 @@ import (
 
 	"goqueue/internal/api"
 	"goqueue/internal/broker"
+	cfgvalidate "goqueue/internal/config"
 	"goqueue/internal/grpc"
 	"goqueue/internal/metrics"
 )
 
+// =============================================================================
+// BUILD-TIME VERSION INJECTION
+// =============================================================================
+//
+// These variables are set at compile time via -ldflags:
+//
+//	go build -ldflags "-X main.version=1.0.0 -X main.commit=abc123 -X main.buildTime=..."
+//
+// WHY?
+//   - Know exactly what's deployed (version + commit SHA)
+//   - Debug production issues ("which build is this?")
+//   - Health endpoints can report version
+//   - GoReleaser sets these automatically on release
+//
+// COMPARISON:
+//   - Kafka: Version in gradle.properties, embedded in JVM manifest
+//   - NATS: Same pattern (ldflags -X)
+//   - etcd: Same pattern (ldflags -X)
+//   - Docker/Moby: Same pattern (ldflags -X)
+//
+// HOW IT WORKS:
+//  1. Go compiler processes -ldflags "-X main.version=v1.0.0"
+//  2. Finds the variable `version` in package `main`
+//  3. Sets its initial value to "v1.0.0" (replacing "dev")
+//  4. At runtime, the variable holds the injected value
+//
+// =============================================================================
+var (
+	version   = "dev"
+	commit    = "unknown"
+	buildTime = "unknown"
+)
+
 func main() {
 	fmt.Println("╔═══════════════════════════════════════════════════════════════╗")
-	fmt.Println("║                     GoQueue v0.2.0                            ║")
-	fmt.Println("║          Milestone 2: Topics, Partitions & Producer           ║")
+	fmt.Printf("║                     GoQueue %-33s║\n", version)
+	fmt.Printf("║          commit: %-43s║\n", commit)
 	fmt.Println("╚═══════════════════════════════════════════════════════════════╝")
 	fmt.Println()
 
@@ -119,6 +153,32 @@ func main() {
 	if nodeID := os.Getenv("GOQUEUE_BROKER_NODEID"); nodeID != "" {
 		config.NodeID = nodeID
 	}
+
+	// -------------------------------------------------------------------------
+	// CONFIG VALIDATION (fail-fast)
+	// -------------------------------------------------------------------------
+	// Validate config before creating the broker. This catches common mistakes
+	// (bad paths, invalid addresses, impossible quorum sizes) with clear
+	// error messages instead of cryptic runtime failures.
+	validator := &cfgvalidate.BrokerConfigValidator{}
+	valCfg := cfgvalidate.BrokerConfig{
+		DataDir:        config.DataDir,
+		NodeID:         config.NodeID,
+		ClusterEnabled: config.ClusterEnabled,
+	}
+	if config.ClusterConfig != nil {
+		valCfg.ClusterConfig = &cfgvalidate.ClusterConfig{
+			ClientAddress:    config.ClusterConfig.ClientAddress,
+			ClusterAddress:   config.ClusterConfig.ClusterAddress,
+			AdvertiseAddress: config.ClusterConfig.AdvertiseAddress,
+			Peers:            config.ClusterConfig.Peers,
+			QuorumSize:       config.ClusterConfig.QuorumSize,
+		}
+	}
+	if err := validator.Validate(valCfg); err != nil {
+		log.Fatalf("Configuration error:\n%v", err)
+	}
+	fmt.Println("   ✓ Configuration validated")
 
 	b, err := broker.NewBroker(config)
 	if err != nil {

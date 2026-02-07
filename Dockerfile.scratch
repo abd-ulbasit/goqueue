@@ -1,3 +1,0 @@
-FROM scratch
-COPY goqueue-amd64 /goqueue
-ENTRYPOINT ["/goqueue"]

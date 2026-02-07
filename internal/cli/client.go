@@ -754,4 +754,6 @@ func (c *Client) GetVersion(ctx context.Context) (*VersionInfo, error) {
 }
 
 // Version is the CLI version.
-const Version = "v0.2.0"
+// Version is the CLI version, set via ldflags at build time.
+// Default "dev" is overridden by: go build -ldflags "-X goqueue/internal/cli.Version=v1.0.0"
+var Version = "dev"

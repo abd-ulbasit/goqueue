@@ -1,32 +1,74 @@
-# Build outputs
-data/
-.git/
-*.log
-*.tmp
+# =============================================================================
+# DOCKER IGNORE
+# =============================================================================
+#
+# WHY THIS MATTERS:
+# Docker sends the entire directory as "build context" to the daemon.
+# Without .dockerignore, this includes .git, data, node_modules, etc.
+# Result: 1GB+ context vs ~5MB with proper ignore → faster builds.
+#
+# RULE OF THUMB: Exclude everything except what the Go build needs:
+#   - go.mod, go.sum (dependencies)
+#   - cmd/, internal/, pkg/ (source code)
+#   - config.example.yaml (default config)
+# =============================================================================
 
-# IDE
+# Version control
+.git/
+.gitignore
+
+# Build outputs (we build fresh in Docker)
+bin/
+dist/
+*.exe
+*.test
+goqueue-amd64
+
+# Runtime data (never ship data in images)
+data/
+
+# IDE and editor files
 .idea/
 .vscode/
 *.swp
 *.swo
+.DS_Store
 
-# Test and cache
-*.test
-.cache/
-__pycache__/
-node_modules/
+# Test artifacts
+coverage.out
+*.prof
+*.log
+*.tmp
 
-# Docs and website
+# Documentation and website (not needed for build)
 website/
 docs/
 *.md
 !README.md
 
-# Terraform state
-deploy/terraform/**/.terraform/
-deploy/terraform/**/*.tfstate*
+# Deployment configs (not needed inside image)
+deploy/terraform/
+deploy/kubernetes/
+deploy/grafana/
+deploy/prometheus/
+deploy/testing/
 
-# Large directories not needed for build
+# Terraform state (sensitive)
+**/.terraform/
+**/*.tfstate*
+**/*.tfvars
+
+# Memory bank and CI configs
 memory-bank/
-api/postman/
+.github/
+
+# Client libraries (separate packages)
 clients/
+api/postman/
+
+# Node.js artifacts (from client libraries)
+node_modules/
+__pycache__/
+
+# Large directories not needed for Go build
+scripts/

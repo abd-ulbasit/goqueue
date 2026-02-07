@@ -1,18 +1,32 @@
 # =============================================================================
-# GOQUEUE CI/CD PIPELINE
+# GOQUEUE CI PIPELINE
 # =============================================================================
 #
-# This workflow handles:
-#   1. Linting and static analysis
-#   2. Testing with race detection and coverage
-#   3. Security scanning (vulnerabilities, secrets)
-#   4. Docker image building and pushing
-#   5. Release creation via GoReleaser
+# PRODUCTION-HARDENED CI
+# ┌─────────────────────────────────────────────────────────────────────────────┐
+# │ This pipeline is STRICT — every job must pass for the build to be green.   │
+# │                                                                            │
+# │ No `continue-on-error`, no `|| true`. If something fails, the build       │
+# │ fails. This is deliberate:                                                 │
+# │                                                                            │
+# │   - Linting catches real bugs → fix them, don't ignore them               │
+# │   - Tests must pass → flaky tests get fixed, not skipped                  │
+# │   - Security scans matter → vulnerable deps get updated                   │
+# │                                                                            │
+# │ COMPARISON:                                                                │
+# │   - Kafka: Strict CI, every PR must pass all checks                       │
+# │   - NATS: Strict CI on GitHub Actions                                     │
+# │   - CockroachDB: Extremely strict (1000+ tests, all must pass)           │
+# │                                                                            │
+# │ IF A JOB IS GENUINELY FLAKY:                                              │
+# │   Fix it. Don't add `continue-on-error`. Flaky tests are bugs.           │
+# └─────────────────────────────────────────────────────────────────────────────┘
 #
 # TRIGGERS:
-#   - Push to main: Full pipeline (test + docker)
-#   - Pull request to main: Test only (no push)
-#   - Tag v*: Full pipeline + release
+#   - Push to main: Full pipeline (lint + test + security + build + docker)
+#   - Pull request to main: Full pipeline (no push)
+#
+# RELEASE is a separate workflow (release.yml), triggered by v* tags.
 #
 # =============================================================================
 
@@ -21,7 +35,8 @@ name: CI
 on:
   push:
     branches: [main]
-    tags: ['v*']
+    # Don't run CI on tag pushes — that's handled by release.yml
+    tags-ignore: ['v*']
   pull_request:
     branches: [main]
 
@@ -30,58 +45,64 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
-# Cancel in-progress runs for the same branch
+# Cancel in-progress runs for the same branch/PR
+# WHY: Saves CI minutes. If you push again, the old run is stale.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   # ============================================================================
-  # Lint - Static Analysis
+  # Lint — Static Analysis
+  # ============================================================================
+  #
+  # WHY FIRST?
+  #   Linting is the fastest check (~30s). If code doesn't pass style/safety
+  #   checks, there's no point running slower tests. Fast feedback.
+  #
   # ============================================================================
   lint:
     name: Lint
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
 
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v9
-        continue-on-error: true  # Don't fail build while we fix existing issues
+        uses: golangci/golangci-lint-action@v6
         with:
-          version: latest
-          args: --timeout=5m --issues-exit-code=0
+          version: v1.64.8
+          args: --timeout=5m
 
   # ============================================================================
-  # Test - Unit and Integration Tests
+  # Test — Unit and Integration Tests
+  # ============================================================================
+  #
+  # RACE DETECTOR:
+  #   -race enables Go's race detector. It's slower (~2-10x) but catches
+  #   data races that cause production crashes. ALWAYS run tests with -race.
+  #
+  # COVERAGE:
+  #   Generate coverage report for Codecov integration.
+  #   Not a gate (we don't enforce minimum coverage), but useful for tracking.
+  #
   # ============================================================================
   test:
     name: Test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
-
-      - name: Cache Go modules
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cache/go-build
-            ~/go/pkg/mod
-          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-go-
 
       - name: Download dependencies
         run: go mod download
@@ -90,39 +111,41 @@ jobs:
         run: go mod verify
 
       - name: Run go vet
-        run: go vet ./... || true  # Non-blocking while we fix existing issues
-
-      - name: Run staticcheck
-        uses: dominikh/staticcheck-action@v1
-        continue-on-error: true  # Non-blocking while we fix existing issues
-        with:
-          version: "latest"
-          install-go: false
+        run: go vet ./...
 
       - name: Run tests with race detection
-        run: go test -race -coverprofile=coverage.out -covermode=atomic -timeout=10m ./... || true
-        # Note: Some broker tests are flaky, marking as non-blocking
-        # TODO: Fix flaky tests (TestAckManager_VisibilityExpiry, TestScheduler_MultipleCallbacks)
+        run: go test -race -coverprofile=coverage.out -covermode=atomic -timeout=10m ./...
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v4
+        if: always()
         with:
           files: coverage.out
           fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
 
   # ============================================================================
-  # Security - Vulnerability Scanning
+  # Security — Vulnerability Scanning
+  # ============================================================================
+  #
+  # TWO TOOLS:
+  #   1. govulncheck: Checks Go dependencies for known vulnerabilities (CVEs)
+  #   2. gosec: Static analysis for security issues in our code
+  #
+  # WHY BOTH?
+  #   - govulncheck: "Are my dependencies vulnerable?"
+  #   - gosec: "Does MY code have security bugs?"
+  #
   # ============================================================================
   security:
     name: Security
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
 
@@ -137,17 +160,27 @@ jobs:
           args: '-no-fail -fmt sarif -out gosec.sarif ./...'
 
       - name: Upload gosec SARIF
-        uses: github/codeql-action/upload-sarif@v4
+        uses: github/codeql-action/upload-sarif@v3
         if: always()
-        continue-on-error: true  # May fail if Code Scanning is not enabled
+        continue-on-error: true  # OK here: Code Scanning might not be enabled
         with:
           sarif_file: gosec.sarif
 
   # ============================================================================
-  # Build - Verify builds work
+  # Build — Cross-platform Binary Compilation
+  # ============================================================================
+  #
+  # MATRIX STRATEGY:
+  #   Build for every OS/arch we support. This catches platform-specific
+  #   compilation issues early (e.g., syscall differences, cgo issues).
+  #
+  # WHY CGO_ENABLED=0?
+  #   Static binaries. No libc dependency. Runs anywhere.
+  #   Smaller Docker images (can use scratch/distroless).
+  #
   # ============================================================================
   build:
-    name: Build
+    name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
     runs-on: ubuntu-latest
     needs: [lint, test]
     strategy:
@@ -159,10 +192,10 @@ jobs:
             goarch: arm64
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
 
@@ -172,12 +205,25 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: 0
         run: |
-          go build -ldflags="-s -w" -o goqueue-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/goqueue
-          go build -ldflags="-s -w" -o goqueue-cli-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/goqueue-cli
-          go build -ldflags="-s -w" -o goqueue-admin-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/goqueue-admin
+          go build -trimpath -ldflags="-s -w" -o goqueue-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/goqueue
+          go build -trimpath -ldflags="-s -w" -o goqueue-cli-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/goqueue-cli
+          go build -trimpath -ldflags="-s -w" -o goqueue-admin-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/goqueue-admin
 
   # ============================================================================
-  # Docker - Build and Push Images
+  # Docker — Build (and Push on main)
+  # ============================================================================
+  #
+  # MULTI-PLATFORM:
+  #   linux/amd64 + linux/arm64. Covers x86 servers and ARM (Graviton, M-series).
+  #
+  # PUSH RULES:
+  #   - PRs: Build only (verify Dockerfile works)
+  #   - Push to main: Build + push to GHCR
+  #
+  # CACHING:
+  #   GitHub Actions cache (type=gha) for Docker layers. Dramatically speeds
+  #   up rebuilds when only source code changes (deps layer is cached).
+  #
   # ============================================================================
   docker:
     name: Docker
@@ -188,7 +234,7 @@ jobs:
       packages: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -211,10 +257,6 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
             type=sha,prefix=
             type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'main') }}
 
@@ -230,54 +272,22 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |
-            VERSION=${{ github.ref_name }}
+            VERSION=${{ github.sha }}
             GIT_COMMIT=${{ github.sha }}
             BUILD_TIME=${{ github.event.head_commit.timestamp }}
 
   # ============================================================================
-  # Release - Create GitHub Release with GoReleaser
-  # ============================================================================
-  release:
-    name: Release
-    runs-on: ubuntu-latest
-    needs: [lint, test, security, build, docker]
-    if: startsWith(github.ref, 'refs/tags/v')
-    permissions:
-      contents: write
-      packages: write
-      id-token: write  # For signing
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version: ${{ env.GO_VERSION }}
-
-      - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v6
-        with:
-          distribution: goreleaser
-          version: latest
-          args: release --clean
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  # ============================================================================
-  # Proto - Generate and verify protobuf
+  # Proto — Protobuf Lint and Breaking Change Detection
   # ============================================================================
   proto:
     name: Proto Check
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
 
@@ -287,14 +297,14 @@ jobs:
           version: latest
 
       - name: Buf lint
-        run: buf lint api/proto || true  # Non-blocking - proto may have existing issues
+        run: buf lint api/proto
 
-      - name: Buf breaking
+      - name: Buf breaking change detection
         run: buf breaking api/proto --against 'https://github.com/${{ github.repository }}.git#branch=main'
-        continue-on-error: true  # First run won't have baseline
+        if: github.event_name == 'pull_request'
 
   # ============================================================================
-  # Dependency Review - Check for vulnerable dependencies in PRs
+  # Dependency Review — PR-only check for vulnerable new dependencies
   # ============================================================================
   dependency-review:
     name: Dependency Review
@@ -302,7 +312,7 @@ jobs:
     if: github.event_name == 'pull_request'
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
       - name: Dependency Review
         uses: actions/dependency-review-action@v4

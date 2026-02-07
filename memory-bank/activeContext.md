@@ -2,97 +2,93 @@
 
 ## Current Focus
 
-**Phase**: 4 - Operations (COMPLETE)
-**Status**: ALL 26 MILESTONES COMPLETE - M25 Advanced Observability COMPLETE, M26 Transactions COMPLETE
-**Next**: Project complete - all milestones implemented
+**Phase**: 4 - Operations (COMPLETE) + Production Hardening (COMPLETE)
+**Status**: ALL 26 feature milestones complete + Production Hardening M25/M26 complete
+**Next**: Project fully hardened — ready for production deployment and v1.0.0 release
 
-## Recent Session: M25 & M26 Complete
+## Recent Session: Production Hardening & CI/CD (M25/M26 Override)
 
-### M25: Advanced Observability / Distributed Tracing
+### M25 (Override): Production Hardening & Best Practices - COMPLETE
 
-**Config & Helm**:
-- ✅ Tracing configuration wired (config.example.yaml, values.yaml, configmap.yaml)
-- ✅ Trace continuity fix (publish injects traceparent, consume extracts it)
-- ✅ Trace index TTL cleanup (background goroutine, 1hr TTL, 5min sweep)
+**Makefile** (NEW - `Makefile`):
+- ✅ 30+ targets with self-documenting help
+- ✅ Build targets: `build`, `build-goqueue`, `build-cli`, `build-admin` with ldflags
+- ✅ Test targets: `test`, `test-cover`, `test-bench`, `test-race`
+- ✅ Quality targets: `lint`, `fmt`, `vet`, `check`, `vuln`
+- ✅ Docker targets: `docker`, `docker-push`, `docker-debug`, `docker-compose-up/down`
+- ✅ Release targets: `release-dry`, `release-check`
+- ✅ Dev targets: `run`, `run-dev`, `clean`, `install-tools`, `version`
 
-**Deploy Infrastructure**:
-- ✅ Grafana Tempo service in docker-compose (grafana/tempo:2.3.1, OTLP on 4317/4318)
-- ✅ tempo.yaml config (OTLP receivers, local storage, 48h retention)
-- ✅ Datasource provisioning (Prometheus + Tempo with trace-to-metrics links)
-- ✅ Tracing env vars on all 3 GoQueue nodes
-- ✅ Tracing Grafana dashboard (goqueue-tracing.json) with transaction stats + Tempo traces
+**golangci-lint** (REWRITTEN - `.golangci.yml`):
+- ✅ 20+ linters (was 9): errcheck, govet, staticcheck, revive (18 rules), gocritic, gosec, noctx, bodyclose, errname, errorlint, prealloc, copyloopvar, gofmt, goimports, misspell
+- ✅ Smart exclusions: test files relaxed, proto gen excluded, cmd/ gocritic excluded
 
-**Terraform**:
-- ✅ Tracing variables (enabled, endpoint, sampling_rate)
-- ✅ Conditional Helm values in aws module
-- ✅ Dev environment configured (tempo.goqueue:4317)
+**Config Validation** (NEW - `internal/config/validate.go` + `validate_test.go`):
+- ✅ Fail-fast startup validation (DataDir, NodeID, Cluster)
+- ✅ Accumulating errors (reports ALL problems, not just first)
+- ✅ 17 table-driven tests with race detection
 
-### M26: Transactions (Exactly-Once Semantics)
+**Version Injection**:
+- ✅ ldflags vars in `cmd/goqueue/main.go` and `internal/cli/client.go`
+- ✅ Dynamic banner at startup
 
-**Persistence & Recovery**:
-- ✅ AbortedTracker persistence (Save/LoadFromFile with atomic write-to-temp-rename + fsync)
-- ✅ WALRecordTxnPublish record type (tracks offset per transactional publish)
-- ✅ RecordTxnPublish wired into PublishTransactional path
-- ✅ Recovery rebuild: recoveryState accumulation during WAL replay
-- ✅ rebuildTrackers: committed → skip, aborted → MarkTransactionAborted, in-progress → TrackUncommittedOffset
-- ✅ TransactionBroker interface extended with TrackUncommittedOffset
+**Docker Hardening**:
+- ✅ HEALTHCHECK in `deploy/docker/Dockerfile`
+- ✅ Deleted stub Dockerfiles (Dockerfile.scratch, Dockerfile.prebuilt)
+- ✅ Comprehensive `.dockerignore`
 
-**gRPC TransactionService**:
-- ✅ Proto definitions (InitProducer, BeginTransaction, AddPartition, CommitTransaction, AbortTransaction, ListTransactions, DescribeTransaction)
-- ✅ Generated Go code (buf generate)
-- ✅ Full implementation (transaction_service.go) with comprehensive comments
-- ✅ Error mapping (fenced, not_found, timeout, invalid_state)
-- ✅ Registered in gRPC server
-- ✅ Type aliases and registration in services.go
+### M26 (Override): Release Process & CI/CD - COMPLETE
+
+**Hardened CI** (REWRITTEN - `.github/workflows/ci.yml`):
+- ✅ STRICT — removed all 6 `continue-on-error`/`|| true` anti-patterns
+- ✅ 7 jobs: lint, test, security, build (matrix), docker, proto, dependency-review
+- ✅ Concurrency groups, proper job dependencies
+
+**Release Workflow** (NEW - `.github/workflows/release.yml`):
+- ✅ Separate from CI, triggered by v* tags
+- ✅ Validate → GoReleaser → Docker Release (semver tags)
+- ✅ Multi-platform images
+
+**Pre-existing (verified, unchanged)**:
+- ✅ Dependabot, PR template, CODEOWNERS, issue templates, release-drafter, stale bot
 
 ### Files Created
 ```
-deploy/docker/config/tempo.yaml
-deploy/grafana/provisioning/datasources/datasources.yaml
-deploy/grafana/dashboards/goqueue-tracing.json
-internal/grpc/transaction_service.go
+Makefile
+internal/config/validate.go
+internal/config/validate_test.go
+.github/workflows/release.yml
 ```
 
 ### Files Modified
 ```
-deploy/docker/docker-compose.yaml (Tempo service, tracing env vars)
-deploy/grafana/provisioning/dashboards/dashboards.yaml (moved)
-deploy/terraform/modules/aws/main.tf (tracing variables + Helm)
-deploy/terraform/environments/dev/main.tf (tracing config)
-internal/broker/broker.go (AbortedTracker load, save, RecordTxnPublish, TrackUncommittedOffset)
-internal/broker/transaction_coordinator.go (TrackUncommittedOffset interface, recovery rebuild, ErrTransactionsNotEnabled)
-internal/broker/transaction_coordinator_test.go (mock updated)
-internal/broker/transaction_log.go (WALRecordTxnPublish, TxnPublishData)
-internal/broker/uncommitted_tracker.go (Save, LoadFromFile, AbortedTrackerFilePath)
-internal/grpc/server.go (TransactionService registration)
-internal/grpc/services.go (transaction type aliases + registration)
-api/proto/goqueue.proto (TransactionService + messages)
-api/proto/gen/go/goqueue.pb.go (regenerated)
-api/proto/gen/go/goqueue_grpc.pb.go (regenerated)
+.golangci.yml (rewritten: 9 → 20+ linters)
+.github/workflows/ci.yml (rewritten: strict, no continue-on-error)
+deploy/docker/Dockerfile (added HEALTHCHECK)
+.dockerignore (comprehensive rewrite)
+cmd/goqueue/main.go (version injection vars, config validation call)
+internal/cli/client.go (const → var for ldflags)
 ```
 
-### Architecture Decisions (M26)
+### Files Deleted
+```
+Dockerfile.scratch (bare stub, superseded)
+Dockerfile.prebuilt (bare stub, superseded)
+```
+
+### Architecture Decisions (Production Hardening)
 | Decision | Choice | Why |
 |----------|--------|-----|
-| AbortedTracker persist | JSON file + atomic rename | Crash-safe, aborts are rare, O(n) write OK |
-| WAL publish tracking | WALRecordTxnPublish per publish | Enables recovery rebuild, teaches correct patterns |
-| Recovery strategy | Accumulate then process | Cleaner than incremental, cross-check possible |
-| gRPC error model | Errors in response body | Matches Kafka (protocol errors, not connection errors) |
-| Tracing backend | Grafana Tempo | OTLP-native, 10-100x cheaper than Elasticsearch |
+| CI strictness | No continue-on-error | Flaky tests are bugs, fix them |
+| Release separation | Separate workflow | Different permissions, different triggers |
+| Lint expansion | 20+ linters | Catch real bugs early (gosec, errcheck, bodyclose) |
+| Config validation | Accumulating errors | Better UX: show ALL problems at once |
+| Version injection | ldflags | Standard Go pattern, no code generation |
+| Docker health check | CLI-based | Uses goqueue-cli already in the image |
 
-### Remaining Milestones
+## Previous Session: M25 & M26 (Original)
 
-| ID | Name | Status |
-|----|------|--------|
-| All | All 26 milestones | COMPLETE |
-
----
-
-## Previous Focus: Security & Schema Registry Deployment
-
----
-
-## Previous Focus: EKS Deployment & Cluster Validation
+### M25 (Original): Advanced Observability / Distributed Tracing - COMPLETE
 - ✅ Industry-standard token bucket algorithm
 - ✅ Per-tenant rate limiting for publish/consume
 - ✅ Configurable capacity and refill rate

@@ -2,20 +2,75 @@
 
 ## Overall Status
 
-**Phase**: 4 of 4 (COMPLETE)
-**Milestones**: 26/26 complete (ALL MILESTONES DONE - M25 & M26 COMPLETE)
-**Tests**: 640+ passing (storage: 50+, broker: 470+, api: 24, grpc: 16, client: 14, cluster: 50+)
+**Phase**: 4 of 4 (COMPLETE) + Production Hardening
+**Milestones**: 26/26 feature milestones complete + M25/M26 production hardening complete
+**Tests**: 640+ passing (storage: 50+, broker: 470+, api: 24, grpc: 16, client: 14, cluster: 50+, config: 17)
 **Started**: Session 1
 
-## Latest Session - M25 & M26 Complete
+## Latest Session - Production Hardening & CI/CD
 
-### M25: Advanced Observability / Distributed Tracing - COMPLETE
+### M25 (Override): Production Hardening & Best Practices - COMPLETE
+
+**Makefile** (NEW):
+- ✅ Comprehensive Makefile with 30+ targets (build, test, lint, docker, release, clean)
+- ✅ Self-documenting `make help` with categorized targets
+- ✅ Version injection via ldflags (VERSION, COMMIT, BUILD_TIME)
+- ✅ Install-tools target for developer onboarding
+
+**golangci-lint Hardening**:
+- ✅ Expanded from 9 to 20+ linters (errcheck, govet, staticcheck, revive, gocritic, gosec, noctx, bodyclose, errname, errorlint, prealloc, copyloopvar)
+- ✅ Revive configured with 18 rules
+- ✅ Test-file exclusions for practical linting (relaxed errcheck/gosec in tests)
+- ✅ Proto gen files excluded
+
+**Dockerfile Hardening**:
+- ✅ Deleted bare-bones stub files (Dockerfile.scratch, Dockerfile.prebuilt)
+- ✅ Added HEALTHCHECK to production stage in deploy/docker/Dockerfile
+- ✅ Comprehensive .dockerignore to reduce build context
+
+**Config Validation Module** (NEW):
+- ✅ `internal/config/validate.go` - Fail-fast validation at startup
+- ✅ Accumulating ValidationError pattern (reports all errors, not just first)
+- ✅ Validates: DataDir, NodeID, ClusterConfig (peers, quorum, addresses)
+- ✅ `internal/config/validate_test.go` - 17 table-driven tests, all passing with -race
+- ✅ Wired into cmd/goqueue/main.go (validates before broker creation)
+
+**Version Injection**:
+- ✅ `cmd/goqueue/main.go` - ldflags vars (version, commit, buildTime)
+- ✅ `internal/cli/client.go` - Changed const to var for ldflags injection
+- ✅ Dynamic banner showing version + commit at startup
+
+### M26 (Override): Release Process & CI/CD - COMPLETE
+
+**Hardened CI Workflow** (.github/workflows/ci.yml):
+- ✅ STRICT pipeline — no `continue-on-error`, no `|| true`
+- ✅ Jobs: lint, test (race+coverage), security (govulncheck+gosec), build (matrix), docker (multi-platform), proto (buf lint+breaking), dependency-review
+- ✅ Concurrency groups to cancel stale runs
+- ✅ Proper job dependencies (build/docker need lint+test)
+
+**Separate Release Workflow** (.github/workflows/release.yml):
+- ✅ Triggered by v* tags only (separated from CI)
+- ✅ Validate job (re-runs tests as safety net)
+- ✅ GoReleaser job for binaries + GitHub Release
+- ✅ Docker Release job with semver tags (1.2.3, 1.2, 1, latest)
+- ✅ Multi-platform (linux/amd64 + linux/arm64)
+
+**Pre-existing (verified, no changes needed)**:
+- ✅ Dependabot - already configured for gomod, github-actions, docker, client libs
+- ✅ PR template - comprehensive checklist
+- ✅ CODEOWNERS - @abd-ulbasit owns everything
+- ✅ Issue templates - bug report, feature request, question, config.yml
+- ✅ Release drafter, stale bot, docs deploy workflows
+
+## Previous Session - M25 & M26 (Original) Complete
+
+### M25 (Original): Advanced Observability / Distributed Tracing - COMPLETE
 - ✅ Config + Helm wiring (traceparent propagation, TTL cleanup)
 - ✅ Deploy: Tempo service, OTLP config, datasource provisioning
 - ✅ Terraform: Tracing vars + conditional Helm values + dev env
 - ✅ Grafana dashboard: Transaction stats + Tempo traces
 
-### M26: Transactions (Exactly-Once Semantics) - COMPLETE
+### M26 (Original): Transactions (Exactly-Once Semantics) - COMPLETE
 - ✅ AbortedTracker persistence (atomic write, load at init)
 - ✅ WALRecordTxnPublish (per-publish WAL tracking for recovery)
 - ✅ Recovery rebuild (accumulate + process: committed/aborted/in-progress)
