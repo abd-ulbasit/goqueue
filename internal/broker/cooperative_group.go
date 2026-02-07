@@ -487,7 +487,7 @@ func (cg *CooperativeGroup) GetCooperativeInfo() CooperativeGroupInfo {
 		}
 
 		metrics := cg.rebalancer.GetMetrics()
-		info.RebalanceMetrics = &metrics
+		info.RebalanceMetrics = metrics
 	}
 
 	return info
@@ -663,7 +663,7 @@ func (cgc *CooperativeGroupCoordinator) AcknowledgeRevocation(
 }
 
 // GetRebalanceMetrics returns rebalance metrics for all groups.
-func (cgc *CooperativeGroupCoordinator) GetRebalanceMetrics() RebalanceMetrics {
+func (cgc *CooperativeGroupCoordinator) GetRebalanceMetrics() *RebalanceMetrics {
 	return cgc.rebalancer.GetMetrics()
 }
 

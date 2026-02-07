@@ -525,7 +525,7 @@ func (cr *CooperativeRebalancer) IsRebalancing(groupID string) bool {
 }
 
 // GetMetrics returns a snapshot of rebalance metrics.
-func (cr *CooperativeRebalancer) GetMetrics() RebalanceMetrics {
+func (cr *CooperativeRebalancer) GetMetrics() *RebalanceMetrics {
 	return cr.metrics.GetSnapshot()
 }
 
