@@ -5,15 +5,18 @@
 // This file contains comprehensive benchmarks to test GoQueue throughput,
 // latency, and compare performance characteristics against industry standards.
 //
+// REQUIRES: A running GoQueue server (set GOQUEUE_URL, default localhost:8080).
+// Build tag "integration" ensures these don't run in normal CI.
+//
 // USAGE:
 //   # Run all benchmarks against local GoQueue
-//   GOQUEUE_URL=http://localhost:8080 go test -bench=. -benchmem -v
+//   GOQUEUE_URL=http://localhost:8080 go test -tags=integration -bench=. -benchmem -v
 //
 //   # Run against EKS cluster
-//   GOQUEUE_URL=http://<load-balancer-url>:8080 go test -bench=. -benchmem -v
+//   GOQUEUE_URL=http://<load-balancer-url>:8080 go test -tags=integration -bench=. -benchmem -v
 //
 //   # Run specific benchmark
-//   GOQUEUE_URL=http://localhost:8080 go test -bench=BenchmarkPublishThroughput -benchmem -v
+//   GOQUEUE_URL=http://localhost:8080 go test -tags=integration -bench=BenchmarkPublishThroughput -benchmem -v
 //
 // WHAT WE MEASURE:
 //   - Publish throughput (messages/sec)
@@ -24,6 +27,8 @@
 //   - Concurrent producer performance
 //
 // =============================================================================
+
+//go:build integration
 
 package benchmark
 
