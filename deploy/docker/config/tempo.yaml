@@ -1,0 +1,123 @@
+# ============================================================================
+# GRAFANA TEMPO CONFIGURATION
+# ============================================================================
+#
+# WHY TEMPO:
+# Tempo is a cost-efficient distributed tracing backend from Grafana Labs.
+# Unlike Jaeger+Elasticsearch which indexes every span field, Tempo only
+# indexes by TraceID — making it 10-100x cheaper to run at scale.
+#
+# ARCHITECTURE:
+#   ┌──────────┐   OTLP    ┌──────────┐   Query   ┌──────────┐
+#   │ GoQueue  │──────────►│  Tempo   │◄──────────│ Grafana  │
+#   │ (tracer) │  gRPC/    │          │  HTTP     │          │
+#   │          │  HTTP     │  Local   │  :3200    │  Explore │
+#   └──────────┘  :4317/   │  Storage │           └──────────┘
+#                 :4318    └──────────┘
+#
+# COMPARISON OF TRACE BACKENDS:
+#   ┌──────────────┬──────────────┬──────────────┬──────────────┐
+#   │ Feature      │ Tempo        │ Jaeger       │ Zipkin       │
+#   ├──────────────┼──────────────┼──────────────┼──────────────┤
+#   │ Storage      │ Object/Local │ Elastic/     │ Elastic/     │
+#   │              │              │ Cassandra    │ Cassandra    │
+#   │ Index        │ TraceID only │ Full text    │ Basic        │
+#   │ Cost         │ Very low     │ High         │ Medium       │
+#   │ Scale        │ Excellent    │ Good         │ Limited      │
+#   │ Protocol     │ OTLP native  │ Thrift/gRPC  │ HTTP         │
+#   │ Search       │ TraceQL      │ Tag search   │ Basic        │
+#   └──────────────┴──────────────┴──────────────┴──────────────┘
+#
+# ============================================================================
+
+# ---------------------------------------------------------------------------
+# SERVER
+# ---------------------------------------------------------------------------
+# Tempo's internal HTTP server for the query API.
+# Grafana connects here to fetch traces.
+# ---------------------------------------------------------------------------
+server:
+  http_listen_port: 3200
+
+# ---------------------------------------------------------------------------
+# DISTRIBUTOR
+# ---------------------------------------------------------------------------
+# The distributor is the first component that receives spans from producers.
+# It validates the data and forwards it to the ingester for buffering.
+#
+# RECEIVERS:
+#   - otlp/grpc (port 4317): Primary production receiver
+#   - otlp/http (port 4318): Alternative for HTTP-only environments
+#
+# GoQueue's tracer sends spans via OTLP gRPC by default.
+# ---------------------------------------------------------------------------
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: "0.0.0.0:4317"
+        http:
+          endpoint: "0.0.0.0:4318"
+
+# ---------------------------------------------------------------------------
+# INGESTER
+# ---------------------------------------------------------------------------
+# The ingester receives spans from the distributor, batches them into
+# "blocks", and writes completed blocks to storage.
+#
+# max_block_duration: How long before a block is flushed to storage.
+#   - Shorter = more frequent writes, less data loss on crash
+#   - Longer  = fewer writes, more efficient storage
+#   - 5m is a good balance for development
+# ---------------------------------------------------------------------------
+ingester:
+  max_block_duration: 5m
+
+# ---------------------------------------------------------------------------
+# COMPACTOR
+# ---------------------------------------------------------------------------
+# The compactor merges small blocks into larger ones for query efficiency.
+# Also enforces retention by deleting blocks older than max_block_bytes.
+#
+# In production, compaction runs continuously in the background.
+# For local development, the defaults are fine.
+# ---------------------------------------------------------------------------
+compactor:
+  compaction:
+    block_retention: 48h
+
+# ---------------------------------------------------------------------------
+# STORAGE
+# ---------------------------------------------------------------------------
+# Tempo supports multiple storage backends:
+#   - local:    Filesystem (development)
+#   - s3:       Amazon S3 / MinIO (production)
+#   - gcs:      Google Cloud Storage (production)
+#   - azure:    Azure Blob Storage (production)
+#
+# For this docker-compose dev environment, local filesystem is used.
+# The path is mounted as a Docker volume for persistence across restarts.
+# ---------------------------------------------------------------------------
+storage:
+  trace:
+    backend: local
+    wal:
+      path: /var/tempo/wal
+    local:
+      path: /var/tempo/blocks
+
+# ---------------------------------------------------------------------------
+# METRICS GENERATOR
+# ---------------------------------------------------------------------------
+# Generates RED metrics (Rate, Errors, Duration) from trace data.
+# These metrics are pushed to Prometheus for alerting and dashboards.
+#
+# Disabled by default in development. Enable in production for:
+#   - Automatic service graph generation
+#   - Span-derived metrics without manual instrumentation
+#   - Service-level indicators from traces
+# ---------------------------------------------------------------------------
+metrics_generator:
+  storage:
+    path: /var/tempo/generator/wal

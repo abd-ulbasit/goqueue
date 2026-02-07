@@ -91,6 +91,24 @@ type (
 	HealthCheckResponse = pb.HealthCheckResponse
 	ServingStatus       = pb.ServingStatus
 
+	// Transaction service
+	InitProducerRequest         = pb.InitProducerRequest
+	InitProducerResponse        = pb.InitProducerResponse
+	BeginTransactionRequest     = pb.BeginTransactionRequest
+	BeginTransactionResponse    = pb.BeginTransactionResponse
+	AddPartitionRequest         = pb.AddPartitionRequest
+	AddPartitionResponse        = pb.AddPartitionResponse
+	CommitTransactionRequest    = pb.CommitTransactionRequest
+	CommitTransactionResponse   = pb.CommitTransactionResponse
+	AbortTransactionRequest     = pb.AbortTransactionRequest
+	AbortTransactionResponse    = pb.AbortTransactionResponse
+	ListTransactionsRequest     = pb.ListTransactionsRequest
+	ListTransactionsResponse    = pb.ListTransactionsResponse
+	DescribeTransactionRequest  = pb.DescribeTransactionRequest
+	DescribeTransactionResponse = pb.DescribeTransactionResponse
+	TransactionInfo             = pb.TransactionInfo
+	TransactionPartition        = pb.TransactionPartition
+
 	// Common types
 	Error     = pb.Error
 	ErrorCode = pb.ErrorCode
@@ -140,6 +158,12 @@ const (
 	ErrorCodeReceiptHandleInvalid = pb.ErrorCode_ERROR_CODE_RECEIPT_HANDLE_INVALID
 	ErrorCodeReceiptHandleExpired = pb.ErrorCode_ERROR_CODE_RECEIPT_HANDLE_EXPIRED
 
+	// Transaction error codes
+	ErrorCodeTransactionNotFound = pb.ErrorCode_ERROR_CODE_TRANSACTION_NOT_FOUND
+	ErrorCodeTransactionTimeout  = pb.ErrorCode_ERROR_CODE_TRANSACTION_TIMEOUT
+	ErrorCodeProducerFenced      = pb.ErrorCode_ERROR_CODE_PRODUCER_FENCED
+	ErrorCodeInvalidTxnState     = pb.ErrorCode_ERROR_CODE_INVALID_TXN_STATE
+
 	// Rebalance types
 	RebalanceTypeUnspecified = pb.RebalanceType_REBALANCE_TYPE_UNSPECIFIED
 	RebalanceTypeRevoke      = pb.RebalanceType_REBALANCE_TYPE_REVOKE
@@ -155,11 +179,12 @@ const (
 // =============================================================================
 
 type (
-	PublishServiceServer = pb.PublishServiceServer
-	ConsumeServiceServer = pb.ConsumeServiceServer
-	AckServiceServer     = pb.AckServiceServer
-	OffsetServiceServer  = pb.OffsetServiceServer
-	HealthServiceServer  = pb.HealthServiceServer
+	PublishServiceServer     = pb.PublishServiceServer
+	ConsumeServiceServer     = pb.ConsumeServiceServer
+	AckServiceServer         = pb.AckServiceServer
+	OffsetServiceServer      = pb.OffsetServiceServer
+	HealthServiceServer      = pb.HealthServiceServer
+	TransactionServiceServer = pb.TransactionServiceServer
 )
 
 // Streaming interfaces
@@ -203,6 +228,11 @@ func RegisterHealthServiceServer(s *grpc.Server, srv HealthServiceServer) {
 	pb.RegisterHealthServiceServer(s, srv)
 }
 
+// RegisterTransactionServiceServer registers the transaction service.
+func RegisterTransactionServiceServer(s *grpc.Server, srv TransactionServiceServer) {
+	pb.RegisterTransactionServiceServer(s, srv)
+}
+
 // =============================================================================
 // UNIMPLEMENTED SERVERS (for embedding)
 // =============================================================================
@@ -212,11 +242,12 @@ func RegisterHealthServiceServer(s *grpc.Server, srv HealthServiceServer) {
 // =============================================================================
 
 type (
-	UnimplementedPublishServiceServer = pb.UnimplementedPublishServiceServer
-	UnimplementedConsumeServiceServer = pb.UnimplementedConsumeServiceServer
-	UnimplementedAckServiceServer     = pb.UnimplementedAckServiceServer
-	UnimplementedOffsetServiceServer  = pb.UnimplementedOffsetServiceServer
-	UnimplementedHealthServiceServer  = pb.UnimplementedHealthServiceServer
+	UnimplementedPublishServiceServer     = pb.UnimplementedPublishServiceServer
+	UnimplementedConsumeServiceServer     = pb.UnimplementedConsumeServiceServer
+	UnimplementedAckServiceServer         = pb.UnimplementedAckServiceServer
+	UnimplementedOffsetServiceServer      = pb.UnimplementedOffsetServiceServer
+	UnimplementedHealthServiceServer      = pb.UnimplementedHealthServiceServer
+	UnimplementedTransactionServiceServer = pb.UnimplementedTransactionServiceServer
 )
 
 // =============================================================================

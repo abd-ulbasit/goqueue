@@ -73,6 +73,8 @@ volumes:
     driver: local
   grafana-data:
     driver: local
+  tempo-data:
+    driver: local
 
 # =============================================================================
 # SERVICES
@@ -109,6 +111,12 @@ services:
       - GOQUEUE_CLUSTER_PEERS=goqueue-2:7000,goqueue-3:7000
       - GOQUEUE_CLUSTER_ADVERTISE=goqueue-1:7000
       - GOQUEUE_METRICS_ENABLED=true
+      - GOQUEUE_TRACING_ENABLED=true
+      - GOQUEUE_TRACING_OTLP_ENABLED=true
+      - GOQUEUE_TRACING_OTLP_ENDPOINT=tempo:4317
+      - GOQUEUE_TRACING_OTLP_PROTOCOL=grpc
+      - GOQUEUE_TRACING_OTLP_INSECURE=true
+      - GOQUEUE_TRACING_SAMPLING_RATE=1.0
       - GOQUEUE_LOG_LEVEL=info
       - GOQUEUE_LOG_FORMAT=json
     
@@ -197,6 +205,12 @@ services:
       - GOQUEUE_CLUSTER_PEERS=goqueue-1:7000,goqueue-3:7000
       - GOQUEUE_CLUSTER_ADVERTISE=goqueue-2:7000
       - GOQUEUE_METRICS_ENABLED=true
+      - GOQUEUE_TRACING_ENABLED=true
+      - GOQUEUE_TRACING_OTLP_ENABLED=true
+      - GOQUEUE_TRACING_OTLP_ENDPOINT=tempo:4317
+      - GOQUEUE_TRACING_OTLP_PROTOCOL=grpc
+      - GOQUEUE_TRACING_OTLP_INSECURE=true
+      - GOQUEUE_TRACING_SAMPLING_RATE=1.0
       - GOQUEUE_LOG_LEVEL=info
       - GOQUEUE_LOG_FORMAT=json
     
@@ -277,6 +291,12 @@ services:
       - GOQUEUE_CLUSTER_PEERS=goqueue-1:7000,goqueue-2:7000
       - GOQUEUE_CLUSTER_ADVERTISE=goqueue-3:7000
       - GOQUEUE_METRICS_ENABLED=true
+      - GOQUEUE_TRACING_ENABLED=true
+      - GOQUEUE_TRACING_OTLP_ENABLED=true
+      - GOQUEUE_TRACING_OTLP_ENDPOINT=tempo:4317
+      - GOQUEUE_TRACING_OTLP_PROTOCOL=grpc
+      - GOQUEUE_TRACING_OTLP_INSECURE=true
+      - GOQUEUE_TRACING_SAMPLING_RATE=1.0
       - GOQUEUE_LOG_LEVEL=info
       - GOQUEUE_LOG_FORMAT=json
     
@@ -371,6 +391,52 @@ services:
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------
+  # GRAFANA TEMPO - Distributed Tracing Backend (M25)
+  # ---------------------------------------------------------------------------
+  #
+  # ┌─────────────────────────────────────────────────────────────────────────┐
+  # │ WHY TEMPO?                                                              │
+  # │                                                                         │
+  # │ Grafana Tempo is a cost-effective, scalable trace storage backend:      │
+  # │   - No index required (uses TraceID-based lookup)                       │
+  # │   - 10-100x cheaper than Elasticsearch-based backends                   │
+  # │   - Native integration with Grafana (trace → metrics → logs)            │
+  # │   - OTLP-native (no protocol translation needed)                        │
+  # │                                                                         │
+  # │ COMPARISON:                                                              │
+  # │   - Jaeger + Elasticsearch: Feature-rich but expensive storage          │
+  # │   - Zipkin: Simple, less scalable                                       │
+  # │   - AWS X-Ray: Vendor lock-in, proprietary format                       │
+  # │   - Tempo: Cost-effective, open-source, OTLP-native                     │
+  # │                                                                         │
+  # │ FLOW:                                                                    │
+  # │   GoQueue ──[OTLP/gRPC:4317]──► Tempo ──► Grafana (visualization)      │
+  # └─────────────────────────────────────────────────────────────────────────┘
+  #
+  tempo:
+    image: grafana/tempo:2.3.1
+    container_name: goqueue-tempo
+    hostname: tempo
+    
+    command:
+      - "-config.file=/etc/tempo/tempo.yaml"
+    
+    ports:
+      - "3200:3200"    # Tempo API (query)
+      - "4317:4317"    # OTLP gRPC receiver
+      - "4318:4318"    # OTLP HTTP receiver
+    
+    volumes:
+      - ./config/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    
+    networks:
+      - goqueue-internal
+      - goqueue-external
+    
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
   # GRAFANA - Visualization
   # ---------------------------------------------------------------------------
   grafana:
@@ -398,6 +464,7 @@ services:
     
     depends_on:
       - prometheus
+      - tempo
     
     restart: unless-stopped
 

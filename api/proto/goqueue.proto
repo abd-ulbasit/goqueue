@@ -873,6 +873,187 @@ message OffsetResetResult {
 }
 
 // =============================================================================
+// TRANSACTION SERVICE (M26 - Exactly-Once Semantics)
+// =============================================================================
+//
+// PURPOSE:
+// Manage transactional producers and their transaction lifecycle.
+// Enables exactly-once semantics by coordinating atomic multi-partition writes.
+//
+// TRANSACTION LIFECYCLE:
+//
+//   ┌──────────────┐    ┌──────────────┐    ┌──────────────────┐
+//   │ InitProducer │───►│ BeginTxn     │───►│ AddPartitions +  │
+//   │ (get pid)    │    │              │    │ Publish messages  │
+//   └──────────────┘    └──────────────┘    └────────┬─────────┘
+//                                                    │
+//                                          ┌─────────┴─────────┐
+//                                          │                   │
+//                                          ▼                   ▼
+//                                   ┌──────────┐       ┌───────────┐
+//                                   │  Commit  │       │   Abort   │
+//                                   └──────────┘       └───────────┘
+//
+// COMPARISON:
+//   - Kafka: InitProducerIdRequest → BeginTransaction → send() → 
+//            CommitTransaction/AbortTransaction
+//   - Pulsar: newTransaction() → send() → commit()/abort()
+//   - SQS: No transaction support
+//   - goqueue: Follows Kafka model closely
+//
+// =============================================================================
+
+service TransactionService {
+  // InitProducer initializes a transactional producer, returning a producer ID
+  // and epoch. If the transactional ID was used before, the epoch is bumped
+  // (zombie fencing).
+  rpc InitProducer(InitProducerRequest) returns (InitProducerResponse);
+  
+  // BeginTransaction starts a new transaction for the given producer.
+  rpc BeginTransaction(BeginTransactionRequest) returns (BeginTransactionResponse);
+  
+  // AddPartition registers a topic-partition as part of the active transaction.
+  // Must be called before publishing to that partition within the transaction.
+  rpc AddPartition(AddPartitionRequest) returns (AddPartitionResponse);
+  
+  // CommitTransaction atomically commits all messages in the transaction.
+  // After commit, all messages become visible to consumers.
+  rpc CommitTransaction(CommitTransactionRequest) returns (CommitTransactionResponse);
+  
+  // AbortTransaction discards all messages in the transaction.
+  // Messages are marked as aborted and hidden from read_committed consumers.
+  rpc AbortTransaction(AbortTransactionRequest) returns (AbortTransactionResponse);
+  
+  // ListTransactions returns all active (in-progress) transactions.
+  rpc ListTransactions(ListTransactionsRequest) returns (ListTransactionsResponse);
+  
+  // DescribeTransaction returns details about a specific transaction.
+  rpc DescribeTransaction(DescribeTransactionRequest) returns (DescribeTransactionResponse);
+}
+
+// InitProducerRequest - Initialize a transactional producer.
+//
+// ZOMBIE FENCING:
+//   If the same transactional_id was used by a previous producer instance,
+//   the broker bumps the epoch. The old producer (zombie) is fenced out:
+//   any attempt to use the old epoch returns PRODUCER_FENCED.
+//
+//   Producer A (epoch=1) ──► crash
+//   Producer B (epoch=2) ──► InitProducer(same txn_id) → gets epoch=2
+//   Producer A recovers  ──► any operation → PRODUCER_FENCED (epoch too old)
+//
+message InitProducerRequest {
+  // Stable identifier for this producer across restarts.
+  // Must be unique per logical producer.
+  string transactional_id = 1;
+  
+  // Transaction timeout in milliseconds.
+  // If a transaction doesn't complete within this time, the coordinator
+  // automatically aborts it. Default: 60000 (60s).
+  int64 transaction_timeout_ms = 2;
+}
+
+message InitProducerResponse {
+  // Assigned producer ID (unique across all producers)
+  int64 producer_id = 1;
+  
+  // Current epoch for this transactional ID.
+  // Incremented on each InitProducer call (zombie fencing).
+  int32 epoch = 2;
+  
+  // Error details, if any
+  Error error = 3;
+}
+
+// BeginTransactionRequest - Start a new transaction.
+message BeginTransactionRequest {
+  string transactional_id = 1;
+  int64 producer_id = 2;
+  int32 epoch = 3;
+}
+
+message BeginTransactionResponse {
+  // Unique ID for this transaction instance
+  string transaction_id = 1;
+  Error error = 2;
+}
+
+// AddPartitionRequest - Register a partition with the transaction.
+message AddPartitionRequest {
+  string transactional_id = 1;
+  int64 producer_id = 2;
+  int32 epoch = 3;
+  string topic = 4;
+  int32 partition = 5;
+}
+
+message AddPartitionResponse {
+  Error error = 1;
+}
+
+// CommitTransactionRequest - Commit the active transaction.
+message CommitTransactionRequest {
+  string transactional_id = 1;
+  int64 producer_id = 2;
+  int32 epoch = 3;
+}
+
+message CommitTransactionResponse {
+  Error error = 1;
+}
+
+// AbortTransactionRequest - Abort the active transaction.
+message AbortTransactionRequest {
+  string transactional_id = 1;
+  int64 producer_id = 2;
+  int32 epoch = 3;
+}
+
+message AbortTransactionResponse {
+  Error error = 1;
+}
+
+// ListTransactionsRequest - List active transactions.
+message ListTransactionsRequest {
+  // No parameters - returns all active transactions
+}
+
+message ListTransactionsResponse {
+  repeated TransactionInfo transactions = 1;
+}
+
+// DescribeTransactionRequest - Get details about a specific transaction.
+message DescribeTransactionRequest {
+  string transaction_id = 1;
+}
+
+message DescribeTransactionResponse {
+  TransactionInfo transaction = 1;
+  Error error = 2;
+}
+
+// TransactionInfo - Details about a single transaction.
+message TransactionInfo {
+  string transaction_id = 1;
+  string transactional_id = 2;
+  int64 producer_id = 3;
+  int32 epoch = 4;
+  string state = 5;
+  google.protobuf.Timestamp start_time = 6;
+  google.protobuf.Timestamp last_update_time = 7;
+  int64 timeout_ms = 8;
+  
+  // Partitions involved in this transaction
+  repeated TransactionPartition partitions = 9;
+}
+
+// TransactionPartition - A topic-partition pair in a transaction.
+message TransactionPartition {
+  string topic = 1;
+  repeated int32 partitions = 2;
+}
+
+// =============================================================================
 // HEALTH SERVICE
 // =============================================================================
 //

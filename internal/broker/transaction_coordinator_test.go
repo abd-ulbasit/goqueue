@@ -121,6 +121,10 @@ func (m *mockTransactionBroker) MarkTransactionAborted(offsets []partitionOffset
 	// Mock - no-op
 }
 
+func (m *mockTransactionBroker) TrackUncommittedOffset(topic string, partition int, offset int64, txnId string, producerId int64, epoch int16) {
+	// Mock - no-op (recovery tracking)
+}
+
 func (m *mockTransactionBroker) addMockTopic(name string, partitionCount int) {
 	// Create a minimal mock topic structure
 	m.topics[name] = &Topic{

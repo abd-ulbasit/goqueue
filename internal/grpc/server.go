@@ -246,6 +246,7 @@ func (s *Server) registerServices() {
 	RegisterAckServiceServer(s.grpcServer, NewAckServiceServer(s.broker, s.logger))
 	RegisterOffsetServiceServer(s.grpcServer, NewOffsetServiceServer(s.broker, s.logger))
 	RegisterHealthServiceServer(s.grpcServer, NewHealthServiceServer(s.broker, s.logger))
+	RegisterTransactionServiceServer(s.grpcServer, NewTransactionServiceServer(s.broker, s.logger))
 }
 
 // =============================================================================

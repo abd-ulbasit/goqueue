@@ -255,6 +255,39 @@ variable "backup_s3_prefix" {
   default     = "goqueue/backups"
 }
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# TRACING VARIABLES (M25)
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Controls distributed tracing via OpenTelemetry (OTLP).
+# GoQueue's built-in tracer exports spans to an OTLP-compatible backend
+# (Grafana Tempo, Jaeger, etc.) for end-to-end request visibility.
+#
+# TYPICAL SETUP:
+#   1. Deploy Grafana Tempo alongside kube-prometheus-stack
+#   2. Set tracing_enabled = true
+#   3. Set tracing_otlp_endpoint to Tempo's OTLP gRPC endpoint
+#   4. Sampling rate: 1.0 for dev, 0.1-0.01 for production
+# ═══════════════════════════════════════════════════════════════════════════════
+
+variable "tracing_enabled" {
+  description = "Enable distributed tracing (OTLP export)"
+  type        = bool
+  default     = false
+}
+
+variable "tracing_otlp_endpoint" {
+  description = "OTLP gRPC endpoint for trace export (e.g., tempo.monitoring:4317)"
+  type        = string
+  default     = ""
+}
+
+variable "tracing_sampling_rate" {
+  description = "Trace sampling rate (1.0 = all traces, 0.1 = 10% of traces)"
+  type        = number
+  default     = 1.0
+}
+
 # =============================================================================
 # DATA SOURCES
 # =============================================================================
@@ -833,6 +866,29 @@ resource "helm_release" "goqueue" {
           topics  = true
           offsets = true
           schemas = true
+        }
+      } : {}
+
+      # ═══════════════════════════════════════════════════════════════════════
+      # TRACING CONFIGURATION (M25)
+      # ═══════════════════════════════════════════════════════════════════════
+      #
+      # Enables OTLP trace export to a distributed tracing backend.
+      # In production, set tracing_otlp_endpoint to your Tempo/Jaeger instance.
+      #
+      # SAMPLING GUIDANCE:
+      #   - Development:  1.0 (capture everything for debugging)
+      #   - Staging:      0.5 (reasonable visibility without noise)
+      #   - Production:   0.01-0.1 (cost-effective, captures enough)
+      #
+      tracing = var.tracing_enabled ? {
+        enabled      = true
+        samplingRate = var.tracing_sampling_rate
+        otlp = {
+          enabled  = true
+          endpoint = var.tracing_otlp_endpoint
+          protocol = "grpc"
+          insecure = false
         }
       } : {}
 

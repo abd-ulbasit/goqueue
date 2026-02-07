@@ -1,0 +1,122 @@
+# ============================================================================
+# GRAFANA DATASOURCE PROVISIONING
+# ============================================================================
+#
+# WHAT THIS FILE DOES:
+# Automatically configures data sources when Grafana starts.
+# Without this, you'd have to manually add Prometheus and Tempo
+# through the Grafana UI every time you recreate containers.
+#
+# HOW IT WORKS:
+#   1. This file is mounted to /etc/grafana/provisioning/datasources/
+#   2. Grafana reads it on startup
+#   3. Data sources are created/updated automatically
+#   4. No manual configuration needed
+#
+# WHY PROVISION DATASOURCES:
+#   - Infrastructure as Code: Data sources are version-controlled
+#   - Reproducible: Same config across dev/staging/prod
+#   - No manual steps: `docker compose up` and everything works
+#   - Dashboard links work: Dashboards reference datasource UIDs
+#
+# ============================================================================
+
+apiVersion: 1
+
+# -----------------------------------------------------------------------------
+# DATASOURCE DEFINITIONS
+# -----------------------------------------------------------------------------
+# Each datasource maps a backend service to a Grafana data source.
+# The UID is used by dashboards to reference the correct data source.
+# Using a stable UID (not auto-generated) ensures dashboards are portable.
+# -----------------------------------------------------------------------------
+
+datasources:
+  # ---------------------------------------------------------------------------
+  # PROMETHEUS - Metrics
+  # ---------------------------------------------------------------------------
+  # Collects and stores time-series metrics from GoQueue nodes.
+  # Used for: Dashboards, alerting, SLO tracking
+  # ---------------------------------------------------------------------------
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: true
+    jsonData:
+      timeInterval: '15s'
+      httpMethod: POST
+
+  # ---------------------------------------------------------------------------
+  # GRAFANA TEMPO - Distributed Traces
+  # ---------------------------------------------------------------------------
+  # Stores and queries distributed traces from GoQueue's tracer.
+  # Used for: Request tracing, latency analysis, error investigation
+  #
+  # TRACE-TO-METRICS LINK:
+  #   Tempo can link traces to Prometheus metrics. When viewing a trace,
+  #   you can jump to the corresponding metrics for that service/operation.
+  #   This is configured via tracesToMetrics below.
+  #
+  # TRACE-TO-LOGS LINK:
+  #   Similarly, traces can link to log entries (if Loki is configured).
+  #   This enables the "three pillars" workflow:
+  #     Metrics → Traces → Logs
+  #
+  # NODE GRAPH:
+  #   Tempo can generate a service dependency graph from trace data,
+  #   showing how services call each other and where latency occurs.
+  # ---------------------------------------------------------------------------
+  - name: Tempo
+    type: tempo
+    uid: tempo
+    access: proxy
+    url: http://tempo:3200
+    editable: true
+    jsonData:
+      # -----------------------------------------------------------------------
+      # TRACE-TO-METRICS INTEGRATION
+      # -----------------------------------------------------------------------
+      # Links trace spans to Prometheus metrics.
+      # When viewing a trace in Grafana, you can click to see related metrics.
+      # -----------------------------------------------------------------------
+      tracesToMetrics:
+        datasourceUid: prometheus
+        tags:
+          - key: service.name
+            value: service
+        queries:
+          - name: 'Request Rate'
+            query: 'sum(rate(goqueue_messages_published_total{$$__tags}[5m]))'
+          - name: 'Error Rate'
+            query: 'sum(rate(goqueue_messages_failed_total{$$__tags}[5m]))'
+
+      # -----------------------------------------------------------------------
+      # NODE GRAPH
+      # -----------------------------------------------------------------------
+      # Enables the service graph visualization in Grafana.
+      # Shows dependencies between GoQueue components as a graph.
+      # -----------------------------------------------------------------------
+      nodeGraph:
+        enabled: true
+
+      # -----------------------------------------------------------------------
+      # SEARCH
+      # -----------------------------------------------------------------------
+      # Enables TraceQL search in Grafana Explore.
+      # TraceQL is Tempo's query language for finding traces by attributes.
+      # Example: { span.goqueue.event_type = "message_published" }
+      # -----------------------------------------------------------------------
+      search:
+        hide: false
+
+      # -----------------------------------------------------------------------
+      # SERVICE MAP
+      # -----------------------------------------------------------------------
+      # Shows a visual map of services and their relationships.
+      # Requires metrics_generator to be enabled in Tempo.
+      # -----------------------------------------------------------------------
+      serviceMap:
+        datasourceUid: prometheus

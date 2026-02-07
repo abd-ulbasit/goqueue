@@ -212,6 +212,17 @@ module "goqueue_aws" {
   install_prometheus = true
   install_traefik    = false  # Use LoadBalancer directly for benchmarks
 
+  # ┌─────────────────────────────────────────────────────────────────────────┐
+  # │ TRACING CONFIGURATION (M25)                                             │
+  # │                                                                         │
+  # │ Enables OTLP trace export to Grafana Tempo.                             │
+  # │ Sampling at 1.0 in dev (capture all traces for debugging).              │
+  # │ In production, reduce to 0.01-0.1 for cost efficiency.                  │
+  # └─────────────────────────────────────────────────────────────────────────┘
+  tracing_enabled       = true
+  tracing_otlp_endpoint = "tempo.goqueue:4317"
+  tracing_sampling_rate = 1.0
+
   # Tags
   tags = {
     Project     = "goqueue"

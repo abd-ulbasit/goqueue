@@ -483,11 +483,29 @@ metrics:
     relabelings: []
 
   # PrometheusRule for alerts
+  # ============================================================================
+  # ALERT RULES OVERVIEW
+  # ============================================================================
+  # Each alert includes:
+  #   - expr: PromQL expression that triggers the alert
+  #   - for: Duration condition must be true before firing
+  #   - severity: critical (PagerDuty) or warning (Slack only)
+  #   - runbook_url: Link to troubleshooting guide
+  #
+  # SEVERITY LEVELS:
+  #   critical - Pages on-call, requires immediate action
+  #   warning  - Slack notification, investigate during business hours
+  # ============================================================================
   prometheusRule:
     enabled: true
     additionalLabels: {}
     namespace: ""
+    # Base URL for runbooks (customize to your docs site)
+    runbookBaseUrl: "https://goqueue.dev/docs/runbooks"
     rules:
+      # ======================================================================
+      # CONSUMER ALERTS
+      # ======================================================================
       - alert: GoQueueHighConsumerLag
         expr: sum(goqueue_consumer_lag) by (consumer_group, topic) > 10000
         for: 5m
@@ -495,17 +513,32 @@ metrics:
           severity: warning
         annotations:
           summary: "High consumer lag detected"
-          description: "Consumer group {{ $labels.consumer_group }} has lag > 10k on topic {{ $labels.topic }}"
+          description: "Consumer group {{ $labels.consumer_group }} has {{ $value | printf \"%.0f\" }} messages lag on topic {{ $labels.topic }}"
+          runbook_url: "https://goqueue.dev/docs/runbooks#goqueuehighconsumerlag"
       
-      - alert: GoQueueHighPublishLatency
-        expr: histogram_quantile(0.99, rate(goqueue_broker_publish_latency_seconds_bucket[5m])) > 0.1
-        for: 5m
+      - alert: GoQueueCriticalConsumerLag
+        expr: sum(goqueue_consumer_lag) by (consumer_group, topic) > 100000
+        for: 2m
         labels:
-          severity: warning
+          severity: critical
         annotations:
-          summary: "High publish latency"
-          description: "p99 publish latency is {{ $value }}s (threshold: 100ms)"
+          summary: "CRITICAL: Consumer lag exceeds 100k messages"
+          description: "Consumer group {{ $labels.consumer_group }} has {{ $value | printf \"%.0f\" }} messages lag on topic {{ $labels.topic }}. Immediate action required."
+          runbook_url: "https://goqueue.dev/docs/runbooks#goqueuecriticalconsumerlag"
       
+      - alert: GoQueueNoOffsetCommits
+        expr: sum by (consumer_group) (increase(goqueue_consumer_offset_commits_total[10m])) == 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No offset commits from consumer group"
+          description: "Consumer group {{ $labels.consumer_group }} has not committed any offsets in 10 minutes. Consumers may be dead or stuck."
+          runbook_url: "https://goqueue.dev/docs/runbooks#goqueuenooffsetcommits"
+      
+      # ======================================================================
+      # CLUSTER HEALTH ALERTS
+      # ======================================================================
       - alert: GoQueueBrokerDown
         expr: up{job="goqueue"} == 0
         for: 1m
@@ -513,16 +546,130 @@ metrics:
           severity: critical
         annotations:
           summary: "GoQueue broker is down"
-          description: "GoQueue broker {{ $labels.instance }} has been down for more than 1 minute"
+          description: "GoQueue broker {{ $labels.instance }} has been down for more than 1 minute."
+          runbook_url: "https://goqueue.dev/docs/runbooks#goqueuenodedown"
       
-      - alert: GoQueueHighErrorRate
-        expr: rate(goqueue_broker_errors_total[5m]) / rate(goqueue_broker_messages_published_total[5m]) > 0.01
+      - alert: GoQueueNodeDown
+        expr: count(up{job="goqueue"} == 1) < 3
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "GoQueue cluster degraded"
+          description: "Only {{ $value }} nodes are healthy. Cluster requires 3 nodes for full availability."
+          runbook_url: "https://goqueue.dev/docs/runbooks#goqueuenodedown"
+      
+      - alert: GoQueueOfflinePartitions
+        expr: goqueue_cluster_offline_partitions > 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "GoQueue has offline partitions"
+          description: "{{ $value | printf \"%.0f\" }} partition(s) have no leader. DATA IS UNAVAILABLE."
+          runbook_url: "https://goqueue.dev/docs/runbooks#goqueueofflinepartitions"
+      
+      - alert: GoQueueUnderReplicatedPartitions
+        expr: goqueue_cluster_under_replicated_partitions > 0
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "High error rate"
-          description: "Error rate is {{ $value | humanizePercentage }}"
+          summary: "Under-replicated partitions detected"
+          description: "{{ $value | printf \"%.0f\" }} partition(s) have fewer replicas than configured. Data durability at risk."
+          runbook_url: "https://goqueue.dev/docs/runbooks#goqueueunderreplicatedpartitions"
+      
+      # ======================================================================
+      # PERFORMANCE ALERTS
+      # ======================================================================
+      - alert: GoQueueHighPublishLatency
+        expr: histogram_quantile(0.99, sum(rate(goqueue_broker_publish_latency_seconds_bucket[5m])) by (le)) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High publish latency"
+          description: "p99 publish latency is {{ $value | printf \"%.3f\" }}s (threshold: 100ms)"
+          runbook_url: "https://goqueue.dev/docs/runbooks#goqueuehighpublishlatency"
+      
+      - alert: GoQueueHighErrorRate
+        expr: sum(rate(goqueue_broker_messages_failed_total[5m])) / sum(rate(goqueue_broker_messages_published_total[5m])) > 0.01
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High message failure rate"
+          description: "{{ $value | printf \"%.2f\" | mul 100 }}% of publish attempts are failing."
+          runbook_url: "https://goqueue.dev/docs/runbooks#goqueuehigherrorrate"
+      
+      # ======================================================================
+      # STORAGE ALERTS
+      # ======================================================================
+      - alert: GoQueueHighDiskUsage
+        expr: (goqueue_storage_disk_used_bytes / goqueue_storage_disk_total_bytes) * 100 > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High disk usage on GoQueue"
+          description: "Disk usage is {{ $value | printf \"%.1f\" }}% on {{ $labels.instance }}."
+          runbook_url: "https://goqueue.dev/docs/runbooks#goqueuehighdiskspace"
+      
+      - alert: GoQueueCriticalDiskUsage
+        expr: (goqueue_storage_disk_used_bytes / goqueue_storage_disk_total_bytes) * 100 > 90
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "CRITICAL: Disk usage above 90%"
+          description: "Disk usage is {{ $value | printf \"%.1f\" }}% on {{ $labels.instance }}. Broker may stop accepting writes."
+          runbook_url: "https://goqueue.dev/docs/runbooks#goqueuehighdiskspace"
+      
+      - alert: GoQueueFsyncErrors
+        expr: increase(goqueue_storage_fsync_errors_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "fsync errors detected"
+          description: "{{ $value | printf \"%.0f\" }} fsync errors in the last 5 minutes. DATA DURABILITY AT RISK."
+          runbook_url: "https://goqueue.dev/docs/runbooks#goqueuefsyncerrors"
+      
+      - alert: GoQueueHighFsyncLatency
+        expr: histogram_quantile(0.99, sum(rate(goqueue_storage_fsync_latency_seconds_bucket[5m])) by (le)) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High fsync latency"
+          description: "p99 fsync latency is {{ $value | printf \"%.3f\" }}s. Disk I/O may be saturated."
+          runbook_url: "https://goqueue.dev/docs/runbooks#goqueuehighfsynclatency"
+      
+      # ======================================================================
+      # REBALANCE ALERTS
+      # ======================================================================
+      - alert: GoQueueFrequentRebalances
+        expr: sum by (consumer_group) (increase(goqueue_consumer_rebalances_total[5m])) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Frequent consumer rebalances"
+          description: "Consumer group {{ $labels.consumer_group }} has rebalanced {{ $value | printf \"%.0f\" }} times in 5 minutes."
+          runbook_url: "https://goqueue.dev/docs/runbooks#goqueuefrequentrebalances"
+      
+      # ======================================================================
+      # SLO ALERTS (Error Budget)
+      # ======================================================================
+      - alert: GoQueueErrorBudgetBurn
+        expr: (sum(rate(goqueue_broker_messages_failed_total[1h])) / sum(rate(goqueue_broker_messages_published_total[1h]))) / 0.001 > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Error budget burning too fast"
+          description: "Error budget burn rate is {{ $value | printf \"%.1f\" }}x normal. At this rate, monthly budget will be exhausted."
+          runbook_url: "https://goqueue.dev/docs/runbooks#goqueueerrorbudgetburn"
 
 # Grafana dashboards
 grafana:
@@ -533,6 +680,182 @@ grafana:
     label: grafana_dashboard
     labelValue: "1"
     annotations: {}
+
+# -----------------------------------------------------------------------------
+# DISTRIBUTED TRACING CONFIGURATION (M25)
+# -----------------------------------------------------------------------------
+# ┌─────────────────────────────────────────────────────────────────────────────┐
+# │ TRACING ARCHITECTURE                                                        │
+# │                                                                             │
+# │ GoQueue has built-in W3C Trace Context support. Traces flow through:        │
+# │   1. Ring buffer (in-memory, fast lookup, lost on restart)                  │
+# │   2. File export (persistent JSON on disk)                                  │
+# │   3. OTLP export (production: Grafana Tempo, Jaeger)                        │
+# │                                                                             │
+# │ TRACE PROPAGATION:                                                          │
+# │   Producer ──[traceparent header]──► Broker ──[header]──► Consumer          │
+# │                                      │                                      │
+# │                                      ▼                                      │
+# │                                OTLP Exporter ──► Tempo/Jaeger               │
+# │                                                                             │
+# │ COMPARISON:                                                                 │
+# │   - Kafka: External instrumentation (Zipkin/OTEL libraries)                │
+# │   - RabbitMQ: rabbitmq_tracing plugin (logs to file)                        │
+# │   - SQS: AWS X-Ray integration (proprietary)                               │
+# │   - goqueue: Native W3C + OTLP export (open standard)                      │
+# └─────────────────────────────────────────────────────────────────────────────┘
+
+tracing:
+  # Enable distributed tracing
+  enabled: true
+
+  # Sampling rate: 0.0 (no traces) to 1.0 (all traces)
+  # Production recommendation: 0.1 (10%) to reduce storage and CPU overhead
+  samplingRate: 1.0
+
+  # Ring buffer capacity (number of spans kept in-memory)
+  # Higher = more in-memory traces queryable via /traces API
+  # Each span is ~100 bytes, so 100K spans ≈ 10MB
+  ringBufferCapacity: 100000
+
+  # File export (persistent JSON traces on disk)
+  fileExport:
+    enabled: true
+    # Maximum file size before rotation (bytes)
+    maxFileSize: 10485760  # 10MB
+
+  # OTLP export (production: Grafana Tempo, Jaeger, Datadog, etc.)
+  otlp:
+    # Enable sending traces to an OTLP-compatible backend
+    enabled: false
+
+    # Endpoint for OTLP receiver
+    # Tempo: tempo.monitoring:4317 (gRPC) or tempo.monitoring:4318 (HTTP)
+    # Jaeger: jaeger-collector.monitoring:4317
+    endpoint: ""
+
+    # Protocol: "grpc" (recommended) or "http"
+    protocol: "grpc"
+
+    # Disable TLS for local/internal endpoints
+    insecure: true
+
+    # Optional: authentication headers
+    # headers:
+    #   Authorization: "Bearer <token>"
+    headers: {}
+
+    # Batch size (spans per batch before flush)
+    batchSize: 512
+
+    # Flush interval (how often to send batches)
+    flushInterval: "5s"
+
+    # Service name reported in traces
+    serviceName: "goqueue"
+
+# -----------------------------------------------------------------------------
+# ALERTMANAGER CONFIGURATION (M24)
+# -----------------------------------------------------------------------------
+# ┌─────────────────────────────────────────────────────────────────────────────┐
+# │ ALERTMANAGER ROUTING                                                        │
+# │                                                                             │
+# │ Configure how alerts are routed to notification channels:                   │
+# │   - PagerDuty: Critical alerts, pages on-call engineer                      │
+# │   - Slack: All alerts for visibility                                        │
+# │   - Email: Digest or escalation                                             │
+# │                                                                             │
+# │ SEVERITY ROUTING:                                                           │
+# │   critical → PagerDuty + Slack (immediate, pages on-call)                   │
+# │   warning  → Slack only (business hours, non-urgent)                        │
+# │                                                                             │
+# │ COMPARISON:                                                                 │
+# │   - Datadog: Notification channels per monitor                              │
+# │   - PagerDuty: Escalation policies per service                              │
+# │   - Prometheus: Route tree with matchers (this)                             │
+# └─────────────────────────────────────────────────────────────────────────────┘
+
+alertmanager:
+  # Enable Alertmanager configuration (creates Secret + ConfigMap)
+  enabled: true
+  
+  # Namespace for Alertmanager config (default: release namespace)
+  namespace: ""
+  
+  # Label to associate config with Alertmanager instance
+  # Must match your Alertmanager's alertmanagerConfigSelector
+  alertmanagerLabel: "main"
+  
+  # Domain for dashboard/runbook links in alerts
+  domain: "https://abd-ulbasit.github.io/goqueue"
+  
+  # Default receiver for unmatched alerts
+  defaultReceiver: "slack-notifications"
+  
+  # Receiver for critical alerts (pages on-call)
+  criticalReceiver: "pagerduty-critical"
+  
+  # Receiver for consumer lag alerts (data team)
+  consumerLagReceiver: "slack-consumer-lag"
+  
+  # Receiver for storage/disk alerts (infra team)
+  storageReceiver: "slack-infrastructure"
+  
+  # Alert grouping settings
+  groupWait: "30s"        # Wait before sending first notification
+  groupInterval: "5m"     # Wait between notifications for same group
+  repeatInterval: "2h"    # Re-notify if alert still firing
+  
+  # Global settings
+  global:
+    # Slack webhook URL (get from: https://api.slack.com/messaging/webhooks)
+    slackApiUrl: ""
+    
+    # PagerDuty Events API URL (usually default)
+    pagerdutyUrl: "https://events.pagerduty.com/v2/enqueue"
+    
+    # SMTP settings for email alerts
+    smtp:
+      smarthost: ""       # e.g., smtp.gmail.com:587
+      from: ""            # e.g., alerts@example.com
+      username: ""
+      password: ""
+      requireTls: true
+  
+  # PagerDuty configuration
+  pagerduty:
+    enabled: false
+    # Integration key from PagerDuty service
+    # Create: Services → New Service → Prometheus integration
+    routingKey: ""
+  
+  # Slack configuration
+  slack:
+    enabled: true
+    # Default channel for all alerts
+    channel: "#goqueue-alerts"
+    # Channel for critical alerts (urgent)
+    criticalChannel: "#goqueue-critical"
+    # Channel for warning alerts
+    warningChannel: "#goqueue-alerts"
+    # Channel for consumer lag alerts (data platform team)
+    consumerLagChannel: "#data-platform"
+    # Channel for infrastructure alerts
+    infrastructureChannel: "#infrastructure"
+  
+  # Email configuration
+  email:
+    enabled: false
+    # Recipient email address
+    to: ""
+    # Recipient for critical alerts (can be different)
+    criticalTo: ""
+  
+  # Webhook configuration (for custom integrations)
+  webhook:
+    enabled: false
+    url: ""
+    bearerToken: ""
 
 # -----------------------------------------------------------------------------
 # OPTIONAL DEPENDENCIES
