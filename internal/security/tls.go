@@ -86,6 +86,30 @@ type TLSConfig struct {
 
 	// CertDir is the directory to store generated certificates
 	CertDir string
+
+	// =========================================================================
+	// HOT RELOAD SUPPORT (M27)
+	// =========================================================================
+	//
+	// WHY: In production, certificates rotate periodically (cert-manager,
+	// Let's Encrypt auto-renewal, security policy). Without hot reload,
+	// the server must restart to pick up new certs — causing downtime.
+	//
+	// HOW: When EnableHotReload is true and CertFile+KeyFile are provided,
+	// we use CertReloader which polls the filesystem (every 30s) for changes.
+	// tls.Config.GetCertificate callback serves the latest cert atomically.
+	//
+	// COMPARISON:
+	//   - Envoy: Watches filesystem via inotify, reloads automatically
+	//   - Nginx: Requires SIGHUP or reload command
+	//   - Kafka: Requires broker restart
+	//   - goqueue: File polling with atomic swap (K8s-friendly)
+	//
+	EnableHotReload bool
+
+	// certReloader holds the active CertReloader when hot reload is enabled.
+	// Managed internally — callers use StartCertReloader/StopCertReloader.
+	certReloader *CertReloader
 }
 
 // DefaultTLSConfig returns a secure default TLS configuration.
@@ -179,11 +203,40 @@ func (c *TLSConfig) NewTLSConfig() (*tls.Config, error) {
 		// │   kubectl create secret tls goqueue-tls \                              │
 		// │     --cert=server.crt --key=server.key                                 │
 		// └───────────────────────────────────────────────────────────────────────┘
-		cert, err = tls.LoadX509KeyPair(c.CertFile, c.KeyFile)
-		if err != nil {
-			return nil, fmt.Errorf("failed to load certificate: %w", err)
+
+		// =====================================================================
+		// HOT RELOAD vs STATIC CERT LOADING
+		// =====================================================================
+		//
+		// STATIC (default): Load cert once at startup, use tlsConfig.Certificates.
+		//   + Simple, no background goroutine
+		//   - Requires restart to pick up new certs
+		//
+		// HOT RELOAD: Use GetCertificate callback, CertReloader polls for changes.
+		//   + Zero-downtime cert rotation
+		//   + K8s cert-manager compatible (symlink swaps)
+		//   - Extra goroutine polling every 30s
+		//
+		if c.EnableHotReload {
+			reloader, reloaderErr := NewCertReloader(DefaultCertReloaderConfig(c.CertFile, c.KeyFile))
+			if reloaderErr != nil {
+				return nil, fmt.Errorf("failed to create cert reloader: %w", reloaderErr)
+			}
+			c.certReloader = reloader
+			// Use GetCertificate callback — tls package calls this on every handshake.
+			// The reloader atomically swaps certs when file changes are detected.
+			tlsConfig.GetCertificate = reloader.GetCertificate
+			slog.Info("TLS certificate hot reload enabled",
+				"cert", c.CertFile,
+				"checkInterval", "30s",
+			)
+		} else {
+			cert, err = tls.LoadX509KeyPair(c.CertFile, c.KeyFile)
+			if err != nil {
+				return nil, fmt.Errorf("failed to load certificate: %w", err)
+			}
+			slog.Info("loaded TLS certificate (static)", "cert", c.CertFile)
 		}
-		slog.Info("loaded TLS certificate", "cert", c.CertFile)
 	case c.GenerateSelfSigned:
 		// Generate self-signed certificate for development/testing
 		cert, err = c.generateSelfSignedCert()
@@ -195,7 +248,11 @@ func (c *TLSConfig) NewTLSConfig() (*tls.Config, error) {
 		return nil, fmt.Errorf("TLS enabled but no certificate provided")
 	}
 
-	tlsConfig.Certificates = []tls.Certificate{cert}
+	// When using hot reload, GetCertificate serves certs dynamically.
+	// Otherwise, set the static certificate in the config.
+	if c.certReloader == nil {
+		tlsConfig.Certificates = []tls.Certificate{cert}
+	}
 
 	// Load CA certificate for client verification (mTLS)
 	if c.CAFile != "" {
@@ -363,4 +420,24 @@ func LoadTLSConfigFromEnv(prefix string) TLSConfig {
 	}
 
 	return config
+}
+
+// =============================================================================
+// CERT RELOADER LIFECYCLE
+// =============================================================================
+
+// StartCertReloader starts the background cert file watcher.
+// No-op if hot reload is not enabled or reloader wasn't initialized.
+func (c *TLSConfig) StartCertReloader() {
+	if c.certReloader != nil {
+		c.certReloader.Start()
+	}
+}
+
+// StopCertReloader stops the background cert file watcher.
+// No-op if hot reload is not enabled or reloader wasn't initialized.
+func (c *TLSConfig) StopCertReloader() {
+	if c.certReloader != nil {
+		c.certReloader.Stop()
+	}
 }

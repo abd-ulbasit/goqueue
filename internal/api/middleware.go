@@ -25,11 +25,101 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"strconv"
 	"sync"
 	"time"
 )
+
+// =============================================================================
+// REQUEST CONTEXT TIMEOUT MIDDLEWARE (#7 - CONTEXT DEADLINES)
+// =============================================================================
+//
+// WHY: Without context deadlines, a slow handler can hold server resources
+// (goroutine, memory, DB connections) indefinitely. Context timeouts propagate
+// cancellation through the entire call chain:
+//   - HTTP handler → broker method → storage layer
+//   - If the client disconnects or timeout fires → all work cancelled
+//
+// HOW IT WORKS:
+//  1. Middleware creates a context.WithTimeout from the request context
+//  2. Timeout context is attached to the request via r.WithContext()
+//  3. Handler and all downstream code use r.Context() for cancellation
+//  4. If timeout fires → ctx.Done() channel closes → goroutines exit
+//
+// COMPARISON:
+//   - Kafka: request.timeout.ms (30s default, per-request)
+//   - RabbitMQ: Consumer timeout (30min default), publisher confirms timeout
+//   - SQS: WaitTimeSeconds (0-20s for long polling)
+//   - gRPC: Per-RPC deadlines (propagated across services)
+//   - goqueue: Per-request context deadline via middleware
+//
+// TRADEOFF:
+//   - Short timeout: Fast failure, but may abort legitimate slow operations
+//   - Long timeout: More tolerant, but holds resources longer on failures
+//   - 30s default: Matches Kafka's request.timeout.ms, good for most ops
+//
+// FLOW:
+//
+//	┌──────────┐    request     ┌─────────────────────┐    ctx.Done()
+//	│  Client  │───────────────►│ Timeout Middleware   │───────────────► cancel
+//	└──────────┘                │ ctx = 30s deadline   │
+//	                            └─────────┬───────────┘
+//	                                      │
+//	                                      ▼
+//	                            ┌─────────────────────┐
+//	                            │  Handler            │
+//	                            │  uses r.Context()   │
+//	                            │  for all operations │
+//	                            └─────────────────────┘
+func requestTimeoutMiddleware(timeout time.Duration) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Skip timeout for streaming/long-poll endpoints
+			// Long-poll consumers hold connections open waiting for messages;
+			// they manage their own timeouts via query parameters.
+			path := r.URL.Path
+			if path == "/health" || path == "/healthz" || path == "/readyz" ||
+				path == "/livez" || path == "/metrics" ||
+				// Long-poll endpoints manage their own timeouts
+				containsSubpath(path, "/poll") ||
+				// pprof profiles can take minutes to collect
+				containsSubpath(path, "/debug/pprof") {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			// Create a context with timeout
+			ctx, cancel := context.WithTimeout(r.Context(), timeout)
+			defer cancel()
+
+			// Serve with the timeout context
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
+// containsSubpath checks if a URL path contains a specific subpath segment.
+// Uses strings.Contains for simplicity; in production with many exclusions,
+// consider a prefix tree or compiled regex.
+func containsSubpath(path, sub string) bool {
+	return len(path) >= len(sub) && (path == sub ||
+		(len(path) > len(sub) && path[:len(sub)] == sub) ||
+		containsStr(path, sub))
+}
+
+// containsStr is a simple contains check to avoid importing strings
+// just for this utility (strings is already imported elsewhere, but
+// keeping middleware.go self-contained).
+func containsStr(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}
 
 // =============================================================================
 // REQUEST BODY SIZE LIMITER

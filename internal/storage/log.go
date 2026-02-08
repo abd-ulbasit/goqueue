@@ -138,6 +138,25 @@ type Log struct {
 
 	// closed tracks if log is closed
 	closed bool
+
+	// =========================================================================
+	// ENCRYPTION AT REST (M27)
+	// =========================================================================
+	//
+	// WHY: Encrypts message Values before writing to disk, decrypts on read.
+	// Protects against data theft if storage media is compromised.
+	//
+	// WHAT'S ENCRYPTED:
+	//   - Message Value (payload) only
+	//   - Key and headers stay plaintext for indexing/routing
+	//   - This matches how AWS SQS and Kafka handle encryption
+	//
+	// DESIGN:
+	//   - NoopEncryptor by default (zero overhead when disabled)
+	//   - AESEncryptor for production (AES-256-GCM, hardware-accelerated)
+	//   - Set via SetEncryptor() after creation
+	//
+	encryptor Encryptor
 }
 
 // =============================================================================
@@ -163,6 +182,7 @@ func NewLog(dir string) (*Log, error) {
 		segments:      []*Segment{segment},
 		activeSegment: segment,
 		nextOffset:    0,
+		encryptor:     &NoopEncryptor{},
 	}, nil
 }
 
@@ -254,7 +274,19 @@ func LoadLog(dir string) (*Log, error) {
 		segments:      segments,
 		activeSegment: activeSegment,
 		nextOffset:    activeSegment.NextOffset(),
+		encryptor:     &NoopEncryptor{},
 	}, nil
+}
+
+// SetEncryptor configures encryption at rest for this log.
+//
+// IMPORTANT: Must be called before writing any messages if encryption is desired.
+// Existing unencrypted messages will NOT be retroactively encrypted.
+// Reading encrypted messages without the correct key will fail with an error.
+func (l *Log) SetEncryptor(enc Encryptor) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.encryptor = enc
 }
 
 // =============================================================================
@@ -283,6 +315,23 @@ func (l *Log) Append(msg *Message) (int64, error) {
 
 	if l.closed {
 		return 0, ErrLogClosed
+	}
+
+	// Encrypt message value if encryption is enabled (M27).
+	// We encrypt a copy to avoid mutating the caller's message.
+	if l.encryptor.IsEnabled() {
+		encrypted, encErr := l.encryptor.Encrypt(msg.Value)
+		if encErr != nil {
+			return 0, fmt.Errorf("failed to encrypt message: %w", encErr)
+		}
+		msg = &Message{
+			Key:       msg.Key,
+			Value:     encrypted,
+			Timestamp: msg.Timestamp,
+			Headers:   msg.Headers,
+			Flags:     msg.Flags,
+			Priority:  msg.Priority,
+		}
 	}
 
 	// Try to append to active segment
@@ -550,7 +599,21 @@ func (l *Log) Read(offset int64) (*Message, error) {
 		return nil, ErrOffsetNotFound
 	}
 
-	return segment.Read(offset)
+	msg, err := segment.Read(offset)
+	if err != nil {
+		return nil, err
+	}
+
+	// Decrypt message value if encryption is enabled (M27).
+	if l.encryptor.IsEnabled() && len(msg.Value) > 0 {
+		decrypted, decErr := l.encryptor.Decrypt(msg.Value)
+		if decErr != nil {
+			return nil, fmt.Errorf("failed to decrypt message at offset %d: %w", offset, decErr)
+		}
+		msg.Value = decrypted
+	}
+
+	return msg, nil
 }
 
 // ReadFrom reads messages starting from the given offset.
@@ -615,6 +678,19 @@ func (l *Log) ReadFrom(startOffset int64, maxMessages int) ([]*Message, error) {
 
 		// Move to next segment
 		currentOffset = segment.NextOffset()
+	}
+
+	// Decrypt all message values if encryption is enabled (M27).
+	if l.encryptor.IsEnabled() {
+		for _, m := range messages {
+			if len(m.Value) > 0 {
+				decrypted, decErr := l.encryptor.Decrypt(m.Value)
+				if decErr != nil {
+					return nil, fmt.Errorf("failed to decrypt message: %w", decErr)
+				}
+				m.Value = decrypted
+			}
+		}
 	}
 
 	return messages, nil
