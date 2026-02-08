@@ -7,7 +7,96 @@
 **Tests**: 640+ passing (storage: 50+, broker: 470+, api: 24, grpc: 16, client: 14, cluster: 50+, config: 17)
 **Started**: Session 1
 
-## Latest Session - Production Hardening & CI/CD
+## Latest Session - Production Readiness Audit & Critical Fixes (M27)
+
+### M27: Production Readiness Audit & Critical Fixes - COMPLETE
+
+**Full Audit Performed** - Every layer audited: storage (933 lines), broker (58K+ lines), API (3.7K), gRPC, cluster, security, metrics, deployment, testing, clients.
+
+**Audit Findings - 33 gaps identified across 4 severity levels:**
+
+#### CRITICAL (6 items - all fixed this session):
+1. ✅ **No HTTP request body size limits** → Added `MaxBytesReader` middleware (1MB default, 16MB for publish)
+2. ✅ **No `ReadHeaderTimeout`** → Added 10s `ReadHeaderTimeout` to HTTP server (slowloris prevention)
+3. ✅ **No automated segment retention** → Added `RetentionRunner` background goroutine with time+size policies
+4. ✅ **No disk space monitoring** → Added `DiskSpaceMonitor` with pre-write checks + Prometheus metric
+5. ✅ **No API-level rate limiting in single-tenant mode** → Added token bucket rate limiter middleware
+6. ✅ **No message compression** → Added snappy compression (codec-extensible: gzip, lz4 ready)
+
+#### HIGH (9 items - documented for future):
+7. No context deadlines on publish/consume hot paths
+8. No pprof endpoint
+9. No API versioning (`/v1/` prefix)
+10. No CORS support
+11. No in-flight message draining on shutdown
+12. `server.go` (3,784 lines) and `broker.go` (4,130 lines) too large
+13. No encryption at rest
+14. No TLS certificate rotation
+15. No audit logging for security events
+
+#### MEDIUM (10 items - documented for future):
+16. No fuzz testing for message encoding
+17. No rack/zone awareness for replica placement
+18. No HTTP 429 status code when rate limited
+19. No HTTP response compression
+20. Config validation covers only ~30% of fields
+21. No sensitive value masking in logs
+22. No config hot reload
+23. Client libraries have no tests
+24. No client-side circuit breaker
+25. Priority index unbounded `consumed` map
+
+#### LOW (8 items - documented for future):
+26. No PID file management
+27. No webhook/event notifications
+28. No Protobuf schema support
+29. gRPC reflection enabled by default in production
+30. No OpenTelemetry metrics integration (only tracing)
+31. Benchmarks not in CI for regression tracking
+32. No Avro schema support
+33. No admin API to trigger log compaction
+
+### Files Created
+```
+internal/broker/retention_runner.go     - Background segment retention enforcement
+internal/broker/retention_runner_test.go - Tests for retention runner
+internal/broker/disk_monitor.go         - Disk space monitoring + Prometheus metric
+internal/broker/disk_monitor_test.go    - Tests for disk monitor
+internal/broker/rate_limiter.go         - Token bucket API rate limiter middleware
+internal/broker/rate_limiter_test.go    - Tests for rate limiter
+internal/storage/compression.go         - Snappy/gzip codec with extensible interface
+internal/storage/compression_test.go    - Tests for compression
+```
+
+### Files Modified
+```
+internal/api/server.go                  - ReadHeaderTimeout, MaxBytesReader, rate limiter middleware
+internal/broker/broker.go               - Integrated retention runner, disk monitor, compression
+internal/storage/log.go                 - Retention policy enforcement methods
+```
+
+### Architecture Decisions
+| Decision | Choice | Why |
+|----------|--------|-----|
+| Body size limit | 1MB default, 16MB publish | Prevents OOM, aligned with Kafka's message.max.bytes |
+| ReadHeaderTimeout | 10s | Prevents slowloris, Go best practice |
+| Retention runner | 60s check interval | Matches Kafka's log.retention.check.interval.ms default |
+| Disk monitor | 90% threshold | Industry standard, prevents silent write failures |
+| Rate limiter | Token bucket, 1000 req/s default | Same algorithm as Kafka/SQS, configurable |
+| Compression | Snappy default | Fastest codec, same as Kafka default, best for queue workloads |
+
+### Comparison with Other Systems
+| Feature | GoQueue (M27) | Kafka | RabbitMQ | SQS |
+|---------|---------------|-------|----------|-----|
+| Request size limits | ✅ 1MB/16MB | ✅ 1MB default | ✅ 128MB | ✅ 256KB |
+| Segment retention | ✅ Time+Size | ✅ Time+Size | N/A (not log-based) | N/A |
+| Disk monitoring | ✅ 90% threshold | ✅ log.dirs check | ✅ disk alarm | N/A (managed) |
+| API rate limiting | ✅ Token bucket | ✅ Quotas | ✅ Per-connection | ✅ Per-account |
+| Message compression | ✅ Snappy | ✅ Snappy/LZ4/Zstd | ✅ (limited) | ❌ |
+
+---
+
+## Previous Session - Production Hardening & CI/CD
 
 ### M25 (Override): Production Hardening & Best Practices - COMPLETE
 
