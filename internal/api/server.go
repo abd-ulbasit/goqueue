@@ -104,6 +104,95 @@ type ServerConfig struct {
 	WriteTimeout time.Duration
 	IdleTimeout  time.Duration
 
+	// =========================================================================
+	// ReadHeaderTimeout - SLOWLORIS ATTACK PREVENTION
+	// =========================================================================
+	//
+	// WHY: Without ReadHeaderTimeout, an attacker can open a connection and
+	// send headers very slowly (one byte at a time), keeping the connection
+	// open indefinitely. This is a "slowloris" attack that exhausts server
+	// resources by holding file descriptors and goroutines hostage.
+	//
+	// HOW IT WORKS:
+	//   - Limits time allowed to read request headers (not body)
+	//   - If client doesn't finish sending headers in time → connection closed
+	//   - ReadTimeout covers headers + body, but ReadHeaderTimeout is stricter
+	//     for the header phase alone
+	//
+	// COMPARISON:
+	//   - Go stdlib: ReadHeaderTimeout added specifically for slowloris
+	//   - Nginx: client_header_timeout (default 60s)
+	//   - Apache: RequestReadTimeout header=20-40
+	//   - CloudFlare: 15s default
+	//
+	// RELATIONSHIP TO ReadTimeout:
+	//   ReadTimeout covers the ENTIRE request (headers + body).
+	//   ReadHeaderTimeout covers ONLY headers.
+	//   Both should be set:
+	//     ReadHeaderTimeout = 10s (fast, headers are small)
+	//     ReadTimeout = 30s (slower, bodies can be large)
+	//
+	// =========================================================================
+	ReadHeaderTimeout time.Duration
+
+	// =========================================================================
+	// MaxRequestBodySize - OOM PREVENTION
+	// =========================================================================
+	//
+	// WHY: Without body size limits, a single malicious request with a
+	// multi-GB body can exhaust server memory. http.MaxBytesReader wraps
+	// the request body with a hard limit, returning HTTP 413 on overflow.
+	//
+	// HOW IT WORKS:
+	//   1. Middleware wraps r.Body with http.MaxBytesReader(w, r.Body, limit)
+	//   2. If client sends more than limit → read returns error
+	//   3. Handler sees *http.MaxBytesError → returns 413 Payload Too Large
+	//   4. Connection is closed (no point reading more)
+	//
+	// COMPARISON:
+	//   - Kafka: message.max.bytes (1MB default), replica.fetch.max.bytes
+	//   - RabbitMQ: max_message_size (128MB default, was unlimited)
+	//   - SQS: 256KB hard limit
+	//   - Nginx: client_max_body_size (1MB default)
+	//   - goqueue: 1MB default, 16MB for publish (matches our MaxValueSize)
+	//
+	// TRADEOFF:
+	//   - Too small: Rejects legitimate large messages
+	//   - Too large: Vulnerable to OOM attacks
+	//   - 1MB default is safe; the publish endpoint gets 16MB (our MaxValueSize)
+	//
+	// =========================================================================
+	MaxRequestBodySize int64
+
+	// =========================================================================
+	// RateLimitRPS - GLOBAL API RATE LIMITING
+	// =========================================================================
+	//
+	// WHY: In single-tenant mode, there's no per-tenant rate limiting
+	// (those are handled by TenantManager in multi-tenant mode). Without
+	// ANY rate limiting, the API is vulnerable to abuse and overload.
+	//
+	// HOW IT WORKS:
+	//   Token bucket algorithm:
+	//   - Bucket holds up to RateLimitRPS tokens
+	//   - Tokens refill at RateLimitRPS per second
+	//   - Each request consumes 1 token
+	//   - If bucket empty → HTTP 429 Too Many Requests
+	//
+	// COMPARISON:
+	//   - Kafka: quota.producer.default, quota.consumer.default (bytes/sec)
+	//   - RabbitMQ: Per-connection rate limiting
+	//   - SQS: Account-level throttling (3000 msg/s per queue)
+	//   - goqueue: Simple token bucket, configurable RPS
+	//
+	// WHEN APPLIED:
+	//   - Only in single-tenant mode (multi-tenant has per-tenant limits)
+	//   - 0 = disabled (no rate limiting)
+	//   - Default: 1000 req/s (generous for single-instance)
+	//
+	// =========================================================================
+	RateLimitRPS int
+
 	// Security configuration (M21)
 	Security security.SecurityConfig
 }
@@ -111,11 +200,14 @@ type ServerConfig struct {
 // DefaultServerConfig returns sensible defaults.
 func DefaultServerConfig() ServerConfig {
 	return ServerConfig{
-		Addr:         ":8080",
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  60 * time.Second,
-		Security:     security.LoadSecurityConfigFromEnv(),
+		Addr:               ":8080",
+		ReadTimeout:        30 * time.Second,
+		WriteTimeout:       30 * time.Second,
+		IdleTimeout:        60 * time.Second,
+		ReadHeaderTimeout:  10 * time.Second,
+		MaxRequestBodySize: 1 * 1024 * 1024, // 1MB default (publish endpoint gets 16MB)
+		RateLimitRPS:       1000,            // 1000 req/s default
+		Security:           security.LoadSecurityConfigFromEnv(),
 	}
 }
 
@@ -143,6 +235,56 @@ func NewServer(b *broker.Broker, config ServerConfig) *Server {
 	r.Use(s.loggingMiddleware)
 	r.Use(middleware.Recoverer)
 
+	// =========================================================================
+	// REQUEST BODY SIZE LIMITER MIDDLEWARE (M27 - Production Hardening)
+	// =========================================================================
+	//
+	// WHY: Without body size limits, a single client can send a multi-GB
+	// request and exhaust server memory (OOM kill). This middleware wraps
+	// r.Body with http.MaxBytesReader, which enforces a hard limit on
+	// request body size. If exceeded, the reader returns an error and the
+	// handler returns HTTP 413 Payload Too Large.
+	//
+	// FLOW:
+	//   Client ──► [MaxBytesReader] ──► Handler
+	//                    │
+	//                    └─ Body > limit? ──► HTTP 413 + close connection
+	//
+	// NOTE: The publish endpoint overrides this with a 16MB limit
+	// (matching our MaxValueSize) since message payloads can be larger
+	// than typical API requests.
+	//
+	// =========================================================================
+	if config.MaxRequestBodySize > 0 {
+		r.Use(maxBodySizeMiddleware(config.MaxRequestBodySize))
+		logger.Info("request body size limit enabled", "max_bytes", config.MaxRequestBodySize)
+	}
+
+	// =========================================================================
+	// API RATE LIMITER MIDDLEWARE (M27 - Production Hardening)
+	// =========================================================================
+	//
+	// WHY: In single-tenant mode, there's no per-tenant quota enforcement
+	// (handled by TenantManager in multi-tenant mode). Without ANY rate
+	// limiting, the API is vulnerable to accidental or malicious overload.
+	//
+	// ALGORITHM: Token bucket
+	//   - Bucket refills at RateLimitRPS tokens per second
+	//   - Each request consumes 1 token
+	//   - If empty → HTTP 429 Too Many Requests with Retry-After header
+	//
+	// COMPARISON:
+	//   - Kafka: quota.producer.default (bytes/sec per client)
+	//   - RabbitMQ: Per-connection rate limiting
+	//   - SQS: 3000 requests/sec per queue
+	//   - goqueue: Global token bucket, 1000 req/s default
+	//
+	// =========================================================================
+	if config.RateLimitRPS > 0 {
+		r.Use(NewRateLimiterMiddleware(config.RateLimitRPS))
+		logger.Info("API rate limiting enabled", "rps", config.RateLimitRPS)
+	}
+
 	// ┌─────────────────────────────────────────────────────────────────────────┐
 	// │ SECURITY MIDDLEWARE (M21)                                               │
 	// │                                                                         │
@@ -164,11 +306,12 @@ func NewServer(b *broker.Broker, config ServerConfig) *Server {
 	s.registerRoutes()
 
 	s.httpServer = &http.Server{
-		Addr:         config.Addr,
-		Handler:      r,
-		ReadTimeout:  config.ReadTimeout,
-		WriteTimeout: config.WriteTimeout,
-		IdleTimeout:  config.IdleTimeout,
+		Addr:              config.Addr,
+		Handler:           r,
+		ReadTimeout:       config.ReadTimeout,
+		WriteTimeout:      config.WriteTimeout,
+		IdleTimeout:       config.IdleTimeout,
+		ReadHeaderTimeout: config.ReadHeaderTimeout,
 	}
 
 	return s

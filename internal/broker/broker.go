@@ -499,6 +499,32 @@ type Broker struct {
 	// This eliminates scattered `if tenantManager != nil` checks.
 	quotaEnforcer QuotaEnforcer
 
+	// ==========================================================================
+	// MILESTONE 27: PRODUCTION READINESS - RETENTION & DISK SAFETY
+	// ==========================================================================
+	//
+	// retentionRunner periodically enforces time-based message retention.
+	// Without it, old segments accumulate forever, eventually exhausting disk.
+	//
+	// COMPARISON:
+	//   - Kafka: log.retention.hours + log.retention.check.interval.ms
+	//   - RabbitMQ: Queue TTL or per-message TTL
+	//   - SQS: MessageRetentionPeriod (default 4 days, max 14 days)
+	//   - goqueue: Background goroutine, configurable interval
+	//
+	// diskMonitor periodically checks free disk space and sets an atomic flag
+	// when usage exceeds the threshold. The Publish path checks this flag
+	// (single atomic load, ~1ns) to reject writes before disk fills.
+	//
+	// COMPARISON:
+	//   - Kafka: Logs warning but doesn't reject (can fill disk)
+	//   - RabbitMQ: disk_free_limit → blocks ALL publishers (flow control)
+	//   - goqueue: Rejects new publishes with 503 (client can retry later)
+	//
+	// ==========================================================================
+	retentionRunner *RetentionRunner
+	diskMonitor     *DiskMonitor
+
 	// mu protects topics map
 	mu sync.RWMutex
 
@@ -883,6 +909,30 @@ func NewBroker(config BrokerConfig) (*Broker, error) {
 		return nil, fmt.Errorf("failed to load existing topics: %w", err)
 	}
 
+	// ==========================================================================
+	// MILESTONE 27: START RETENTION RUNNER & DISK MONITOR
+	// ==========================================================================
+	//
+	// These run AFTER topics are loaded so the retention runner can iterate
+	// them, and the disk monitor knows the data directory to check.
+	//
+	// STARTUP ORDER:
+	//   1. Topics loaded (above)
+	//   2. Retention runner starts (scans topics periodically)
+	//   3. Disk monitor starts (polls free space periodically)
+	//   4. Broker is ready to accept requests
+	//
+	// ==========================================================================
+	retentionConfig := DefaultRetentionConfig()
+	retentionRunner := NewRetentionRunner(broker, retentionConfig)
+	retentionRunner.Start()
+	broker.retentionRunner = retentionRunner
+
+	diskMonitorConfig := DefaultDiskMonitorConfig(config.DataDir)
+	diskMonitor := NewDiskMonitor(diskMonitorConfig)
+	diskMonitor.Start()
+	broker.diskMonitor = diskMonitor
+
 	// Log startup info
 	clusterMode := "single-node"
 	if config.ClusterEnabled {
@@ -1184,6 +1234,19 @@ func (b *Broker) Close() error {
 		if err := b.tenantManager.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("tenant manager: %w", err))
 		}
+	}
+
+	// ==========================================================================
+	// MILESTONE 27: STOP RETENTION RUNNER & DISK MONITOR
+	// ==========================================================================
+	// Stop background goroutines before closing topics.
+	// Retention runner must stop first to avoid accessing closed topics.
+	// ==========================================================================
+	if b.retentionRunner != nil {
+		b.retentionRunner.Stop()
+	}
+	if b.diskMonitor != nil {
+		b.diskMonitor.Stop()
 	}
 
 	for name, topic := range b.topics {
@@ -1656,6 +1719,40 @@ func (b *Broker) PublishWithTrace(topic string, key, value []byte, traceCtx Trac
 	}
 
 	// We ARE the leader (or single-node mode) - write locally
+
+	// =========================================================================
+	// MILESTONE 27: DISK SPACE PRE-WRITE CHECK
+	// =========================================================================
+	//
+	// WHY: If the disk fills completely, the broker becomes unrecoverable:
+	//   - WAL writes fail → data corruption risk
+	//   - OS can't create temp files → container crash loops
+	//   - Recovery requires manual intervention (scale storage, delete data)
+	//
+	// HOW IT WORKS:
+	//   - DiskMonitor runs a background goroutine polling unix.Statfs()
+	//   - Sets an atomic.Bool when usage exceeds threshold (default 90%)
+	//   - This check is a single atomic.Load (~1ns, zero contention)
+	//   - Returns 503 Service Unavailable → client retries with backoff
+	//
+	// COMPARISON:
+	//   - Kafka: No pre-write check; relies on operator monitoring
+	//   - RabbitMQ: disk_free_limit → alarm → blocks ALL publishers
+	//   - SQS: Managed, never exposed to users
+	//   - goqueue: Per-publish atomic check, fast-fail with retryable error
+	//
+	// =========================================================================
+	if b.diskMonitor != nil && b.diskMonitor.IsDiskFull() {
+		if !ctx.TraceID.IsZero() {
+			span := NewSpan(ctx.TraceID, SpanEventPublishReceived, topic, partition, 0)
+			span.WithError(ErrDiskFull)
+			span.WithAttribute("rejection_reason", "disk_full")
+			b.tracer.RecordSpan(span)
+		}
+		InstrumentPublishError(topic, "disk_full")
+		return 0, 0, ErrDiskFull
+	}
+
 	// =========================================================================
 	// TRACE CONTINUITY: Inject traceparent header into message
 	// =========================================================================

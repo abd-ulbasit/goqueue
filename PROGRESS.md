@@ -3,8 +3,58 @@
 ## Status: Phase 4 - Operations
 
 **Target Milestones**: 26
-**Completed**: 19
-**Current**: Milestone 16 (CLI Tool)
+**Completed**: 20
+**Current**: Milestone 27 (Production Readiness Audit) - COMPLETE
+
+---
+
+## Production Readiness Audit - Milestone 27 ✅ COMPLETE
+
+**Goal:** Full production-readiness audit of every GoQueue layer. Identify and fix all critical gaps.
+
+**Audit Scope:** Storage engine, broker, API server, gRPC, cluster, security, metrics, deployment, testing, client libraries.
+
+**Findings:** 33 gaps (6 Critical, 9 High, 10 Medium, 8 Low)
+
+### Critical Fixes Implemented:
+- [x] HTTP request body size limits (MaxBytesReader middleware, 1MB default / 16MB publish)
+- [x] ReadHeaderTimeout on HTTP server (10s, prevents slowloris attacks)
+- [x] Automated segment retention runner (time + size based policies, 60s check interval)
+- [x] Disk space monitoring (90% threshold, Prometheus gauge, pre-write checks)
+- [x] API-level rate limiting for single-tenant mode (token bucket, 1000 req/s default)
+- [x] Message compression codec (snappy default, extensible to gzip/lz4/zstd)
+
+### High Priority (Documented for Future):
+- [ ] Context deadlines on publish/consume hot paths
+- [ ] pprof endpoint for production debugging
+- [ ] API versioning (/v1/ prefix)
+- [ ] CORS support
+- [ ] In-flight message draining on shutdown
+- [ ] Break up server.go (3,784 lines) and broker.go (4,130 lines)
+- [ ] Encryption at rest
+- [ ] TLS certificate rotation
+- [ ] Audit logging for security events
+
+### Medium Priority (Documented for Future):
+- [ ] Fuzz testing for message encoding
+- [ ] Rack/zone awareness for replica placement
+- [ ] HTTP response compression
+- [ ] Config validation (covers only ~30%)
+- [ ] Sensitive value masking in logs
+- [ ] Config hot reload
+- [ ] Client library tests
+- [ ] Client-side circuit breaker
+- [ ] Priority index unbounded consumed map fix
+
+### Low Priority (Documented for Future):
+- [ ] PID file management
+- [ ] Webhook/event notifications
+- [ ] Protobuf schema support
+- [ ] Disable gRPC reflection in production
+- [ ] OpenTelemetry metrics (not just tracing)
+- [ ] Benchmarks in CI for regression tracking
+- [ ] Avro schema support
+- [ ] Admin API for log compaction trigger
 
 ---
 
