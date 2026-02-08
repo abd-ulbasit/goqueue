@@ -1016,6 +1016,33 @@ func (am *AckManager) Stats() AckManagerStats {
 // LIFECYCLE
 // =============================================================================
 
+// TotalInFlightCount returns the total number of in-flight messages across
+// all consumers. Used during graceful shutdown to wait for in-flight messages
+// to be processed before closing the broker.
+//
+// WHY:
+//
+//	During shutdown, we need to know if any messages are still being processed.
+//	If we close immediately while messages are in-flight, those messages would
+//	be re-delivered on restart (at-least-once), which is correct but wastes work.
+//	By draining in-flight messages first, we reduce unnecessary re-processing.
+//
+// COMPARISON:
+//   - Kafka: Controlled shutdown waits for ISR catch-up, not in-flight
+//   - RabbitMQ: SIGTERM triggers drain mode (waits for pending acks)
+//   - SQS: Messages return to queue after visibility timeout (no drain)
+//   - goqueue: We poll TotalInFlightCount during shutdown with timeout
+func (am *AckManager) TotalInFlightCount() int {
+	am.mu.RLock()
+	defer am.mu.RUnlock()
+
+	total := 0
+	for _, state := range am.consumerStates {
+		total += state.GetInFlightCount()
+	}
+	return total
+}
+
 // Close shuts down the ACK manager.
 func (am *AckManager) Close() error {
 	am.mu.Lock()
