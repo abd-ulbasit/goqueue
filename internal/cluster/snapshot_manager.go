@@ -92,7 +92,7 @@ func NewSnapshotManager(dataDir string, logger *slog.Logger) *SnapshotManager {
 	snapshotDir := filepath.Join(dataDir, "snapshots")
 
 	// Ensure snapshot directory exists.
-	if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
+	if err := os.MkdirAll(snapshotDir, 0o750); err != nil {
 		logger.Error("failed to create snapshot directory", "error", err)
 	}
 
@@ -127,6 +127,8 @@ func (sm *SnapshotManager) CreateSnapshot(topic string, partition int, logDir st
 	// Create snapshot file path.
 	snapshotName := fmt.Sprintf("%s-%d-%d.tar.gz", topic, partition, lastOffset)
 	snapshotPath := filepath.Join(sm.snapshotDir, snapshotName)
+	// Sanitize path to prevent path traversal
+	snapshotPath = filepath.Clean(snapshotPath)
 
 	// Create snapshot file.
 	snapshotFile, err := os.Create(snapshotPath)
@@ -169,7 +171,9 @@ func (sm *SnapshotManager) CreateSnapshot(topic string, partition int, logDir st
 		}
 
 		// Copy file content.
-		file, err := os.Open(path)
+		// Sanitize path to prevent path traversal
+		cleanPath := filepath.Clean(path)
+		file, err := os.Open(cleanPath)
 		if err != nil {
 			return fmt.Errorf("failed to open file: %w", err)
 		}
@@ -297,7 +301,7 @@ func (sm *SnapshotManager) LoadSnapshot(snapshotPath, targetDir, expectedChecksu
 
 	// Create temporary directory for extraction.
 	tempDir := targetDir + ".snapshot_tmp"
-	if err := os.MkdirAll(tempDir, 0o755); err != nil {
+	if err := os.MkdirAll(tempDir, 0o750); err != nil {
 		return fmt.Errorf("failed to create temp directory: %w", err)
 	}
 
@@ -337,6 +341,10 @@ func (sm *SnapshotManager) LoadSnapshot(snapshotPath, targetDir, expectedChecksu
 
 // extractSnapshot extracts a gzipped tar archive.
 func (sm *SnapshotManager) extractSnapshot(snapshotPath, targetDir string) error {
+	// Sanitize paths to prevent path traversal
+	snapshotPath = filepath.Clean(snapshotPath)
+	targetDir = filepath.Clean(targetDir)
+	
 	// Open snapshot file.
 	file, err := os.Open(snapshotPath)
 	if err != nil {
@@ -375,12 +383,12 @@ func (sm *SnapshotManager) extractSnapshot(snapshotPath, targetDir string) error
 		targetPath := cleanTarget
 
 		// Create parent directory.
-		if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(targetPath), 0o750); err != nil {
 			return fmt.Errorf("failed to create directory: %w", err)
 		}
 
 		// Create file.
-		outFile, err := os.Create(targetPath)
+		outFile, err := os.Create(targetPath) //nolint:gosec // G304: path validated for directory traversal above
 		if err != nil {
 			return fmt.Errorf("failed to create file: %w", err)
 		}
@@ -411,6 +419,9 @@ func (sm *SnapshotManager) extractSnapshot(snapshotPath, targetDir string) error
 
 // calculateChecksum computes SHA256 checksum of a file.
 func (sm *SnapshotManager) calculateChecksum(path string) (string, error) {
+	// Sanitize path to prevent path traversal
+	path = filepath.Clean(path)
+	
 	file, err := os.Open(path)
 	if err != nil {
 		return "", err

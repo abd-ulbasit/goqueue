@@ -333,7 +333,7 @@ func CompactPartition(p *Partition, tombstoneRetention time.Duration) (*Compacti
 	result.Stats.TombstonesRemoved = tombstonesRemoved
 
 	// Step 2: Create temporary log
-	if err := os.MkdirAll(tempDir, 0o755); err != nil {
+	if err := os.MkdirAll(tempDir, 0o750); err != nil {
 		result.Error = fmt.Errorf("failed to create temp directory: %w", err)
 		return result, result.Error
 	}

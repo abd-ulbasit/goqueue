@@ -229,7 +229,7 @@ func TestOffsetManager_LoadAllOffsets_InvalidJSON(t *testing.T) {
 
 	// Create a group dir with a corrupt offsets.json file.
 	groupDir := filepath.Join(baseDir, "g1")
-	if err := os.MkdirAll(groupDir, 0o755); err != nil {
+	if err := os.MkdirAll(groupDir, 0o750); err != nil {
 		t.Fatalf("MkdirAll failed: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(groupDir, "offsets.json"), []byte("not-json"), 0o644); err != nil {

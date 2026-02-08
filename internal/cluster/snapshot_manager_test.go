@@ -40,7 +40,7 @@ func TestSnapshotManager_CreateLoadDeleteAndStats(t *testing.T) {
 
 	// Build a fake partition log directory with nested files.
 	logDir := filepath.Join(dataDir, "logs", "orders", "0")
-	if err := os.MkdirAll(filepath.Join(logDir, "segments"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(logDir, "segments"), 0o750); err != nil {
 		t.Fatalf("mkdir logDir: %v", err)
 	}
 
@@ -96,7 +96,7 @@ func TestSnapshotManager_CreateLoadDeleteAndStats(t *testing.T) {
 	// Load snapshot into a target directory.
 	// Create a pre-existing directory so we also exercise the "backup existing log" path.
 	targetDir := filepath.Join(dataDir, "restored", "orders", "0")
-	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+	if err := os.MkdirAll(targetDir, 0o750); err != nil {
 		t.Fatalf("mkdir targetDir: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(targetDir, "stale.txt"), []byte("stale"), 0o644); err != nil {

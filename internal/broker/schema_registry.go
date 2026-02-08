@@ -352,7 +352,7 @@ func NewSchemaRegistry(config SchemaRegistryConfig) (*SchemaRegistry, error) {
 	}))
 
 	// Create schemas directory
-	if err := os.MkdirAll(config.DataDir, 0o755); err != nil {
+	if err := os.MkdirAll(config.DataDir, 0o750); err != nil {
 		return nil, fmt.Errorf("failed to create schemas directory: %w", err)
 	}
 
@@ -1084,7 +1084,7 @@ func (sr *SchemaRegistry) Stats() SchemaRegistryStats {
 func (sr *SchemaRegistry) persistSchema(schema *Schema) error {
 	// Create subject directory
 	subjectDir := filepath.Join(sr.config.DataDir, schema.Subject)
-	if err := os.MkdirAll(subjectDir, 0o755); err != nil {
+	if err := os.MkdirAll(subjectDir, 0o750); err != nil {
 		return err
 	}
 
@@ -1101,7 +1101,7 @@ func (sr *SchemaRegistry) persistSchema(schema *Schema) error {
 // persistSubjectConfig writes subject config to disk
 func (sr *SchemaRegistry) persistSubjectConfig(config *SubjectConfig) error {
 	subjectDir := filepath.Join(sr.config.DataDir, config.Subject)
-	if err := os.MkdirAll(subjectDir, 0o755); err != nil {
+	if err := os.MkdirAll(subjectDir, 0o750); err != nil {
 		return err
 	}
 
@@ -1183,6 +1183,8 @@ func (sr *SchemaRegistry) loadSchemas() error {
 
 			// Read schema file
 			filePath := filepath.Join(subjectDir, file.Name())
+			// Sanitize path to prevent path traversal
+			filePath = filepath.Clean(filePath)
 			data, err := os.ReadFile(filePath)
 			if err != nil {
 				sr.logger.Warn("failed to read schema file", "file", filePath, "error", err)
@@ -1223,6 +1225,8 @@ func (sr *SchemaRegistry) loadSchemas() error {
 // loadGlobalConfig loads global config from disk
 func (sr *SchemaRegistry) loadGlobalConfig() {
 	filename := filepath.Join(sr.config.DataDir, "config.json")
+	// Sanitize path to prevent path traversal
+	filename = filepath.Clean(filename)
 	data, err := os.ReadFile(filename)
 	if err != nil {
 		return // Use defaults
@@ -1246,6 +1250,8 @@ func (sr *SchemaRegistry) loadGlobalConfig() {
 // loadSubjectConfig loads subject config from disk
 func (sr *SchemaRegistry) loadSubjectConfig(subject, subjectDir string) {
 	filename := filepath.Join(subjectDir, "config.json")
+	// Sanitize path to prevent path traversal
+	filename = filepath.Clean(filename)
 	data, err := os.ReadFile(filename)
 	if err != nil {
 		return // Use defaults

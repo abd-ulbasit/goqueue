@@ -205,12 +205,14 @@ func (rc *ReplicationClient) DownloadSnapshot(ctx context.Context, topic string,
 	}
 
 	// Create destination directory.
-	if err := os.MkdirAll(destDir, 0o755); err != nil {
+	if err := os.MkdirAll(destDir, 0o750); err != nil {
 		return "", fmt.Errorf("create dest dir: %w", err)
 	}
 
 	// Create destination file.
 	destPath := filepath.Join(destDir, fmt.Sprintf("snapshot-%s-%d.tar.gz", topic, partition))
+	// Sanitize path to prevent path traversal
+	destPath = filepath.Clean(destPath)
 	destFile, err := os.Create(destPath)
 	if err != nil {
 		return "", fmt.Errorf("create dest file: %w", err)

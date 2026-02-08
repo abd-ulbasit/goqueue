@@ -237,7 +237,7 @@ func (m *InternalTopicManager) Start() error {
 
 	// Create internal topics directory
 	internalDir := filepath.Join(m.config.DataDir, "internal")
-	if err := os.MkdirAll(internalDir, 0o755); err != nil {
+	if err := os.MkdirAll(internalDir, 0o750); err != nil {
 		return fmt.Errorf("failed to create internal topics directory: %w", err)
 	}
 

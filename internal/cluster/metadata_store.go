@@ -597,7 +597,7 @@ func (ms *MetadataStore) persistLocked() error {
 
 	// Ensure directory exists
 	dir := filepath.Dir(ms.metadataFilePath())
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return fmt.Errorf("failed to create metadata directory: %w", err)
 	}
 

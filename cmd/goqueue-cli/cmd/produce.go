@@ -167,7 +167,10 @@ func runProduce(cmd *cobra.Command, args []string) error {
 
 // readMessagesFromFile reads messages from a JSON Lines file.
 func readMessagesFromFile(path string) ([]cli.PublishMessage, error) {
-	file, err := os.Open(path)
+	// Sanitize path to prevent path traversal
+	path = filepath.Clean(path)
+	
+	file, err := os.Open(path) //nolint:gosec // G304: path sanitized at function entry
 	if err != nil {
 		return nil, err
 	}

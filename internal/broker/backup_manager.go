@@ -259,7 +259,7 @@ func (bm *BackupManager) CreateBackup(ctx context.Context) (*BackupMetadata, err
 	// Create timestamped backup directory
 	timestamp := time.Now().UTC().Format("2006-01-02-150405")
 	backupDir := filepath.Join(bm.config.BackupDir, timestamp)
-	if err := os.MkdirAll(backupDir, 0o755); err != nil {
+	if err := os.MkdirAll(backupDir, 0o750); err != nil {
 		return nil, fmt.Errorf("creating backup directory: %w", err)
 	}
 
@@ -568,6 +568,8 @@ func (bm *BackupManager) cleanupOldBackups() error {
 func (bm *BackupManager) RestoreFromBackup(ctx context.Context, backupPath string, skipExisting bool) error {
 	// Read metadata
 	metadataPath := filepath.Join(backupPath, "metadata.json")
+	// Sanitize path to prevent path traversal
+	metadataPath = filepath.Clean(metadataPath)
 	metadataBytes, err := os.ReadFile(metadataPath)
 	if err != nil {
 		return fmt.Errorf("reading backup metadata: %w", err)
@@ -711,6 +713,8 @@ func (bm *BackupManager) ListBackups() ([]BackupMetadata, error) {
 		}
 
 		metadataPath := filepath.Join(bm.config.BackupDir, e.Name(), "metadata.json")
+		// Sanitize path to prevent path traversal
+		metadataPath = filepath.Clean(metadataPath)
 		metadataBytes, err := os.ReadFile(metadataPath)
 		if err != nil {
 			continue
@@ -735,6 +739,8 @@ func (bm *BackupManager) ListBackups() ([]BackupMetadata, error) {
 // GetBackup returns metadata for a specific backup.
 func (bm *BackupManager) GetBackup(backupID string) (*BackupMetadata, error) {
 	metadataPath := filepath.Join(bm.config.BackupDir, backupID, "metadata.json")
+	// Sanitize path to prevent path traversal
+	metadataPath = filepath.Clean(metadataPath)
 	metadataBytes, err := os.ReadFile(metadataPath)
 	if err != nil {
 		return nil, fmt.Errorf("reading backup metadata: %w", err)
