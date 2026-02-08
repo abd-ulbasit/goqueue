@@ -706,6 +706,16 @@ func (c *Coordinator) SyncMetadataNow() {
 
 // syncMetadataToFollowers pushes current metadata to all followers.
 func (c *Coordinator) syncMetadataToFollowers() {
+	// Get context - it's set in Start() or can be set directly in tests.
+	c.mu.RLock()
+	ctx := c.ctx
+	c.mu.RUnlock()
+
+	if ctx == nil {
+		c.logger.Debug("skipping metadata sync - context not initialized")
+		return
+	}
+
 	meta := c.metadataStore.Meta()
 	nodes := c.membership.AliveNodes()
 	myID := c.node.ID()
@@ -716,7 +726,7 @@ func (c *Coordinator) syncMetadataToFollowers() {
 		}
 
 		go func(nodeID NodeID) {
-			ctx, cancel := context.WithTimeout(c.ctx, 5*time.Second)
+			ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			defer cancel()
 
 			if err := c.client.PushMetadata(ctx, nodeID, meta); err != nil {
@@ -737,6 +747,13 @@ func (c *Coordinator) handleMembershipEvent(event MembershipEvent) {
 	c.logger.Debug("membership event",
 		"type", event.Type,
 		"node", event.NodeID)
+
+	// Get context - check if it's initialized to avoid nil pointer panic.
+	// The coordinator's context is only initialized in Start(), so events
+	// received before Start() is called should skip actions that need context.
+	c.mu.RLock()
+	ctx := c.ctx
+	c.mu.RUnlock()
 
 	switch event.Type {
 	case EventNodeDied:
@@ -811,9 +828,9 @@ func (c *Coordinator) handleMembershipEvent(event MembershipEvent) {
 
 	case EventNodeJoined:
 		// New node joined - if we're controller, sync metadata
-		if c.elector.IsController() {
+		if c.elector.IsController() && ctx != nil {
 			go func() {
-				ctx, cancel := context.WithTimeout(c.ctx, 5*time.Second)
+				ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 				defer cancel()
 				meta := c.metadataStore.Meta()
 				if err := c.client.PushMetadata(ctx, event.NodeID, meta); err != nil {
@@ -842,12 +859,12 @@ func (c *Coordinator) handleMembershipEvent(event MembershipEvent) {
 		// For now, we just sync metadata. Preferred leader election can be
 		// triggered manually via the /cluster/preferred-leader API.
 		// =======================================================================
-		if c.elector.IsController() {
+		if c.elector.IsController() && ctx != nil {
 			c.logger.Info("node recovered, syncing metadata",
 				"recovered_node", event.NodeID)
 
 			go func() {
-				ctx, cancel := context.WithTimeout(c.ctx, 5*time.Second)
+				ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 				defer cancel()
 				meta := c.metadataStore.Meta()
 				if err := c.client.PushMetadata(ctx, event.NodeID, meta); err != nil {
