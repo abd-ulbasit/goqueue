@@ -544,6 +544,9 @@ type abortedTrackerSnapshot struct {
 // │  If crash at step 4:   rename is atomic on most filesystems                │
 // └────────────────────────────────────────────────────────────────────────────┘
 func (at *AbortedTracker) Save(filePath string) error {
+	// Sanitize path to prevent path traversal
+	filePath = filepath.Clean(filePath)
+	
 	at.mu.RLock()
 
 	// Convert internal map to serializable format
@@ -579,8 +582,6 @@ func (at *AbortedTracker) Save(filePath string) error {
 
 	// Write to temp file first (crash-safe pattern)
 	tmpPath := filePath + ".tmp"
-	// Sanitize path to prevent path traversal
-	tmpPath = filepath.Clean(tmpPath)
 	f, err := os.Create(tmpPath)
 	if err != nil {
 		return fmt.Errorf("failed to create temp file: %w", err)
