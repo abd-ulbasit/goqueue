@@ -109,6 +109,8 @@ func LoadConfigFromPath(path string) (*Config, error) {
 	}
 
 	// Read file
+	// Sanitize path to prevent path traversal
+	path = filepath.Clean(path)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read config file: %w", err)

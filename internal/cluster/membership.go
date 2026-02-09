@@ -596,7 +596,7 @@ func (m *Membership) persistStateLocked() error {
 
 	// Ensure directory exists
 	dir := filepath.Dir(m.stateFilePath())
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return fmt.Errorf("failed to create cluster state directory: %w", err)
 	}
 

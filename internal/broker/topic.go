@@ -170,7 +170,7 @@ type Topic struct {
 func NewTopic(baseDir string, config TopicConfig) (*Topic, error) {
 	// Create topic directory
 	topicDir := filepath.Join(baseDir, config.Name)
-	if err := os.MkdirAll(topicDir, 0o755); err != nil {
+	if err := os.MkdirAll(topicDir, 0o750); err != nil {
 		return nil, fmt.Errorf("failed to create topic directory: %w", err)
 	}
 

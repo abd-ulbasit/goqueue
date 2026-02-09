@@ -109,10 +109,10 @@ func TestReplication_HTTP_RoundTrip_ServerAndClients(t *testing.T) {
 
 	// Create an on-disk log directory for snapshots to archive.
 	logDir := filepath.Join(dataDir, "logs", "orders", "0")
-	if err := os.MkdirAll(filepath.Join(logDir, "segments"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(logDir, "segments"), 0o750); err != nil {
 		t.Fatalf("mkdir logDir: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(logDir, "00000000000000000000.log"), []byte("hello\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(logDir, "00000000000000000000.log"), []byte("hello\n"), 0o600); err != nil {
 		t.Fatalf("write log file: %v", err)
 	}
 

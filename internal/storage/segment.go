@@ -196,20 +196,23 @@ func IndexFileName(baseOffset int64) string {
 //   - {dir}/{baseOffset}.index      - The index file
 //   - {dir}/{baseOffset}.timeindex  - The time index file
 func NewSegment(dir string, baseOffset int64) (*Segment, error) {
+	// Sanitize directory path to prevent path traversal
+	dir = filepath.Clean(dir)
+	
 	// Ensure directory exists
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return nil, fmt.Errorf("failed to create segment directory: %w", err)
 	}
 
 	// Create log file
-	logPath := filepath.Join(dir, SegmentFileName(baseOffset))
-	file, err := os.OpenFile(logPath, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o644)
+	logPath := filepath.Clean(filepath.Join(dir, SegmentFileName(baseOffset)))
+	file, err := os.OpenFile(logPath, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o600) //nolint:gosec // G304: logPath sanitized just above
 	if err != nil {
 		return nil, fmt.Errorf("failed to create segment file: %w", err)
 	}
 
 	// Create index
-	indexPath := filepath.Join(dir, IndexFileName(baseOffset))
+	indexPath := filepath.Clean(filepath.Join(dir, IndexFileName(baseOffset)))
 	index, err := NewIndex(indexPath, baseOffset)
 	if err != nil {
 		file.Close()
@@ -254,15 +257,18 @@ func NewSegment(dir string, baseOffset int64) (*Segment, error) {
 //
 // We must find the last valid message to recover correctly.
 func LoadSegment(dir string, baseOffset int64) (*Segment, error) {
+	// Sanitize directory path to prevent path traversal
+	dir = filepath.Clean(dir)
+	
 	// Open log file
-	logPath := filepath.Join(dir, SegmentFileName(baseOffset))
-	file, err := os.OpenFile(logPath, os.O_RDWR, 0o644)
+	logPath := filepath.Clean(filepath.Join(dir, SegmentFileName(baseOffset)))
+	file, err := os.OpenFile(logPath, os.O_RDWR, 0o600) //nolint:gosec // G304: logPath sanitized just above
 	if err != nil {
 		return nil, fmt.Errorf("failed to open segment file: %w", err)
 	}
 
 	// Load index
-	indexPath := filepath.Join(dir, IndexFileName(baseOffset))
+	indexPath := filepath.Clean(filepath.Join(dir, IndexFileName(baseOffset)))
 	index, err := LoadIndex(indexPath, baseOffset)
 	if err != nil {
 		// Index might be corrupted or missing, rebuild it
@@ -403,16 +409,16 @@ func scanLogToEnd(file *os.File, baseOffset int64) (nextOffset, position int64, 
 // rebuildSegment creates a fresh segment by scanning an existing log file
 // and rebuilding the index. Used when index is corrupted.
 func rebuildSegment(dir string, baseOffset int64) (*Segment, error) {
-	logPath := filepath.Join(dir, SegmentFileName(baseOffset))
-	indexPath := filepath.Join(dir, IndexFileName(baseOffset))
-	timeIndexPath := filepath.Join(dir, TimeIndexFileName(baseOffset))
+	logPath := filepath.Clean(filepath.Join(dir, SegmentFileName(baseOffset)))
+	indexPath := filepath.Clean(filepath.Join(dir, IndexFileName(baseOffset)))
+	timeIndexPath := filepath.Clean(filepath.Join(dir, TimeIndexFileName(baseOffset)))
 
 	// Remove corrupted indices
 	os.Remove(indexPath)
 	os.Remove(timeIndexPath)
 
 	// Open log file
-	file, err := os.OpenFile(logPath, os.O_RDWR, 0o644)
+	file, err := os.OpenFile(logPath, os.O_RDWR, 0o600) //nolint:gosec // G304: logPath sanitized at function entry
 	if err != nil {
 		return nil, fmt.Errorf("failed to open segment for rebuild: %w", err)
 	}

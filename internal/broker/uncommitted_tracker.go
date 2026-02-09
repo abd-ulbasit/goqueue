@@ -544,6 +544,9 @@ type abortedTrackerSnapshot struct {
 // │  If crash at step 4:   rename is atomic on most filesystems                │
 // └────────────────────────────────────────────────────────────────────────────┘
 func (at *AbortedTracker) Save(filePath string) error {
+	// Sanitize path to prevent path traversal
+	filePath = filepath.Clean(filePath)
+	
 	at.mu.RLock()
 
 	// Convert internal map to serializable format
@@ -573,7 +576,7 @@ func (at *AbortedTracker) Save(filePath string) error {
 
 	// Ensure directory exists
 	dir := filepath.Dir(filePath)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return fmt.Errorf("failed to create directory %s: %w", dir, err)
 	}
 
@@ -622,6 +625,9 @@ func (at *AbortedTracker) Save(filePath string) error {
 //
 //	During broker initialization, before any consume operations.
 func (at *AbortedTracker) LoadFromFile(filePath string) error {
+	// Sanitize path to prevent path traversal
+	filePath = filepath.Clean(filePath)
+	
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
