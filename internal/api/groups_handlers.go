@@ -287,6 +287,7 @@ func (s *Server) pollMessages(w http.ResponseWriter, r *http.Request) {
 		totalMessages := 0
 
 		// Fetch messages from each assigned partition
+		// Using ConsumeWithReceipts for per-message ACK support (M4)
 		for _, partition := range partitions {
 			// Get committed offset (start from there) or start from 0
 			offset, err := coordinator.GetOffset(groupID, topicName, partition)
@@ -294,7 +295,9 @@ func (s *Server) pollMessages(w http.ResponseWriter, r *http.Request) {
 				offset = 0 // No committed offset, start from beginning
 			}
 
-			messages, err := s.broker.Consume(topicName, partition, offset, limit)
+			// Use ConsumeWithReceipts instead of Consume for per-message ACK
+			// This tracks each message's visibility timeout and provides receipt handles
+			messages, err := s.broker.ConsumeWithReceipts(topicName, partition, offset, limit, memberID, groupID)
 			if err != nil {
 				continue // Skip partition on error
 			}
@@ -305,10 +308,11 @@ func (s *Server) pollMessages(w http.ResponseWriter, r *http.Request) {
 
 				for i, msg := range messages {
 					partitionMessages[i] = ConsumeMessage{
-						Offset:    msg.Offset,
-						Timestamp: msg.Timestamp.Format(time.RFC3339Nano),
-						Key:       string(msg.Key),
-						Value:     string(msg.Value),
+						Offset:        msg.Offset,
+						Timestamp:     msg.Timestamp.Format(time.RFC3339Nano),
+						Key:           string(msg.Key),
+						Value:         string(msg.Value),
+						ReceiptHandle: msg.ReceiptHandle, // M4: For per-message ACK/NACK/REJECT
 					}
 					if msg.Offset >= nextOffset {
 						nextOffset = msg.Offset + 1

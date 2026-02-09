@@ -792,14 +792,15 @@ resource "helm_release" "goqueue" {
       }
 
       # Metrics - enable Prometheus scraping
+      # NOTE: We only override enabled flags here. The prometheusRule.rules
+      # array is inherited from values.yaml. Terraform HCL merging replaces
+      # entire nested maps, so we just enable it and let Helm use defaults.
       metrics = {
         enabled = var.install_prometheus
         serviceMonitor = {
           enabled = var.install_prometheus
         }
-        prometheusRule = {
-          enabled = var.install_prometheus
-        }
+        # prometheusRule is NOT overridden - uses values.yaml rules
       }
 
       # ═══════════════════════════════════════════════════════════════════════
@@ -833,7 +834,7 @@ resource "helm_release" "goqueue" {
           enabled     = true
           defaultRole = "readonly"
         }
-      } : {}
+      } : null
 
       # ═══════════════════════════════════════════════════════════════════════
       # BACKUP CONFIGURATION (M23)
@@ -861,13 +862,13 @@ resource "helm_release" "goqueue" {
           bucket   = var.backup_s3_bucket
           prefix   = var.backup_s3_prefix
           region   = var.region
-        } : {}
+        } : null
         include = {
           topics  = true
           offsets = true
           schemas = true
         }
-      } : {}
+      } : null
 
       # ═══════════════════════════════════════════════════════════════════════
       # TRACING CONFIGURATION (M25)
@@ -890,7 +891,7 @@ resource "helm_release" "goqueue" {
           protocol = "grpc"
           insecure = false
         }
-      } : {}
+      } : null
 
       # Storage class configuration - use custom StorageClass with Delete policy
       persistence = {

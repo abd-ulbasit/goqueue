@@ -76,6 +76,11 @@ import (
 var (
 	// ErrBrokerClosed means the broker has been shut down
 	ErrBrokerClosed = errors.New("broker is closed")
+
+	// ErrNotController means the operation requires the controller node
+	// In cluster mode, topic creation and deletion must go through the controller
+	// to ensure proper metadata replication.
+	ErrNotController = errors.New("not the controller: retry request to reach controller node")
 )
 
 // =============================================================================
@@ -1130,6 +1135,20 @@ func (b *Broker) IsClusterEnabled() bool {
 	return b.clusterCoordinator != nil
 }
 
+// IsController returns true if this broker is the cluster controller.
+// Returns false if not in cluster mode.
+//
+// WHY THIS MATTERS:
+//   - Topic creation requires controller (cluster metadata)
+//   - Partition scaling requires controller
+//   - Client requests should be forwarded to controller for metadata ops
+func (b *Broker) IsController() bool {
+	if b.clusterCoordinator == nil {
+		return false
+	}
+	return b.clusterCoordinator.IsController()
+}
+
 // Close shuts down the broker gracefully.
 //
 // SHUTDOWN PROCESS:
@@ -1372,12 +1391,12 @@ func (b *Broker) CreateTopic(config TopicConfig) error {
 	//
 	// WHO CAN CREATE TOPICS?
 	//   - Controller: Creates metadata directly and syncs to followers
-	//   - Follower: Forwards request to controller (future: redirect API)
+	//   - Follower: Returns error (client should retry to hit controller via LB)
 	//
-	// CURRENT BEHAVIOR:
-	//   - Only controller can create topic metadata
-	//   - Non-controllers create topic locally but no cluster metadata
-	//   - This is temporary until we implement request forwarding
+	// DURABILITY FIX:
+	//   Previously, non-controllers created topics locally but didn't register
+	//   with cluster metadata. This caused topic loss on pod restart because
+	//   the cluster metadata was never updated. Now we return an error instead.
 	//
 	// PARTITION ASSIGNMENT FLOW:
 	//   1. Controller creates topic metadata
@@ -1388,6 +1407,12 @@ func (b *Broker) CreateTopic(config TopicConfig) error {
 	//
 	// =========================================================================
 	if b.clusterCoordinator != nil {
+		// Check if we're the controller - only controller can create topic metadata
+		// Non-controllers should return error so client can retry (may hit controller)
+		if !b.clusterCoordinator.IsController() {
+			return ErrNotController
+		}
+
 		// Default replication factor: min(cluster size, 3)
 		replicationFactor := 3
 		clusterSize := b.clusterCoordinator.ClusterSize()
@@ -1396,11 +1421,7 @@ func (b *Broker) CreateTopic(config TopicConfig) error {
 		}
 
 		if err := b.clusterCoordinator.CreateTopicMeta(config.Name, config.NumPartitions, replicationFactor); err != nil {
-			// Log warning but don't fail - topic creation succeeds locally
-			// This allows non-controllers to create topics (local only)
-			b.logger.Warn("failed to register topic with cluster metadata",
-				"topic", config.Name,
-				"error", err)
+			return fmt.Errorf("failed to register topic with cluster metadata: %w", err)
 		}
 	}
 
