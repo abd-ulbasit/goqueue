@@ -472,7 +472,11 @@ func (c *Coordinator) loadState() error {
 
 // joinViaDiscovery tries to join the cluster through configured peers.
 func (c *Coordinator) joinViaDiscovery() error {
-	ctx, cancel := context.WithTimeout(c.ctx, 10*time.Second)
+	c.mu.RLock()
+	parentCtx := c.ctx
+	c.mu.RUnlock()
+
+	ctx, cancel := context.WithTimeout(parentCtx, 10*time.Second)
 	defer cancel()
 
 	c.logger.Info("attempting to join cluster via peers",
@@ -567,7 +571,11 @@ func (c *Coordinator) joinViaDiscovery() error {
 //   - Retrying allows late-starting pods to discover early ones
 //   - Once any two pods connect, quorum forms and election proceeds
 func (c *Coordinator) waitForQuorum() error {
-	ctx, cancel := context.WithTimeout(c.ctx, c.config.BootstrapTimeout)
+	c.mu.RLock()
+	parentCtx := c.ctx
+	c.mu.RUnlock()
+
+	ctx, cancel := context.WithTimeout(parentCtx, c.config.BootstrapTimeout)
 	defer cancel()
 
 	ticker := time.NewTicker(time.Second)

@@ -189,7 +189,7 @@ func TimeIndexFileName(baseOffset int64) string {
 func NewTimeIndex(path string, baseOffset int64) (*TimeIndex, error) {
 	// Sanitize path to prevent path traversal
 	path = filepath.Clean(path)
-	
+
 	// O_RDWR: read and write
 	// O_CREATE: create if doesn't exist
 	// O_APPEND: all writes go to end
@@ -223,7 +223,7 @@ func NewTimeIndex(path string, baseOffset int64) (*TimeIndex, error) {
 func LoadTimeIndex(path string, baseOffset int64) (*TimeIndex, error) {
 	// Sanitize path to prevent path traversal
 	path = filepath.Clean(path)
-	
+
 	// Open for reading and appending
 	file, err := os.OpenFile(path, os.O_RDWR|os.O_APPEND, 0o600) //nolint:gosec // G304: path sanitized at function entry
 	if err != nil {
@@ -564,7 +564,7 @@ func RebuildTimeIndex(logPath, indexPath string, baseOffset int64) (*TimeIndex, 
 	// Sanitize paths to prevent path traversal
 	logPath = filepath.Clean(logPath)
 	indexPath = filepath.Clean(indexPath)
-	
+
 	// Delete existing corrupt index if present
 	_ = os.Remove(indexPath)
 

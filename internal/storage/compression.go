@@ -229,7 +229,10 @@ func (c *gzipCompressor) Compress(data []byte) ([]byte, error) {
 	var buf bytes.Buffer
 	buf.Grow(len(data) / 2) // Pre-allocate ~50% of input (typical gzip ratio)
 
-	w := c.writerPool.Get().(*gzip.Writer)
+	w, ok := c.writerPool.Get().(*gzip.Writer)
+	if !ok {
+		return nil, fmt.Errorf("gzip compress: pool returned unexpected type")
+	}
 	w.Reset(&buf)
 
 	if _, err := w.Write(data); err != nil {
@@ -310,7 +313,10 @@ func (c *flateCompressor) Compress(data []byte) ([]byte, error) {
 	var buf bytes.Buffer
 	buf.Grow(len(data) / 2)
 
-	w := c.writerPool.Get().(*flate.Writer)
+	w, ok := c.writerPool.Get().(*flate.Writer)
+	if !ok {
+		return nil, fmt.Errorf("flate compress: pool returned unexpected type")
+	}
 	w.Reset(&buf)
 
 	if _, err := w.Write(data); err != nil {

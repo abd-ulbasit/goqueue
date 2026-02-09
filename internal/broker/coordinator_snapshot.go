@@ -443,7 +443,7 @@ type SnapshotReader struct {
 func OpenSnapshot(path string) (*SnapshotReader, error) {
 	// Sanitize path to prevent path traversal
 	path = filepath.Clean(path)
-	
+
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open snapshot: %w", err)

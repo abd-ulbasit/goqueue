@@ -159,7 +159,7 @@ type Index struct {
 func NewIndex(path string, baseOffset int64) (*Index, error) {
 	// Sanitize path to prevent path traversal
 	path = filepath.Clean(path)
-	
+
 	// O_RDWR: read and write
 	// O_CREATE: create if doesn't exist
 	// O_APPEND: all writes go to end (important for durability)
@@ -192,7 +192,7 @@ func NewIndex(path string, baseOffset int64) (*Index, error) {
 func LoadIndex(path string, baseOffset int64) (*Index, error) {
 	// Sanitize path to prevent path traversal
 	path = filepath.Clean(path)
-	
+
 	// Open for reading and appending
 	file, err := os.OpenFile(path, os.O_RDWR|os.O_APPEND, 0o600) //nolint:gosec // G304: path sanitized at function entry
 	if err != nil {

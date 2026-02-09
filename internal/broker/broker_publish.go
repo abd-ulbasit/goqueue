@@ -8,7 +8,6 @@ import (
 	"goqueue/internal/storage"
 )
 
-
 // =============================================================================
 // PRODUCER INTERFACE
 // =============================================================================
@@ -1056,4 +1055,3 @@ func (b *Broker) GetGroupCoordinator() *GroupCoordinator {
 func (b *Broker) GetReplicationCoordinator() *replicationCoordinator { //nolint:revive // unexported-return: used only across internal packages
 	return b.replicationCoordinator
 }
-

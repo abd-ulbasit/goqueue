@@ -133,7 +133,7 @@ func DefaultServerConfig() ServerConfig {
 		MaxConcurrentStreams: 100,
 		KeepaliveTime:        30 * time.Second,
 		KeepaliveTimeout:     10 * time.Second,
-		EnableReflection:     true, // Enable for development
+		EnableReflection:     false, // Disabled by default for security; enable via GOQUEUE_GRPC_REFLECTION=true
 	}
 }
 

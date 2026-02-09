@@ -928,7 +928,9 @@ func NewBroker(config BrokerConfig) (*Broker, error) {
 
 	diskMonitorConfig := DefaultDiskMonitorConfig(config.DataDir)
 	diskMonitor := NewDiskMonitor(diskMonitorConfig)
-	diskMonitor.Start()
+	if err := diskMonitor.Start(); err != nil {
+		logger.Warn("failed to start disk monitor", "error", err)
+	}
 	broker.diskMonitor = diskMonitor
 
 	// Log startup info

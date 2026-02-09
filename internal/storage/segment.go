@@ -198,7 +198,7 @@ func IndexFileName(baseOffset int64) string {
 func NewSegment(dir string, baseOffset int64) (*Segment, error) {
 	// Sanitize directory path to prevent path traversal
 	dir = filepath.Clean(dir)
-	
+
 	// Ensure directory exists
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return nil, fmt.Errorf("failed to create segment directory: %w", err)
@@ -259,7 +259,7 @@ func NewSegment(dir string, baseOffset int64) (*Segment, error) {
 func LoadSegment(dir string, baseOffset int64) (*Segment, error) {
 	// Sanitize directory path to prevent path traversal
 	dir = filepath.Clean(dir)
-	
+
 	// Open log file
 	logPath := filepath.Clean(filepath.Join(dir, SegmentFileName(baseOffset)))
 	file, err := os.OpenFile(logPath, os.O_RDWR, 0o600) //nolint:gosec // G304: logPath sanitized just above

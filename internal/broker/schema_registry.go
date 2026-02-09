@@ -323,8 +323,10 @@ type SchemaRegistry struct {
 	// subjectConfigs maps subject → SubjectConfig
 	subjectConfigs map[string]*SubjectConfig
 
-	// validators maps schema ID → compiled validator
-	validators map[int64]*JSONSchemaValidator
+	// validators maps schema ID → compiled validator.
+	// Supports JSONSchemaValidator, ProtobufSchemaValidator, AvroSchemaValidator
+	// via the SchemaValidator interface.
+	validators map[int64]SchemaValidator
 
 	// nextID is the next schema ID to assign (atomic)
 	nextID int64
@@ -361,7 +363,7 @@ func NewSchemaRegistry(config SchemaRegistryConfig) (*SchemaRegistry, error) {
 		schemas:        make(map[int64]*Schema),
 		subjects:       make(map[string]map[int]*Schema),
 		subjectConfigs: make(map[string]*SubjectConfig),
-		validators:     make(map[int64]*JSONSchemaValidator),
+		validators:     make(map[int64]SchemaValidator),
 		nextID:         1,
 		logger:         logger,
 	}
@@ -508,6 +510,134 @@ func (sr *SchemaRegistry) RegisterSchema(subject, schemaStr string) (*Schema, er
 		"compatibility", compat)
 
 	return schema, nil
+}
+
+// =============================================================================
+// MULTI-FORMAT SCHEMA REGISTRATION (#28, #32)
+// =============================================================================
+//
+// RegisterSchemaWithType registers a schema with an explicit schema type.
+// Supports:
+//   - "JSON"     → JSON Schema validation (existing behavior)
+//   - "PROTOBUF" → Protocol Buffers .proto syntax validation
+//   - "AVRO"     → Apache Avro JSON schema validation
+//
+// COMPARISON TO OTHER REGISTRIES:
+//   - Confluent SR: RegisterSchema(subject, schema, schemaType)
+//   - AWS Glue SR:  CreateSchema(registryName, schemaName, dataFormat, ...)
+//   - goqueue:      RegisterSchemaWithType(subject, schema, schemaType)
+//
+// The original RegisterSchema() continues to work for backward compatibility,
+// defaulting to JSON schema type.
+func (sr *SchemaRegistry) RegisterSchemaWithType(subject, schemaStr, schemaType string) (*Schema, error) {
+	sr.mu.Lock()
+	defer sr.mu.Unlock()
+
+	if sr.closed {
+		return nil, ErrSchemaRegistryClosed
+	}
+
+	// Validate schema type
+	if !IsValidSchemaType(schemaType) {
+		return nil, fmt.Errorf("%w: unsupported schema type %q (valid: JSON, PROTOBUF, AVRO)", ErrInvalidSchema, schemaType)
+	}
+
+	// Create validator for the schema type
+	validator, err := createValidatorForSchemaType(schemaType, schemaStr)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidSchema, err)
+	}
+
+	// Check for duplicate schema (by fingerprint)
+	fingerprint := calculateSchemaFingerprint(schemaStr)
+	versions, exists := sr.subjects[subject]
+	if exists {
+		for _, existing := range versions {
+			if existing.Fingerprint == fingerprint {
+				return existing, nil
+			}
+		}
+	}
+
+	// Check compatibility (JSON schemas only — Proto/Avro compatibility
+	// checking requires format-specific diffing, planned for future)
+	compat := sr.getCompatibilityMode(subject)
+	if schemaType == SchemaTypeJSON && compat != CompatibilityNone && exists && len(versions) > 0 {
+		latestVersion := sr.getLatestVersionNumber(subject)
+		latestSchema := versions[latestVersion]
+		if err := sr.checkCompatibility(latestSchema.Schema, schemaStr, compat); err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrSchemaIncompatible, err)
+		}
+	}
+
+	// Assign ID and version
+	id := atomic.AddInt64(&sr.nextID, 1) - 1
+	version := 1
+	if exists {
+		version = sr.getLatestVersionNumber(subject) + 1
+	}
+
+	schema := &Schema{
+		ID:           id,
+		Subject:      subject,
+		Version:      version,
+		Schema:       schemaStr,
+		SchemaType:   schemaType,
+		RegisteredAt: time.Now(),
+		Fingerprint:  fingerprint,
+	}
+
+	// Persist to disk
+	if err := sr.persistSchema(schema); err != nil {
+		return nil, fmt.Errorf("failed to persist schema: %w", err)
+	}
+
+	// Update in-memory cache
+	sr.schemas[id] = schema
+	if !exists {
+		sr.subjects[subject] = make(map[int]*Schema)
+	}
+	sr.subjects[subject][version] = schema
+	sr.validators[id] = validator
+
+	sr.logger.Info("schema registered",
+		"subject", subject,
+		"version", version,
+		"id", id,
+		"schemaType", schemaType,
+		"compatibility", compat)
+
+	return schema, nil
+}
+
+// =============================================================================
+// VALIDATOR FACTORY
+// =============================================================================
+
+// createValidatorForSchemaType creates the appropriate validator for a schema type.
+//
+// PATTERN: Factory Method
+//
+//	Each schema type has its own validator implementation that satisfies
+//	the SchemaValidator interface. This factory selects the right one.
+//
+// FLOW:
+//
+//	schemaType ──┬── "JSON"     → NewJSONSchemaValidator()
+//	             ├── "PROTOBUF" → NewProtobufSchemaValidator()
+//	             └── "AVRO"     → NewAvroSchemaValidator()
+func createValidatorForSchemaType(schemaType, schemaStr string) (SchemaValidator, error) {
+	switch schemaType {
+	case SchemaTypeProtobuf:
+		return NewProtobufSchemaValidator(schemaStr)
+	case SchemaTypeAvro:
+		return NewAvroSchemaValidator(schemaStr)
+	case SchemaTypeJSON, "":
+		// Default to JSON for backward compatibility (empty type = legacy schema)
+		return NewJSONSchemaValidator(schemaStr)
+	default:
+		return nil, fmt.Errorf("unsupported schema type: %q", schemaType)
+	}
 }
 
 // =============================================================================
@@ -891,9 +1021,9 @@ func (sr *SchemaRegistry) ValidateMessage(subject string, message []byte) error 
 	// Get validator
 	validator, exists := sr.validators[schema.ID]
 	if !exists {
-		// Compile validator if not cached
+		// Compile validator if not cached (type-aware)
 		var err error
-		validator, err = NewJSONSchemaValidator(schema.Schema)
+		validator, err = createValidatorForSchemaType(schema.SchemaType, schema.Schema)
 		if err != nil {
 			return fmt.Errorf("failed to compile schema: %w", err)
 		}
@@ -925,7 +1055,7 @@ func (sr *SchemaRegistry) ValidateMessageWithSchemaID(schemaID int64, message []
 	validator, exists := sr.validators[schemaID]
 	if !exists {
 		var err error
-		validator, err = NewJSONSchemaValidator(schema.Schema)
+		validator, err = createValidatorForSchemaType(schema.SchemaType, schema.Schema)
 		if err != nil {
 			return fmt.Errorf("failed to compile schema: %w", err)
 		}
@@ -1206,10 +1336,10 @@ func (sr *SchemaRegistry) loadSchemas() error {
 				maxID = schema.ID
 			}
 
-			// Compile validator
-			validator, err := NewJSONSchemaValidator(schema.Schema)
+			// Compile validator based on schema type
+			validator, err := createValidatorForSchemaType(schema.SchemaType, schema.Schema)
 			if err != nil {
-				sr.logger.Warn("failed to compile schema", "subject", subject, "version", version, "error", err)
+				sr.logger.Warn("failed to compile schema", "subject", subject, "version", version, "type", schema.SchemaType, "error", err)
 			} else {
 				sr.validators[schema.ID] = validator
 			}
