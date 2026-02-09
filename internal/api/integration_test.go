@@ -399,21 +399,29 @@ func TestConcurrentPublishers(t *testing.T) {
 		t.Error(err)
 	}
 
-	// Verify total message count
-	time.Sleep(100 * time.Millisecond) // Allow messages to settle
-
-	totalMessages := 0
-	for p := 0; p < 4; p++ {
-		rec := doRequest(server, http.MethodGet, fmt.Sprintf("/topics/%s/partitions/%d/messages?offset=0&limit=1000", topicName, p), nil)
-		if rec.Code == http.StatusOK {
-			var resp ConsumeResponse
-			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err == nil {
-				totalMessages += len(resp.Messages)
+	// Verify total message count using retry loop instead of fixed sleep.
+	// The priority index may lag behind log appends under concurrency,
+	// so we poll until all messages are visible (or timeout).
+	expected := numPublishers * messagesPerPublisher
+	var totalMessages int
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		totalMessages = 0
+		for p := 0; p < 4; p++ {
+			rec := doRequest(server, http.MethodGet, fmt.Sprintf("/topics/%s/partitions/%d/messages?offset=0&limit=1000", topicName, p), nil)
+			if rec.Code == http.StatusOK {
+				var resp ConsumeResponse
+				if err := json.Unmarshal(rec.Body.Bytes(), &resp); err == nil {
+					totalMessages += len(resp.Messages)
+				}
 			}
 		}
+		if totalMessages >= expected {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 
-	expected := numPublishers * messagesPerPublisher
 	if totalMessages != expected {
 		t.Errorf("Total messages = %d, want %d", totalMessages, expected)
 	}

@@ -334,20 +334,21 @@ func (dm *DiskMonitor) refreshStats() error {
 	dm.diskFull.Store(isFull)
 
 	// Log state transitions
-	if isFull && !wasFull {
+	switch {
+	case isFull && !wasFull:
 		dm.logger.Error("DISK SPACE CRITICAL: writes suspended",
 			"usage_percent", fmt.Sprintf("%.1f%%", usagePercent),
 			"threshold_percent", dm.config.ThresholdPercent,
 			"available_bytes", availBytes,
 			"total_bytes", totalBytes,
 		)
-	} else if !isFull && wasFull {
+	case !isFull && wasFull:
 		dm.logger.Info("disk space recovered: writes resumed",
 			"usage_percent", fmt.Sprintf("%.1f%%", usagePercent),
 			"threshold_percent", dm.config.ThresholdPercent,
 			"available_bytes", availBytes,
 		)
-	} else if usagePercent >= dm.config.ThresholdPercent-5 && !isFull {
+	case usagePercent >= dm.config.ThresholdPercent-5 && !isFull:
 		// Warning when within 5% of threshold
 		dm.logger.Warn("disk space warning: approaching threshold",
 			"usage_percent", fmt.Sprintf("%.1f%%", usagePercent),

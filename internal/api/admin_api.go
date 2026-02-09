@@ -37,6 +37,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -151,6 +152,23 @@ func (s *Server) RegisterAdminRoutes(r chi.Router) {
 		r.Route("/topics/{topicName}", func(r chi.Router) {
 			r.Post("/partitions", s.addPartitions)
 			r.Get("/scaling-status", s.getScalingStatus)
+
+			// ==================================================================
+			// LOG COMPACTION (#33)
+			// ==================================================================
+			// Trigger log compaction on a specific partition.
+			// Compaction removes duplicate keys, keeping only the latest value.
+			//
+			// USE CASES:
+			//   - Internal topics (__consumer_offsets) grow unbounded
+			//   - Manual cleanup after high-churn workloads
+			//   - Reclaim disk space from stale tombstones
+			//
+			// COMPARISON:
+			//   - Kafka: log.cleanup.policy=compact (automatic per-segment)
+			//   - goqueue: Admin-triggered per-partition (simpler model)
+			//
+			r.Post("/compact", s.triggerCompaction)
 		})
 
 		// Partition Reassignment
@@ -1279,4 +1297,193 @@ func (s *Server) restoreBackup(w http.ResponseWriter, r *http.Request) {
 		"message":   "restore completed",
 		"backup_id": backupID,
 	})
+}
+
+// =============================================================================
+// LOG COMPACTION ENDPOINT (#33)
+// =============================================================================
+//
+// WHAT THIS DOES:
+// Triggers log compaction on specific partitions of a topic. Compaction scans
+// all messages, keeps only the latest value per key, and rewrites the log.
+//
+// USE CASES:
+//   - Internal topics (__consumer_offsets) accumulate duplicate offset commits
+//   - After bulk ingestion with many key updates
+//   - Reclaim disk space from expired tombstones
+//
+// COMPARISON:
+//   - Kafka: Automatic background compaction per log.cleanup.policy
+//   - RabbitMQ: No compaction (queues are transient)
+//   - SQS: No compaction (managed service, messages auto-delete after consume)
+//   - goqueue: Manual trigger via admin API (can add auto-compaction later)
+//
+// ENDPOINT: POST /admin/topics/{topicName}/compact
+//
+// REQUEST BODY (optional):
+//
+//	{
+//	    "partitions": [0, 1],              // Specific partitions (empty = all)
+//	    "dry_run": false                   // If true, only report stats
+//	}
+//
+// RESPONSE:
+//
+//	{
+//	    "success": true,
+//	    "topic": "my-topic",
+//	    "results": [
+//	        {
+//	            "partition": 0,
+//	            "records_before": 10000,
+//	            "records_after": 2500,
+//	            "records_removed": 7500,
+//	            "dirty_ratio": 0.75
+//	        }
+//	    ]
+//	}
+//
+
+// CompactRequest is the request body for triggering log compaction.
+type CompactRequest struct {
+	// Partitions to compact. Empty means all partitions.
+	Partitions []int `json:"partitions,omitempty"`
+
+	// DryRun only calculates compaction stats without modifying data.
+	DryRun bool `json:"dry_run"`
+}
+
+// CompactResponse is the response from a compaction operation.
+type CompactResponse struct {
+	Success bool                     `json:"success"`
+	Topic   string                   `json:"topic"`
+	DryRun  bool                     `json:"dry_run"`
+	Results []PartitionCompactResult `json:"results"`
+	Error   string                   `json:"error,omitempty"`
+}
+
+// PartitionCompactResult holds compaction results for a single partition.
+type PartitionCompactResult struct {
+	Partition      int     `json:"partition"`
+	RecordsBefore  int64   `json:"records_before"`
+	RecordsAfter   int64   `json:"records_after"`
+	RecordsRemoved int64   `json:"records_removed"`
+	DirtyRatio     float64 `json:"dirty_ratio"`
+	Error          string  `json:"error,omitempty"`
+}
+
+// triggerCompaction handles POST /admin/topics/{topicName}/compact
+func (s *Server) triggerCompaction(w http.ResponseWriter, r *http.Request) {
+	topicName := chi.URLParam(r, "topicName")
+
+	// Look up the topic
+	topic, err := s.broker.GetTopic(topicName)
+	if err != nil {
+		s.errorResponse(w, http.StatusNotFound, "topic not found: "+topicName)
+		return
+	}
+
+	// Parse request body (optional — empty body means compact all partitions)
+	var req CompactRequest
+	if r.Body != nil && r.ContentLength > 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			s.errorResponse(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+			return
+		}
+	}
+
+	// Determine which partitions to compact
+	partitionIDs := req.Partitions
+	if len(partitionIDs) == 0 {
+		// Compact all partitions
+		for i := 0; i < topic.NumPartitions(); i++ {
+			partitionIDs = append(partitionIDs, i)
+		}
+	}
+
+	// Validate partition IDs
+	for _, pid := range partitionIDs {
+		if pid < 0 || pid >= topic.NumPartitions() {
+			s.errorResponse(w, http.StatusBadRequest,
+				fmt.Sprintf("invalid partition ID %d: topic has %d partitions", pid, topic.NumPartitions()))
+			return
+		}
+	}
+
+	compactor := broker.NewCompactor()
+	resp := CompactResponse{
+		Success: true,
+		Topic:   topicName,
+		DryRun:  req.DryRun,
+		Results: make([]PartitionCompactResult, 0, len(partitionIDs)),
+	}
+
+	for _, pid := range partitionIDs {
+		partition, err := topic.Partition(pid)
+		if err != nil {
+			resp.Results = append(resp.Results, PartitionCompactResult{
+				Partition: pid,
+				Error:     err.Error(),
+			})
+			continue
+		}
+
+		if req.DryRun {
+			// Dry run: only calculate dirty ratio
+			dirtyRatio, totalRecords, uniqueKeys, err := broker.CalculateDirtyRatio(partition)
+			result := PartitionCompactResult{
+				Partition:      pid,
+				RecordsBefore:  totalRecords,
+				RecordsAfter:   uniqueKeys,
+				RecordsRemoved: totalRecords - uniqueKeys,
+				DirtyRatio:     dirtyRatio,
+			}
+			if err != nil {
+				result.Error = err.Error()
+			}
+			resp.Results = append(resp.Results, result)
+		} else {
+			// Actual compaction
+			shouldCompact, dirtyRatio, err := compactor.ShouldCompact(partition)
+			if err != nil {
+				resp.Results = append(resp.Results, PartitionCompactResult{
+					Partition: pid,
+					Error:     err.Error(),
+				})
+				continue
+			}
+
+			if !shouldCompact {
+				resp.Results = append(resp.Results, PartitionCompactResult{
+					Partition:  pid,
+					DirtyRatio: dirtyRatio,
+				})
+				continue
+			}
+
+			compactResult, err := broker.CompactPartition(partition, broker.DefaultTombstoneRetention)
+			if err != nil {
+				resp.Results = append(resp.Results, PartitionCompactResult{
+					Partition: pid,
+					Error:     err.Error(),
+				})
+				continue
+			}
+
+			resp.Results = append(resp.Results, PartitionCompactResult{
+				Partition:      pid,
+				RecordsBefore:  compactResult.Stats.TotalRecordsBefore,
+				RecordsAfter:   compactResult.Stats.TotalRecordsAfter,
+				RecordsRemoved: compactResult.Stats.RecordsRemoved,
+				DirtyRatio:     compactResult.Stats.DirtyRatio,
+			})
+		}
+	}
+
+	s.logger.Info("compaction triggered",
+		"topic", topicName,
+		"partitions", len(partitionIDs),
+		"dry_run", req.DryRun)
+
+	s.writeJSON(w, http.StatusOK, resp)
 }

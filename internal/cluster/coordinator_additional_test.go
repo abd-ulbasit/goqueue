@@ -183,7 +183,9 @@ func TestCoordinator_syncMetadataToFollowers_PushesToAliveFollowers(t *testing.T
 	}
 
 	// We need a non-nil context for the per-node push timeout.
+	c.mu.Lock()
 	c.ctx = context.Background()
+	c.mu.Unlock()
 
 	c.syncMetadataToFollowers()
 
@@ -265,7 +267,9 @@ func TestCoordinator_joinViaDiscovery_AppliesStateAndEmitsEvent(t *testing.T) {
 		t.Fatalf("RegisterSelf failed: %v", err)
 	}
 
+	c.mu.Lock()
 	c.ctx = context.Background()
+	c.mu.Unlock()
 
 	events := make(chan CoordinatorEvent, 1)
 	c.AddEventListener(func(ev CoordinatorEvent) {
@@ -373,7 +377,9 @@ func TestCoordinator_joinViaDiscovery_RedirectToController(t *testing.T) {
 		t.Fatalf("RegisterSelf failed: %v", err)
 	}
 
+	c.mu.Lock()
 	c.ctx = context.Background()
+	c.mu.Unlock()
 
 	if err := c.joinViaDiscovery(); err != nil {
 		t.Fatalf("joinViaDiscovery failed: %v", err)
@@ -423,7 +429,9 @@ func TestCoordinator_joinViaDiscovery_SuccessWithoutClusterStateIsRejected(t *te
 		t.Fatalf("RegisterSelf failed: %v", err)
 	}
 
+	c.mu.Lock()
 	c.ctx = context.Background()
+	c.mu.Unlock()
 
 	if err := c.joinViaDiscovery(); err == nil {
 		t.Fatalf("expected joinViaDiscovery to fail for missing ClusterState")
@@ -461,7 +469,9 @@ func TestCoordinator_waitForQuorum_TimesOutQuickly(t *testing.T) {
 		t.Fatalf("RegisterSelf failed: %v", err)
 	}
 
+	c.mu.Lock()
 	c.ctx = context.Background()
+	c.mu.Unlock()
 
 	err = c.waitForQuorum()
 	if err == nil {

@@ -546,7 +546,7 @@ type abortedTrackerSnapshot struct {
 func (at *AbortedTracker) Save(filePath string) error {
 	// Sanitize path to prevent path traversal
 	filePath = filepath.Clean(filePath)
-	
+
 	at.mu.RLock()
 
 	// Convert internal map to serializable format
@@ -627,7 +627,7 @@ func (at *AbortedTracker) Save(filePath string) error {
 func (at *AbortedTracker) LoadFromFile(filePath string) error {
 	// Sanitize path to prevent path traversal
 	filePath = filepath.Clean(filePath)
-	
+
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {

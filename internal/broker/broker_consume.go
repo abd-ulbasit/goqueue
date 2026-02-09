@@ -567,4 +567,3 @@ func (b *Broker) GetOffsetBounds(topic string, partition int) (earliest, latest 
 
 	return p.EarliestOffset(), p.LatestOffset(), nil
 }
-

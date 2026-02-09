@@ -189,6 +189,13 @@ vet:
 check: fmt vet lint
 	@echo "✓ All quality checks passed"
 
+## install-hooks: Install git pre-commit hooks
+.PHONY: install-hooks
+install-hooks:
+	@cp scripts/pre-commit .git/hooks/pre-commit
+	@chmod +x .git/hooks/pre-commit
+	@echo "✓ Pre-commit hook installed"
+
 ## vuln: Run vulnerability scanner
 .PHONY: vuln
 vuln:

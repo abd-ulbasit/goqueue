@@ -344,7 +344,7 @@ func (sm *SnapshotManager) extractSnapshot(snapshotPath, targetDir string) error
 	// Sanitize paths to prevent path traversal
 	snapshotPath = filepath.Clean(snapshotPath)
 	targetDir = filepath.Clean(targetDir)
-	
+
 	// Open snapshot file.
 	file, err := os.Open(snapshotPath)
 	if err != nil {
@@ -421,7 +421,7 @@ func (sm *SnapshotManager) extractSnapshot(snapshotPath, targetDir string) error
 func (sm *SnapshotManager) calculateChecksum(path string) (string, error) {
 	// Sanitize path to prevent path traversal
 	path = filepath.Clean(path)
-	
+
 	file, err := os.Open(path)
 	if err != nil {
 		return "", err

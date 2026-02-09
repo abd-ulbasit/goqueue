@@ -917,7 +917,7 @@ type WALReader struct {
 func NewWALReader(walPath string) (*WALReader, error) {
 	// Sanitize path to prevent path traversal
 	walPath = filepath.Clean(walPath)
-	
+
 	file, err := os.Open(walPath)
 	if err != nil {
 		return nil, err

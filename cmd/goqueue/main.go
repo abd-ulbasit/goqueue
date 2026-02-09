@@ -185,6 +185,30 @@ func main() {
 	}
 	defer b.Close()
 
+	// -------------------------------------------------------------------------
+	// PID FILE MANAGEMENT (#26)
+	// -------------------------------------------------------------------------
+	// Prevents two goqueue processes from using the same data directory.
+	// Creates a PID file (goqueue.pid) in the data directory.
+	// On startup: checks if another instance is alive → fails if so.
+	// On shutdown: removes the PID file.
+	//
+	// COMPARISON:
+	//   - Kafka: broker.lock in log.dirs
+	//   - Redis: pidfile config
+	//   - PostgreSQL: postmaster.pid
+	// -------------------------------------------------------------------------
+	pidManager := broker.NewPIDManager(config.DataDir)
+	if err := pidManager.Acquire(); err != nil {
+		log.Fatalf("PID file check failed: %v", err)
+	}
+	defer func() {
+		if err := pidManager.Release(); err != nil {
+			log.Printf("Warning: failed to remove PID file: %v", err)
+		}
+	}()
+	fmt.Printf("   ✓ PID file acquired: %s\n", pidManager.Path())
+
 	fmt.Printf("   ✓ Broker started (NodeID: %s)\n", b.NodeID())
 	fmt.Printf("   ✓ Data directory: %s\n\n", b.DataDir())
 
@@ -481,7 +505,21 @@ func main() {
 	} else {
 		grpcConfig.Address = "127.0.0.1:9000" // Default for local development
 	}
-	grpcConfig.EnableReflection = true // Enable for debugging with grpcurl
+	// -------------------------------------------------------------------------
+	// gRPC REFLECTION CONFIGURATION (#29)
+	// -------------------------------------------------------------------------
+	// Reflection allows tools like grpcurl to discover services at runtime.
+	// SECURITY: Disabled by default in production — exposes API surface.
+	// Enable explicitly for debugging: GOQUEUE_GRPC_REFLECTION=true
+	//
+	// COMPARISON:
+	//   - Production gRPC services typically disable reflection
+	//   - Kafka doesn't have gRPC, but doesn't expose protocol metadata
+	//   - gRPC best practice: reflection off in prod, on in dev/staging
+	// -------------------------------------------------------------------------
+	if os.Getenv("GOQUEUE_GRPC_REFLECTION") == "true" {
+		grpcConfig.EnableReflection = true
+	}
 
 	grpcServer := grpc.NewServer(b, grpcConfig)
 

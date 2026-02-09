@@ -40,7 +40,7 @@ import (
 // (goroutine, memory, DB connections) indefinitely. Context timeouts propagate
 // cancellation through the entire call chain:
 //   - HTTP handler → broker method → storage layer
-//   - If the client disconnects or timeout fires → all work cancelled
+//   - If the client disconnects or timeout fires → all work canceled
 //
 // HOW IT WORKS:
 //  1. Middleware creates a context.WithTimeout from the request context
