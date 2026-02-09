@@ -69,7 +69,7 @@ const (
 
 	// pidFilePermissions: read/write for owner, read for group/others.
 	// Same as PostgreSQL's postmaster.pid permissions.
-	pidFilePermissions = 0644
+	pidFilePermissions = 0o644
 )
 
 // =============================================================================
@@ -147,14 +147,14 @@ func (pm *PIDManager) Acquire() error {
 		}
 		// PID file exists but contains invalid data — overwrite
 	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("%w: %v", ErrPIDFileCreate, err)
+		return fmt.Errorf("%w: %w", ErrPIDFileCreate, err)
 	}
 
 	// Write our PID to the file
 	pid := os.Getpid()
 	content := fmt.Sprintf("%d\n", pid)
 	if err := os.WriteFile(pm.pidPath, []byte(content), pidFilePermissions); err != nil {
-		return fmt.Errorf("%w: %v", ErrPIDFileCreate, err)
+		return fmt.Errorf("%w: %w", ErrPIDFileCreate, err)
 	}
 
 	return nil
