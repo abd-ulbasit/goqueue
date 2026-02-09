@@ -59,8 +59,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"golang.org/x/sys/unix"
 )
 
 // =============================================================================
@@ -279,83 +277,4 @@ func (dm *DiskMonitor) run(ctx context.Context) {
 			}
 		}
 	}
-}
-
-// refreshStats queries the filesystem for current disk usage.
-//
-// IMPLEMENTATION:
-//
-//	Uses unix.Statfs (syscall) to get filesystem stats.
-//	This works on macOS and Linux. For Windows, would need
-//	a different implementation (GetDiskFreeSpaceEx).
-//
-// SYSCALL FIELDS:
-//   - Blocks: Total data blocks in filesystem
-//   - Bfree: Free blocks (for superuser)
-//   - Bavail: Free blocks (for unprivileged users) ← we use this
-//   - Bsize: Optimal transfer block size
-//
-// WHY Bavail (not Bfree)?
-//
-//	Filesystems reserve ~5% for root (ext4's reserved-blocks-percentage).
-//	Bavail reflects what's ACTUALLY available to our process.
-//	Using Bfree would overestimate available space.
-func (dm *DiskMonitor) refreshStats() error {
-	var stat unix.Statfs_t
-	if err := unix.Statfs(dm.config.DataDir, &stat); err != nil {
-		return fmt.Errorf("statfs(%s): %w", dm.config.DataDir, err)
-	}
-
-	totalBytes := stat.Blocks * uint64(stat.Bsize)
-	availBytes := stat.Bavail * uint64(stat.Bsize)
-	usedBytes := totalBytes - availBytes
-
-	var usagePercent float64
-	if totalBytes > 0 {
-		usagePercent = float64(usedBytes) / float64(totalBytes) * 100
-	}
-
-	stats := DiskStats{
-		TotalBytes:     totalBytes,
-		AvailableBytes: availBytes,
-		UsedBytes:      usedBytes,
-		UsagePercent:   usagePercent,
-		LastChecked:    time.Now(),
-	}
-
-	dm.statsMu.Lock()
-	dm.stats = stats
-	dm.statsMu.Unlock()
-
-	// Update the atomic flag for hot-path checks
-	wasFull := dm.diskFull.Load()
-	isFull := usagePercent >= dm.config.ThresholdPercent
-
-	dm.diskFull.Store(isFull)
-
-	// Log state transitions
-	switch {
-	case isFull && !wasFull:
-		dm.logger.Error("DISK SPACE CRITICAL: writes suspended",
-			"usage_percent", fmt.Sprintf("%.1f%%", usagePercent),
-			"threshold_percent", dm.config.ThresholdPercent,
-			"available_bytes", availBytes,
-			"total_bytes", totalBytes,
-		)
-	case !isFull && wasFull:
-		dm.logger.Info("disk space recovered: writes resumed",
-			"usage_percent", fmt.Sprintf("%.1f%%", usagePercent),
-			"threshold_percent", dm.config.ThresholdPercent,
-			"available_bytes", availBytes,
-		)
-	case usagePercent >= dm.config.ThresholdPercent-5 && !isFull:
-		// Warning when within 5% of threshold
-		dm.logger.Warn("disk space warning: approaching threshold",
-			"usage_percent", fmt.Sprintf("%.1f%%", usagePercent),
-			"threshold_percent", dm.config.ThresholdPercent,
-			"available_bytes", availBytes,
-		)
-	}
-
-	return nil
 }
