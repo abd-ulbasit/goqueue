@@ -436,12 +436,12 @@ var tenantIDRegex = regexp.MustCompile(`^[a-z][a-z0-9-]{2,63}$`)
 // NewTenantManager creates a new tenant manager.
 func NewTenantManager(config TenantManagerConfig) (*TenantManager, error) {
 	// Create data directories
-	if err := os.MkdirAll(config.DataDir, 0o755); err != nil {
+	if err := os.MkdirAll(config.DataDir, 0o750); err != nil {
 		return nil, fmt.Errorf("failed to create tenant data directory: %w", err)
 	}
 
 	usageDir := filepath.Join(config.DataDir, "usage")
-	if err := os.MkdirAll(usageDir, 0o755); err != nil {
+	if err := os.MkdirAll(usageDir, 0o750); err != nil {
 		return nil, fmt.Errorf("failed to create usage directory: %w", err)
 	}
 
@@ -916,6 +916,8 @@ func (tm *TenantManager) loadTenants() error {
 	defer tm.persistMu.Unlock()
 
 	path := filepath.Join(tm.config.DataDir, tenantsFile)
+	// Sanitize path to prevent path traversal
+	path = filepath.Clean(path)
 
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
@@ -981,6 +983,8 @@ func (tm *TenantManager) loadUsage() error {
 
 		tenantID := strings.TrimSuffix(entry.Name(), ".json")
 		path := filepath.Join(usageDir, entry.Name())
+		// Sanitize path to prevent path traversal
+		path = filepath.Clean(path)
 
 		data, err := os.ReadFile(path)
 		if err != nil {

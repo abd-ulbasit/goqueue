@@ -555,7 +555,7 @@ func NewBroker(config BrokerConfig) (*Broker, error) {
 
 	// Create data directories
 	logsDir := filepath.Join(config.DataDir, "logs")
-	if err := os.MkdirAll(logsDir, 0o755); err != nil {
+	if err := os.MkdirAll(logsDir, 0o750); err != nil {
 		return nil, fmt.Errorf("failed to create logs directory: %w", err)
 	}
 

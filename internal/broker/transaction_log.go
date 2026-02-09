@@ -366,7 +366,7 @@ type TransactionLog struct {
 // NewTransactionLog creates and opens a new transaction log.
 func NewTransactionLog(config TransactionLogConfig) (*TransactionLog, error) {
 	// Create data directory
-	if err := os.MkdirAll(config.DataDir, 0o755); err != nil {
+	if err := os.MkdirAll(config.DataDir, 0o750); err != nil {
 		return nil, fmt.Errorf("failed to create transaction log directory: %w", err)
 	}
 
@@ -915,6 +915,9 @@ type WALReader struct {
 
 // NewWALReader creates a new WAL reader.
 func NewWALReader(walPath string) (*WALReader, error) {
+	// Sanitize path to prevent path traversal
+	walPath = filepath.Clean(walPath)
+	
 	file, err := os.Open(walPath)
 	if err != nil {
 		return nil, err

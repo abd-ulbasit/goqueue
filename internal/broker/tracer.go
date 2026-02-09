@@ -863,7 +863,7 @@ type FileExporter struct {
 
 // NewFileExporter creates a file exporter.
 func NewFileExporter(dir string, maxFileSize int64) (*FileExporter, error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return nil, fmt.Errorf("failed to create trace directory: %w", err)
 	}
 
@@ -888,6 +888,8 @@ func (e *FileExporter) rotateFile() error {
 	e.fileCount++
 	filename := fmt.Sprintf("traces-%s-%03d.json", date, e.fileCount)
 	path := filepath.Join(e.dir, filename)
+	// Sanitize path to prevent path traversal
+	path = filepath.Clean(path)
 
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {

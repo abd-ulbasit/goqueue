@@ -68,7 +68,7 @@ type Partition struct {
 func NewPartition(baseDir, topic string, id int) (*Partition, error) {
 	// Create partition directory
 	dir := filepath.Join(baseDir, topic, fmt.Sprintf("%d", id))
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return nil, fmt.Errorf("failed to create partition directory: %w", err)
 	}
 

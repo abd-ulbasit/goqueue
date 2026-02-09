@@ -167,7 +167,7 @@ type Log struct {
 // Creates the first segment starting at offset 0.
 func NewLog(dir string) (*Log, error) {
 	// Create directory if needed
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return nil, fmt.Errorf("failed to create log directory: %w", err)
 	}
 

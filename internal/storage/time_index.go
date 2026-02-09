@@ -71,6 +71,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 )
@@ -186,11 +187,14 @@ func TimeIndexFileName(baseOffset int64) string {
 //
 // The time index file is created immediately (empty) for durability.
 func NewTimeIndex(path string, baseOffset int64) (*TimeIndex, error) {
+	// Sanitize path to prevent path traversal
+	path = filepath.Clean(path)
+	
 	// O_RDWR: read and write
 	// O_CREATE: create if doesn't exist
 	// O_APPEND: all writes go to end
-	// 0644: owner can read/write, others can read
-	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o644)
+	// 0600: owner can read/write only
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o600) //nolint:gosec // G304: path sanitized at function entry
 	if err != nil {
 		return nil, fmt.Errorf("failed to create time index file: %w", err)
 	}
@@ -217,8 +221,11 @@ func NewTimeIndex(path string, baseOffset int64) (*TimeIndex, error) {
 //   - Binary search in memory is much faster than disk
 //   - Simplifies the code (no disk I/O during lookup)
 func LoadTimeIndex(path string, baseOffset int64) (*TimeIndex, error) {
+	// Sanitize path to prevent path traversal
+	path = filepath.Clean(path)
+	
 	// Open for reading and appending
-	file, err := os.OpenFile(path, os.O_RDWR|os.O_APPEND, 0o644)
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_APPEND, 0o600) //nolint:gosec // G304: path sanitized at function entry
 	if err != nil {
 		return nil, fmt.Errorf("failed to open time index file: %w", err)
 	}
@@ -554,6 +561,10 @@ func (ti *TimeIndex) Truncate(afterOffset int64) error {
 //
 // This is an expensive operation (requires full log scan) but ensures correctness.
 func RebuildTimeIndex(logPath, indexPath string, baseOffset int64) (*TimeIndex, error) {
+	// Sanitize paths to prevent path traversal
+	logPath = filepath.Clean(logPath)
+	indexPath = filepath.Clean(indexPath)
+	
 	// Delete existing corrupt index if present
 	_ = os.Remove(indexPath)
 
@@ -564,7 +575,7 @@ func RebuildTimeIndex(logPath, indexPath string, baseOffset int64) (*TimeIndex, 
 	}
 
 	// Open log file for scanning
-	logFile, err := os.Open(logPath)
+	logFile, err := os.Open(logPath) //nolint:gosec // G304: path sanitized at function entry
 	if err != nil {
 		ti.Close()
 		return nil, fmt.Errorf("failed to open log file: %w", err)

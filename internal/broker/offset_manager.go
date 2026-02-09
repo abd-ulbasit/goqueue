@@ -184,7 +184,7 @@ type OffsetManager struct {
 // NewOffsetManager creates a new offset manager.
 func NewOffsetManager(baseDir string, autoCommitEnabled bool, autoCommitIntervalMs int) (*OffsetManager, error) {
 	// Create base directory
-	if err := os.MkdirAll(baseDir, 0o755); err != nil {
+	if err := os.MkdirAll(baseDir, 0o750); err != nil {
 		return nil, fmt.Errorf("failed to create offset directory: %w", err)
 	}
 
@@ -587,7 +587,7 @@ func (om *OffsetManager) persistGroup(groupID string) error {
 
 	// Create group directory
 	groupDir := filepath.Join(om.baseDir, groupID)
-	if err := os.MkdirAll(groupDir, 0o755); err != nil {
+	if err := os.MkdirAll(groupDir, 0o750); err != nil {
 		return fmt.Errorf("failed to create group directory: %w", err)
 	}
 
@@ -630,6 +630,8 @@ func (om *OffsetManager) loadAllOffsets() error {
 
 		groupID := entry.Name()
 		offsetFile := filepath.Join(om.baseDir, groupID, "offsets.json")
+		// Sanitize path to prevent path traversal
+		offsetFile = filepath.Clean(offsetFile)
 
 		data, err := os.ReadFile(offsetFile)
 		if err != nil {

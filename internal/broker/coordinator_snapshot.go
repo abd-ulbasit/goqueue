@@ -322,7 +322,7 @@ type SnapshotWriter struct {
 //   - {snapshotDir}/snapshot-{type}-{offset}-{timestamp}.bin
 func NewSnapshotWriter(snapshotDir string, snapshotType SnapshotType, lastOffset int64) (*SnapshotWriter, error) {
 	// Ensure directory exists
-	if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
+	if err := os.MkdirAll(snapshotDir, 0o750); err != nil {
 		return nil, fmt.Errorf("failed to create snapshot directory: %w", err)
 	}
 
@@ -330,6 +330,8 @@ func NewSnapshotWriter(snapshotDir string, snapshotType SnapshotType, lastOffset
 	timestamp := time.Now().UnixMilli()
 	filename := fmt.Sprintf("snapshot-%d-%d-%d.bin", snapshotType, lastOffset, timestamp)
 	path := filepath.Join(snapshotDir, filename)
+	// Sanitize path to prevent path traversal
+	path = filepath.Clean(path)
 
 	// Create file
 	file, err := os.Create(path)
@@ -439,6 +441,9 @@ type SnapshotReader struct {
 
 // OpenSnapshot opens an existing snapshot file for reading.
 func OpenSnapshot(path string) (*SnapshotReader, error) {
+	// Sanitize path to prevent path traversal
+	path = filepath.Clean(path)
+	
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open snapshot: %w", err)

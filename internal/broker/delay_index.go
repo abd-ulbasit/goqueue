@@ -258,7 +258,7 @@ func DefaultDelayIndexConfig(dataDir, topic string) DelayIndexConfig {
 func NewDelayIndex(config DelayIndexConfig) (*DelayIndex, error) {
 	// Create directory structure
 	dir := filepath.Join(config.DataDir, "delays", config.Topic)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return nil, fmt.Errorf("failed to create delay index directory: %w", err)
 	}
 
