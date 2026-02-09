@@ -93,6 +93,10 @@ builds:
     goarch:
       - amd64
       - arm64
+    # Exclude Windows/ARM64 to match other builds (consistent archive contents)
+    ignore:
+      - goos: windows
+        goarch: arm64
     ldflags:
       - -s -w
       - -X goqueue/cmd/goqueue-cli/cmd.version={{.Version}}
@@ -137,14 +141,13 @@ builds:
 # -----------------------------------------------------------------------------
 archives:
   - id: goqueue-archive
-    builds:
-      - goqueue
-      - goqueue-cli
-      - goqueue-admin
-    format: tar.gz
+    # Archive formats per OS (formats is an array in v2)
+    formats:
+      - tar.gz
     format_overrides:
       - goos: windows
-        format: zip
+        formats:
+          - zip
     # Naming template for archives
     name_template: >-
       {{ .ProjectName }}_
