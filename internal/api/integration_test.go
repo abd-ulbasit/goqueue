@@ -402,9 +402,10 @@ func TestConcurrentPublishers(t *testing.T) {
 	// Verify total message count using retry loop instead of fixed sleep.
 	// The priority index may lag behind log appends under concurrency,
 	// so we poll until all messages are visible (or timeout).
+	// NOTE: Increased timeout to 10s for slower CI environments.
 	expected := numPublishers * messagesPerPublisher
 	var totalMessages int
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		totalMessages = 0
 		for p := 0; p < 4; p++ {

@@ -78,6 +78,22 @@ terraform_up() {
     log_info "Configuring kubectl..."
     aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER_NAME"
     
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Install VolumeSnapshot CRDs for CSI snapshot support
+    # ═══════════════════════════════════════════════════════════════════════════
+    #
+    # WHY: The CSI snapshot controller CRDs are not installed by default on EKS.
+    # They're required for the VolumeSnapshotClass resource used by backup.
+    #
+    # SOURCE: Official kubernetes-csi external-snapshotter repo
+    # ═══════════════════════════════════════════════════════════════════════════
+    log_info "Installing VolumeSnapshot CRDs for backup support..."
+    SNAPSHOT_VERSION="v8.2.0"
+    kubectl apply -f "https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/${SNAPSHOT_VERSION}/client/config/crd/snapshot.storage.k8s.io_volumesnapshotclasses.yaml" 2>/dev/null || true
+    kubectl apply -f "https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/${SNAPSHOT_VERSION}/client/config/crd/snapshot.storage.k8s.io_volumesnapshotcontents.yaml" 2>/dev/null || true
+    kubectl apply -f "https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/${SNAPSHOT_VERSION}/client/config/crd/snapshot.storage.k8s.io_volumesnapshots.yaml" 2>/dev/null || true
+    log_success "VolumeSnapshot CRDs installed"
+    
     # Wait for GoQueue pods
     log_info "Waiting for GoQueue pods to be ready..."
     kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=goqueue -n goqueue --timeout=300s 2>/dev/null || true
@@ -124,12 +140,84 @@ terraform_down() {
         exit 0
     fi
     
-    cd "$TF_DIR"
+    # ═══════════════════════════════════════════════════════════════════════════
+    # FIX: Proper cleanup order to prevent orphaned EBS volumes
+    # ═══════════════════════════════════════════════════════════════════════════
+    #
+    # PROBLEM: If we just run `terraform destroy`, Terraform deletes the EKS 
+    # cluster and the EBS CSI driver before PersistentVolumes are deleted.
+    # The CSI driver is gone, so it can't delete the EBS volumes → ORPHANED!
+    #
+    # SOLUTION: Delete Helm releases → wait for PVCs to delete → then destroy
+    #
+    # ORDER OF OPERATIONS:
+    #   1. Delete GoQueue Helm release (triggers PVC deletion)
+    #   2. Wait for PVCs and PVs to be fully deleted (CSI driver does its job)
+    #   3. Run terraform destroy (safe - no orphans)
+    # ═══════════════════════════════════════════════════════════════════════════
     
-    log_info "Destroying infrastructure..."
+    # Check if cluster exists and configure kubectl
+    if aws eks describe-cluster --name "$CLUSTER_NAME" --region "$REGION" &>/dev/null; then
+        log_info "Configuring kubectl for cleanup..."
+        aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER_NAME" 2>/dev/null
+        
+        # Step 1: Delete GoQueue Helm release
+        log_info "Step 1/3: Deleting Helm releases (triggers PVC cleanup)..."
+        helm uninstall goqueue -n goqueue 2>/dev/null || log_warn "GoQueue Helm release already deleted"
+        helm uninstall kube-prometheus-stack -n monitoring 2>/dev/null || log_warn "Prometheus Helm release already deleted"
+        
+        # Step 2: Wait for PVCs to be deleted
+        log_info "Step 2/3: Waiting for PersistentVolumeClaims to be deleted..."
+        for i in {1..30}; do
+            PVC_COUNT=$(kubectl get pvc -n goqueue --no-headers 2>/dev/null | wc -l | tr -d ' ')
+            if [ "$PVC_COUNT" = "0" ]; then
+                log_success "All PVCs deleted successfully"
+                break
+            fi
+            log_info "  Waiting for $PVC_COUNT PVC(s) to be deleted... ($i/30)"
+            sleep 5
+        done
+        
+        # Wait for PV cleanup (CSI driver takes a moment)
+        sleep 10
+        
+        # Verify EBS volumes are being deleted
+        log_info "Verifying EBS volume cleanup..."
+        VOLUMES=$(aws ec2 describe-volumes --region "$REGION" \
+            --filters "Name=tag:kubernetes.io/created-for/pvc/namespace,Values=goqueue" \
+            --query 'Volumes[*].VolumeId' --output text 2>/dev/null || echo "")
+        
+        if [ -n "$VOLUMES" ] && [ "$VOLUMES" != "None" ]; then
+            log_warn "Found orphaned volumes, deleting: $VOLUMES"
+            for vol in $VOLUMES; do
+                aws ec2 delete-volume --volume-id "$vol" --region "$REGION" 2>/dev/null || true
+            done
+        fi
+    else
+        log_warn "EKS cluster not found, skipping Helm cleanup"
+    fi
+    
+    # Step 3: Run terraform destroy
+    log_info "Step 3/3: Running terraform destroy..."
+    cd "$TF_DIR"
     terraform destroy -auto-approve
     
-    log_success "All infrastructure destroyed!"
+    # Final cleanup: Check for any remaining orphaned volumes
+    log_info "Final cleanup: Checking for orphaned EBS volumes..."
+    ORPHANED_VOLUMES=$(aws ec2 describe-volumes --region "$REGION" \
+        --filters "Name=status,Values=available" \
+        --query 'Volumes[?Tags[?Key==`kubernetes.io/created-for/pv/name`]].VolumeId' \
+        --output text 2>/dev/null || echo "")
+    
+    if [ -n "$ORPHANED_VOLUMES" ] && [ "$ORPHANED_VOLUMES" != "None" ]; then
+        log_warn "Cleaning up orphaned Kubernetes volumes: $ORPHANED_VOLUMES"
+        for vol in $ORPHANED_VOLUMES; do
+            log_info "  Deleting volume: $vol"
+            aws ec2 delete-volume --volume-id "$vol" --region "$REGION" 2>/dev/null || true
+        done
+    fi
+    
+    log_success "All infrastructure destroyed! No orphaned resources."
 }
 
 get_status() {

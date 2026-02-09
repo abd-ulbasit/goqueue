@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -53,6 +54,13 @@ func (s *Server) createTopic(w http.ResponseWriter, r *http.Request) {
 	if err := s.broker.CreateTopic(config); err != nil {
 		if strings.Contains(err.Error(), "already exists") {
 			s.errorResponse(w, http.StatusConflict, "topic already exists")
+			return
+		}
+		// Handle not-controller error with 503 Service Unavailable + Retry-After
+		// This tells the client to retry the request which may hit the controller
+		if errors.Is(err, broker.ErrNotController) {
+			w.Header().Set("Retry-After", "1")
+			s.errorResponse(w, http.StatusServiceUnavailable, "not the controller node, please retry")
 			return
 		}
 		s.errorResponse(w, http.StatusInternalServerError, "failed to create topic: "+err.Error())
@@ -473,12 +481,18 @@ type ConsumeResponse struct {
 //   - Client-side priority handling
 //   - Debugging priority distribution
 //   - Metrics and monitoring
+//
+// RECEIPT HANDLE (M4):
+// When messages are returned via consumer group polling (/groups/{group}/poll),
+// each message includes a receipt_handle for per-message ACK/NACK/REJECT.
+// The receipt_handle is only present when using the reliability layer.
 type ConsumeMessage struct {
-	Offset    int64  `json:"offset"`
-	Timestamp string `json:"timestamp"`
-	Key       string `json:"key,omitempty"`
-	Value     string `json:"value"`
-	Priority  string `json:"priority,omitempty"` // M6: Priority level (critical/high/normal/low/background)
+	Offset        int64  `json:"offset"`
+	Timestamp     string `json:"timestamp"`
+	Key           string `json:"key,omitempty"`
+	Value         string `json:"value"`
+	Priority      string `json:"priority,omitempty"`       // M6: Priority level (critical/high/normal/low/background)
+	ReceiptHandle string `json:"receipt_handle,omitempty"` // M4: For per-message ACK (only present in /groups/{group}/poll)
 }
 
 func (s *Server) consumeMessages(w http.ResponseWriter, r *http.Request) {
