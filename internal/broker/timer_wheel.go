@@ -13,8 +13,9 @@
 //   ┌─┬─┬─┬─┬─┬─┬─┬─┐
 //   │0│1│2│3│4│5│6│7│  8 buckets × 1 second = 8 second range
 //   └─┴─┴─┴─┴─┴─┴─┴─┘
-//   Problem: To cover 7 days with 10ms precision, we'd need:
-//   7 days × 24 hours × 60 min × 60 sec × 100 ticks = 60,480,000 buckets!
+//   Problem: to cover this wheel's full 7.76-day range at its 10ms precision,
+//   a flat wheel needs one bucket per tick:
+//   671,088,640 ms range / 10 ms per tick = 67,108,864 buckets.
 //
 //   HIERARCHICAL TIMER WHEEL:
 //   Instead of one flat wheel, we use multiple levels with increasing granularity:
@@ -24,7 +25,10 @@
 //   Level 2 (2.73m precision):  64 buckets × 2.73m   = 2.91 hours
 //   Level 3 (2.91h precision):  64 buckets × 2.91h   = 7.76 days
 //
-//   Total: 256 + 64 + 64 + 64 = 448 buckets (vs 60M for flat wheel!)
+//   Total: 256 + 64 + 64 + 64 = 448 buckets, vs 67,108,864 flat.
+//   The trade is precision at the top: a level-3 timer is only placed to
+//   within 2.91 hours, and cascades recompute its remaining delay on the way
+//   down, so it lands on a 10ms bucket by the time it fires.
 //
 // HOW IT WORKS:
 //
@@ -539,8 +543,28 @@ func (tw *TimerWheel) calculateBucket(delayMs int64) (level, bucket int) {
 	// This accounts for time already elapsed within the current tick cycle
 
 	if delayMs < level0SpanMs {
-		// Level 0: 10ms buckets
-		bucket = (tw.cursors[0] + int(delayMs/level0TickMs)) % level0Buckets
+		// Level 0: 10ms buckets.
+		//
+		// The offset must be at least one bucket. tick() advances cursors[0]
+		// and then drains the bucket it lands on, so cursors[0] always names
+		// the bucket that was most recently processed. A timer placed there is
+		// not revisited until the cursor completes a full revolution: 256
+		// ticks, or 2.56 seconds.
+		//
+		// Truncating division sends every sub-tick delay to offset 0. That is
+		// not a rare edge case - it is hit by every past-due timer recovered
+		// at startup (remaining delay 0), and by any schedule whose remaining
+		// delay fell under 10ms between the caller computing DeliverAt and
+		// insertTimer running, which the persistent delay-index write in
+		// Scheduler.scheduleAt can easily cost. Those timers fired 2.56s late.
+		//
+		// The wheel cannot be more precise than its 10ms granularity, so
+		// firing one tick late is correct. Firing a revolution late is not.
+		offset := int(delayMs / level0TickMs)
+		if offset < 1 {
+			offset = 1
+		}
+		bucket = (tw.cursors[0] + offset) % level0Buckets
 		return 0, bucket
 	}
 
