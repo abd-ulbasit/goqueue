@@ -8,7 +8,9 @@ nav_order: 5
 
 # Performance Benchmarks
 
-GoQueue delivers high throughput with minimal operational complexity. This page documents our benchmark methodology and results.
+Every number on this page came from one harness on one cluster configuration.
+The harness is described before the results because several of its properties
+change what the numbers mean.
 
 ## Test Environment
 
@@ -35,18 +37,41 @@ resources:
 
 ---
 
+## Harness
+
+Everything below comes from `deploy/kubernetes/manual/publish-benchmark.yaml`,
+which runs as a Job inside the cluster. These properties are load-bearing:
+
+| Property | Value |
+|----------|-------|
+| **Client** | Python 3.12 `urllib.request` — **no connection pooling**, so every publish opens a new TCP connection |
+| **Client resources** | 1 vCPU limit, 512 MiB. The generator is not over-provisioned relative to the broker |
+| **Transport** | HTTP API on port 8080 (not gRPC) |
+| **Payload** | ~10 bytes. Isolates per-request overhead rather than serialization or disk bandwidth |
+| **Topic** | 6 partitions, freshly created per run |
+| **Scope** | Publish path only. Consume, replication lag and end-to-end latency are not measured |
+
+Consequence: the low-concurrency rows are bounded by the client, not the broker.
+They are useful as a per-request cost model and misleading as a capacity ceiling.
+
+---
+
 ## Publish Throughput
 
 All benchmarks run from **within the EKS cluster** to minimize network latency effects.
 
 ### Results Summary
 
-| Mode | Configuration | Throughput | Speedup |
-|------|---------------|------------|---------|
-| **Sequential** | 1 message at a time | ~320 msgs/sec | baseline |
-| **Concurrent** | 8 parallel threads | ~1,300 msgs/sec | 4× |
-| **Batch (100)** | 100 messages/batch | ~30,000 msgs/sec | 100× |
-| **Batch (1000)** | 1000 messages/batch | ~220,000 msgs/sec | 700× |
+| Mode | Configuration | Throughput | Per-message cost | Speedup |
+|------|---------------|------------|------------------|---------|
+| **Sequential** | 1 message at a time | ~320 msgs/sec | ~3.1 ms | baseline |
+| **Concurrent** | 8 parallel threads | ~1,300 msgs/sec | ~770 µs | 4× |
+| **Batch (100)** | 100 messages/batch | ~30,000 msgs/sec | ~33 µs | 100× |
+| **Batch (1000)** | 1000 messages/batch | ~220,000 msgs/sec | ~4.5 µs | 700× |
+
+The per-message cost column is the useful artifact. Its progression shows the
+cost is per-*request*, not per-*message*, which is why batching buys ~700× and
+concurrency buys ~4× and then goes backwards past 8 threads.
 
 ### Scaling with Batch Size
 
@@ -124,13 +149,17 @@ Batches × Size    Total     Duration    Throughput
 
 ## Comparison with Other Systems
 
-| System | Sequential | Batch (100) | Notes |
-|--------|------------|-------------|-------|
-| **GoQueue** | ~320/s | ~30,000/s | Single binary, no dependencies |
-| Apache Kafka | ~100K/s | ~1M/s | Requires ZooKeeper/KRaft, JVM |
-| RabbitMQ | ~10K/s | ~50K/s | Erlang-based, complex clustering |
-| Amazon SQS | ~300/s | ~3,000/s | AWS managed, 10 msg batch limit |
-| Redis Streams | ~100K/s | ~500K/s | In-memory only, no persistence |
+Removed. An earlier revision of this page carried a table putting these numbers
+next to published figures for Kafka, RabbitMQ, SQS and Redis Streams. That table
+was not a measurement — the other rows were quoted from memory, not produced on
+this hardware, with this harness, at this payload size, under this durability
+configuration. Comparing a `urllib`-bound HTTP benchmark against someone else's
+tuned producer benchmark tells you about the two harnesses, not the two systems.
+
+If a comparison is needed, it has to be run: same instance types, same payload,
+same acks/fsync settings, same client library quality on both sides. Until that
+exists, the honest statement is that GoQueue's cost model is documented above
+and nothing here is a claim about anyone else's.
 
 ### When to Choose GoQueue
 
@@ -237,13 +266,17 @@ terraform destroy
 
 ---
 
-## Hardware Recommendations
+## Sizing
 
-| Workload | Nodes | Instance Type | Expected Throughput |
-|----------|-------|---------------|---------------------|
-| Development | 1 | t3.small | ~5,000 msgs/sec |
-| Low volume | 3 | t3.medium | ~20,000 msgs/sec |
-| Medium volume | 3 | c5.xlarge | ~100,000 msgs/sec |
-| High volume | 5 | c5.2xlarge | ~500,000 msgs/sec |
+Only one configuration has been measured: 3 nodes of c5.xlarge, reaching
+~220,000 msgs/sec with 1,000-message batches under the harness described above.
 
-*Throughput assumes batch publishing. Sequential will be ~100× lower.*
+Everything else is untested. This page previously listed expected throughput for
+t3.small, t3.medium and 5+ node c5.2xlarge clusters; those figures were
+extrapolations presented as results and have been removed rather than restated as
+guesses. Scaling is not linear in node count for a partitioned log — placement,
+replication factor and partition count all matter — so extrapolating from a
+single data point would be inventing numbers.
+
+Full runs, including the concurrency levels that regressed, are in
+[docs/BENCHMARKS.md](https://github.com/abd-ulbasit/goqueue/blob/main/docs/BENCHMARKS.md).

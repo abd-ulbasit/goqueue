@@ -1,12 +1,12 @@
 ---
 layout: default
 title: Home
-description: GoQueue is a high-performance distributed message queue built in Go
+description: A distributed message queue in Go — append-only log, built-in coordination and leader election, hierarchical timing wheel for O(1) delayed delivery
 ---
 
 <div class="hero">
   <h1>GoQueue</h1>
-  <p class="hero-tagline">A high-performance distributed message queue built in Go.<br>Combines the best of Kafka, SQS, and RabbitMQ.</p>
+  <p class="hero-tagline">A distributed message queue in Go.<br>Append-only log, its own coordination and leader election with no ZooKeeper or etcd, hierarchical timing wheel for O(1) delayed delivery, priority lanes, cooperative incremental rebalancing.</p>
   <div class="hero-buttons">
     <a href="{{ '/docs/getting-started/quickstart' | relative_url }}" class="btn btn-primary">Get Started</a>
     <a href="https://github.com/abd-ulbasit/goqueue" class="btn btn-secondary">View on GitHub</a>
@@ -17,13 +17,17 @@ description: GoQueue is a high-performance distributed message queue built in Go
 
 ## What is GoQueue?
 
-GoQueue is a **distributed message queue** that combines the best features from multiple messaging systems:
+GoQueue is a **distributed message queue** whose feature set borrows from three
+different lineages:
 
 - **Kafka-style** log-based storage with partitions for ordering and parallelism
 - **SQS-style** visibility timeouts and dead letter queues for reliability  
 - **RabbitMQ-style** priority queues and flexible routing
 
-Built from the ground up in Go for **performance**, **simplicity**, and **cloud-native** deployments.
+It is single-cluster and it is not a Kafka replacement. Kafka's I/O path has had
+a decade of production tuning and a zero-copy fast path; no head-to-head has been
+run here and none is claimed. What has been measured, along with the harness that
+produced it, is on the [Benchmarks]({{ '/docs/operations/benchmarks' | relative_url }}) page.
 
 ---
 

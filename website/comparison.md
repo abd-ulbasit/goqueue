@@ -55,7 +55,7 @@ How GoQueue compares to other message queues and when to use each.
 |--------|-------|---------|
 | **Storage** | Append-only log | Append-only log |
 | **Language** | Scala/Java (JVM) | Go (native binary) |
-| **Coordination** | ZooKeeper or KRaft | etcd (optional) |
+| **Coordination** | ZooKeeper or KRaft | Built in — no ZooKeeper, etcd or external store |
 | **Memory Model** | Page cache | Direct I/O |
 
 #### When to Choose Kafka
@@ -119,7 +119,7 @@ producer:
 
 - ✅ **Message replay** (reprocess from any offset)
 - ✅ **Consumer groups** with partition assignment
-- ✅ **Higher throughput** for ordered streams
+- ✅ **Batch publish** amortises per-request cost across a whole batch (see [Benchmarks](docs/operations/benchmarks/); no head-to-head against RabbitMQ has been run)
 - ✅ **Simpler operations** (no Erlang)
 - ✅ **Kafka-style semantics**
 
@@ -161,7 +161,7 @@ producer:
 - ✅ **Multi-cloud/on-premise** deployment
 - ✅ **Message replay** capability
 - ✅ **Consumer groups**
-- ✅ **Higher throughput** needs
+- ✅ **No per-request API limits** (SQS caps batches at 10 messages; GoQueue's batch size is yours to choose)
 - ✅ **Cost control** at scale
 - ✅ **Priority queues**
 
@@ -326,16 +326,20 @@ Key similarities (easier migration):
 
 ## Performance Considerations
 
-| System | Throughput (msgs/sec) | Latency (p99) | Memory |
-|--------|----------------------|---------------|--------|
-| Kafka | 1M+ | 10-50ms | High (JVM) |
-| GoQueue | 500K+ | 5-20ms | Low |
-| RabbitMQ | 100K+ | 1-10ms | Medium |
-| SQS | Unlimited* | 20-100ms | N/A |
-| NATS | 10M+ | <1ms | Low |
-| Redis Streams | 500K+ | <1ms | High |
+This page used to carry a throughput/latency table covering all six systems. It
+has been removed. None of its rows were measured — including GoQueue's, which
+claimed 500K+ msgs/sec at 5-20ms p99 against a best measured figure of ~220,000
+msgs/sec with 1,000-message batches. Publishing a number 2.3× above anything
+that was ever run is worse than publishing nothing.
 
-*SQS scales automatically but has per-request limits
+What has actually been measured is on the
+[Benchmarks](docs/operations/benchmarks/) page: one harness, one cluster shape,
+stated before the numbers. The other five rows would have to be produced on the
+same hardware with the same payload, durability settings and client quality
+before they meant anything, and they have not been.
+
+The feature comparison above is a different kind of claim — it is checkable from
+each project's documentation, and it is what this page is for.
 
 ---
 

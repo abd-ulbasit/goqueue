@@ -5,11 +5,6 @@
 <h1 align="center">GoQueue</h1>
 
 <p align="center">
-  <strong>The Message Queue That Doesn't Make You Choose</strong><br>
-  <em>Kafka's durability + SQS's simplicity + Features neither has</em>
-</p>
-
-<p align="center">
   <a href="#the-problem">The Problem</a> •
   <a href="#the-solution">The Solution</a> •
   <a href="#unique-features">Unique Features</a> •
@@ -23,14 +18,20 @@
 A distributed message queue in Go: append-only log, its own coordination and
 leader election with no ZooKeeper/etcd dependency, hierarchical timing wheel for
 O(1) delayed delivery, priority lanes, and cooperative incremental rebalancing.
+Single-cluster; see [Scope](#scope) for what it is not.
 
-**If you only read three files:**
+**If you only read four files:**
 
 | File | Why |
 |---|---|
-| [`internal/broker/timer_wheel.go`](internal/broker/timer_wheel.go) | 4-level hierarchical wheel: 10ms to 7.76 days in 448 buckets where a flat wheel needs 60M. Draining a bucket has to release the wheel lock to run callbacks — and `container/list` nils an element's links on `Remove`, so a `Cancel()` in that window used to truncate the traversal and silently orphan the rest of the bucket. [Details](#2--native-delay--scheduled-messages). |
+| [`internal/broker/priority_index.go`](internal/broker/priority_index.go) | The default read path walks this index, not the log, and every lookup is a binary search — while the writer appended without keeping the slice offset-ordered. Two producers racing between offset allocation and indexing left `[…, 3, 2]`, and the search skipped 2 permanently: durably written, offset returned in a 200, unreadable forever. 74 of 500 offsets under 8 producers. [Details](#6--priority-lanes). |
+| [`internal/broker/timer_wheel.go`](internal/broker/timer_wheel.go) | 4-level hierarchical wheel: 10ms to 7.76 days in 448 buckets where a flat wheel at the same range and precision needs 67,108,864. Draining a bucket has to release the wheel lock to run callbacks — and `container/list` nils an element's links on `Remove`, so a `Cancel()` in that window used to truncate the traversal and silently orphan the rest of the bucket. [Details](#2--native-delay--scheduled-messages). |
 | [`internal/broker/cooperative_rebalance.go`](internal/broker/cooperative_rebalance.go) | Incremental partition handoff, so a consumer joining doesn't stop the group. Kafka's default is stop-the-world. |
 | [`internal/cluster/replica_manager.go`](internal/cluster/replica_manager.go) | Leader election and ISR tracking. Shutdown is the interesting part: emitters aren't joinable, so the event channel is deliberately never closed. |
+
+Three of those four are bugs whose defining property is that nothing reports
+them — no panic, no error return, no failed assertion, and in two cases the race
+detector is clean because every access really was under the right mutex.
 
 Benchmarks are in [Performance](#performance), with the harness's limits stated
 before its numbers — the sequential figure bounds a `urllib` client, not the broker.
@@ -125,8 +126,11 @@ Consumer B: (joining)    ─────────────────[P2]
                                               (< 1 second)
 ```
 
-**Design rationale:**
-> "Kafka's rebalancing is the #1 operational pain point I've seen. Even Confluent added incremental cooperative rebalancing in 2.4, but it's opt-in and complex. I built it as the default behavior."
+**Design rationale:** Kafka gained incremental cooperative rebalancing in 2.4,
+but it is opt-in — the default assignor still revokes every partition from every
+member on each membership change. Here incremental handoff is the only path, so
+there is no eager code path to fall back to and no configuration that turns
+stop-the-world back on.
 
 ---
 
@@ -166,12 +170,15 @@ client.Publish("reminders", &Message{
 
 4 levels — 256×10ms, then 64 buckets each at 2.56s / 2.73min / 2.91h — covering
 10ms to 7.76 days in 448 buckets. A flat wheel at the same precision and range
-would need 60,480,000. Timers cascade down a level at a time as their bucket's
-turn arrives, and each cascade recomputes the remaining delay, so coarse
-placement at the top self-corrects instead of accumulating error.
+would need one bucket per tick: 671,088,640 ms / 10 ms = 67,108,864. Timers
+cascade down a level at a time as their bucket's turn arrives, and each cascade
+recomputes the remaining delay, so coarse placement at the top self-corrects
+instead of accumulating error.
 
-**Design rationale:**
-> "Timer wheels are used in Linux kernel, Netty, and Kafka's purgatory. I implemented the hierarchical variant for O(1) operations across a wide time range - from milliseconds to days."
+**Design rationale:** the hierarchical variant is the standard one — Linux
+kernel timers, Netty's `HashedWheelTimer`, Kafka's purgatory — because it keeps
+insert and cancel at O(1) across a range spanning six orders of magnitude,
+which a heap does not and a flat wheel cannot afford the memory for.
 
 **The part that was subtly wrong:** draining a bucket means walking a
 `container/list` while releasing the wheel mutex to run each user callback.
@@ -186,6 +193,22 @@ resolves fire-vs-reinsert before releasing it, so no list pointer survives the
 unlock. See `drainBucketLocked` and the three regression tests in
 [timer_wheel_cascade_test.go](internal/broker/timer_wheel_cascade_test.go),
 which each fail against the previous implementation.
+
+**A second one, in the placement arithmetic:** `tick()` advances the level-0
+cursor and then drains the bucket it lands on, so the cursor always names the
+bucket that was just processed. Bucket selection was
+`(cursor + delayMs/10) % 256`, and integer division sends every delay under one
+tick to offset 0 — into that just-drained bucket, which is not revisited until
+the cursor completes a full 256-tick revolution. Anything with a sub-10ms
+remaining delay therefore fired 2.56 seconds late: 256× the wheel's advertised
+granularity, with no error and no lost message to point at it. The two paths
+that hit it in practice are startup recovery, where every past-due timer has a
+remaining delay of exactly 0, and any ordinary schedule where the persistent
+delay-index write consumed the delay before `insertTimer` read the clock. The
+offset is now clamped to at least one bucket — the wheel cannot be finer than
+its 10ms tick, so firing one tick late is correct and firing a revolution late
+is not. Tests in
+[timer_wheel_subtick_test.go](internal/broker/timer_wheel_subtick_test.go).
 
 ---
 
@@ -218,8 +241,12 @@ which each fail against the previous implementation.
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-**Design rationale:**
-> "SQS users love per-message ACKs. Kafka users love replay. I asked: why not both? The log stores everything, but a visibility index tracks what's currently being processed."
+**Design rationale:** per-message ACK and replay are usually presented as a
+choice because queue systems delete on consume and log systems only track a
+committed offset. They are not actually in tension — the log is the durable
+record and stays append-only, while a separate in-memory visibility index
+tracks which offsets are currently checked out and by whom. ACK mutates the
+index, not the log, so replay from any earlier offset stays available.
 
 ---
 
@@ -250,8 +277,13 @@ Delivery Attempts: 2
 Total Latency: 36.012s (publish to final ack)
 ```
 
-**Design rationale:**
-> "Observability is usually bolted on. I made it intrinsic. Every message carries its history, queryable without external tools."
+**Design rationale:** the broker already knows every transition a message goes
+through — it is the component performing them. Emitting that to an external
+tracer means instrumenting each call site and then correlating spans back to a
+message ID. Recording it against the message instead makes the history a
+property of the message rather than of the instrumentation, so it survives with
+no collector deployed. The cost is retention: trace records are bounded and
+expire with the message.
 
 ---
 
@@ -274,8 +306,12 @@ $ goqueue-cli consume orders --group replay-test --from-time "2025-01-14T15:00:0
 $ goqueue-cli consume orders --group audit --from-snapshot "2025-01-01" --include-deleted
 ```
 
-**Design rationale:**
-> "Event sourcing needs deterministic replay. Kafka gives you offsets, but mapping timestamps to offsets is manual. I built a time-indexed log that makes point-in-time queries natural."
+**Design rationale:** an offset is the wrong unit for the question people
+actually ask. "Replay everything after the incident started at 15:00" requires
+first translating a timestamp into an offset per partition, which is a manual
+lookup step in Kafka. Indexing the log by time as well as offset makes the
+timestamp a first-class seek key, so a point-in-time query is one request rather
+than a search followed by a request.
 
 ---
 
@@ -304,6 +340,31 @@ client.Publish("notifications", &Message{
 ```
 
 **Within same partition**, messages from the same key maintain order, but high-priority messages are delivered before low-priority ones at partition level.
+
+**The bug this cost:** the priority index is the *only* thing the default read
+path walks — `Partition.Consume` asks
+`PriorityIndex.GetNextAcrossPriorities(cursor)` for the next offset and reads
+the log at whatever it returns. Every one of those lookups starts with a binary
+search, and `AddMessage` appended without preserving offset order. Producers
+allocate their offset inside `Log.Append`, under the log's lock, and index it
+under a different lock, so two concurrent producers can allocate 2 and 3 in that
+order and index 3 first. Binary search over `[..., 3, 2]` does not fail loudly:
+it returns a plausible index, the scan runs forward from there, and offset 2 is
+skipped. The reader then advances its cursor past 3, so 2 is never revisited.
+The message was durably appended and its offset was returned to the publisher in
+a 200 response, and no consumer could ever read it — no error, no log line, no
+lost write at the storage layer. Under 8 concurrent producers and 500 messages,
+74 offsets were unreachable.
+
+It had been seen and misdiagnosed. An integration test asserting 100 published
+messages were readable failed intermittently at 99 or 94, and carried the
+comment *"the priority index may lag behind log appends under concurrency, so we
+poll until all messages are visible"* with the poll deadline raised to 10
+seconds. The index does not lag. Waiting longer cannot recover an entry that no
+search will ever reach, which is why the deadline had to keep going up. The fix
+keeps the slice sorted on insert — O(1) append in the ordinary in-order case, a
+tail shift otherwise. Tests in
+[priority_index_ordering_test.go](internal/broker/priority_index_ordering_test.go).
 
 ---
 
