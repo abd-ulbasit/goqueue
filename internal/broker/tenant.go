@@ -425,6 +425,10 @@ type TenantManager struct {
 	// stopCh signals background goroutines to stop
 	stopCh chan struct{}
 
+	// stopOnce guards close(stopCh) against a double-close panic, matching
+	// OffsetManager, GroupCoordinator and CooperativeRebalancer.
+	stopOnce sync.Once
+
 	// wg tracks background goroutines
 	wg sync.WaitGroup
 }
@@ -506,7 +510,9 @@ func (tm *TenantManager) ensureSystemTenant() error {
 
 // Close shuts down the tenant manager.
 func (tm *TenantManager) Close() error {
-	close(tm.stopCh)
+	tm.stopOnce.Do(func() {
+		close(tm.stopCh)
+	})
 	tm.wg.Wait()
 
 	// Final usage persistence

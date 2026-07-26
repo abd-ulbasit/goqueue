@@ -168,19 +168,38 @@ func TestTokenBucket_Allow(t *testing.T) {
 }
 
 func TestTokenBucket_Refill(t *testing.T) {
-	// Create bucket with 100 tokens/sec
-	bucket := NewTokenBucket(100, 100)
+	const rate = 100.0 // tokens per second
 
-	// Consume all tokens
-	bucket.Allow(100)
+	bucket := NewTokenBucket(rate, rate)
+	if !bucket.Allow(rate) {
+		t.Fatal("draining a full bucket should succeed")
+	}
+	drainedAt := time.Now()
 
-	// Wait for some refill
+	// time.Sleep guarantees a lower bound on elapsed time, never an upper one.
+	// Asserting a fixed token count against the *requested* 50ms made this
+	// test fail whenever the machine was busy - a full `go test -race ./...`
+	// run overshot to ~70ms and produced 7.03 tokens against a hard ceiling of
+	// 7. That is the scheduler being measured, not the refill arithmetic.
+	//
+	// Bracket the observation instead: refill() is tokens += elapsed * rate,
+	// so check the token count against the interval that actually elapsed.
 	time.Sleep(50 * time.Millisecond)
 
-	// Should have ~5 tokens (100/sec * 0.05sec)
+	lower := time.Since(drainedAt)
 	tokens := bucket.AvailableTokens()
-	if tokens < 3 || tokens > 7 {
-		t.Errorf("After 50ms refill, tokens = %v, want ~5", tokens)
+	upper := time.Since(drainedAt)
+
+	minWant := lower.Seconds() * rate
+	maxWant := upper.Seconds() * rate
+	if maxWant > rate {
+		maxWant = rate // bucket is capped at capacity
+	}
+
+	const eps = 0.5 // float rounding slack in the refill arithmetic
+	if tokens < minWant-eps || tokens > maxWant+eps {
+		t.Errorf("after %v-%v of refill at %v tokens/sec, tokens = %v, want %v..%v",
+			lower, upper, rate, tokens, minWant, maxWant)
 	}
 }
 

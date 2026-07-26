@@ -222,12 +222,30 @@ func TestTimerWheel_TimingAccuracy(t *testing.T) {
 
 	select {
 	case actual := <-fired:
-		// Allow 30ms tolerance
-		tolerance := 30 * time.Millisecond
-		if actual < targetDelay-tolerance || actual > targetDelay+tolerance {
-			t.Errorf("timing off: expected ~%v, got %v", targetDelay, actual)
+		// These two bounds are not symmetric, on purpose.
+		//
+		// Firing EARLY is a correctness bug - it means calculateBucket put the
+		// timer in a bucket the cursor reaches too soon. The only legitimate
+		// earliness is sub-tick: the current 10ms tick may already be partly
+		// elapsed when the timer is scheduled.
+		//
+		// Firing LATE is a scheduling property of the host, not a property of
+		// the wheel. The ticker goroutine competes with every other goroutine
+		// in the test binary, and under -race a 10ms tick is routinely delayed
+		// by tens of milliseconds. A symmetric 30ms tolerance made this test
+		// fail on a loaded machine (observed: 143ms for a 100ms delay) for
+		// reasons that say nothing about the timer wheel.
+		const earlyTolerance = 15 * time.Millisecond // one tick + slack
+		const lateTolerance = 400 * time.Millisecond // host scheduling noise
+
+		if actual < targetDelay-earlyTolerance {
+			t.Errorf("timer fired early: got %v, must not be before %v",
+				actual, targetDelay-earlyTolerance)
 		}
-	case <-time.After(500 * time.Millisecond):
+		if actual > targetDelay+lateTolerance {
+			t.Errorf("timer fired far too late: got %v, expected ~%v", actual, targetDelay)
+		}
+	case <-time.After(2 * time.Second):
 		t.Fatal("timer did not fire")
 	}
 

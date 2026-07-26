@@ -222,6 +222,10 @@ type WebhookManager struct {
 	endpoints []WebhookConfig
 	stopCh    chan struct{}
 	wg        sync.WaitGroup
+
+	// stopOnce guards close(stopCh) against a double-close panic, matching
+	// OffsetManager, GroupCoordinator and CooperativeRebalancer.
+	stopOnce sync.Once
 }
 
 // NewWebhookManager creates a new webhook manager.
@@ -285,7 +289,9 @@ func (wm *WebhookManager) Stop() {
 		return
 	}
 
-	close(wm.stopCh)
+	wm.stopOnce.Do(func() {
+		close(wm.stopCh)
+	})
 	wm.wg.Wait()
 	wm.logger.Info("webhook manager stopped")
 }
