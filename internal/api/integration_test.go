@@ -387,6 +387,25 @@ func TestConcurrentPublishers(t *testing.T) {
 					errors <- fmt.Errorf("publisher %d failed: %d", publisherID, rec.Code)
 					return
 				}
+
+				// The publish endpoint reports per-message outcomes in the body
+				// and still answers 200 for a batch where some messages failed.
+				// Checking only rec.Code would count a failed write as a
+				// success and then blame the shortfall on the read side.
+				var body struct {
+					Results []PublishResult `json:"results"`
+				}
+				if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+					errors <- fmt.Errorf("publisher %d: decode response: %w", publisherID, err)
+					return
+				}
+				for _, res := range body.Results {
+					if res.Error != "" {
+						errors <- fmt.Errorf("publisher %d msg %d: HTTP 200 but result error: %s",
+							publisherID, j, res.Error)
+						return
+					}
+				}
 			}
 		}(i)
 	}
@@ -399,10 +418,16 @@ func TestConcurrentPublishers(t *testing.T) {
 		t.Error(err)
 	}
 
-	// Verify total message count using retry loop instead of fixed sleep.
-	// The priority index may lag behind log appends under concurrency,
-	// so we poll until all messages are visible (or timeout).
-	// NOTE: Increased timeout to 10s for slower CI environments.
+	// Verify total message count. The retry loop absorbs slow hosts; it is not
+	// a workaround for messages that never arrive.
+	//
+	// This assertion used to fail at 99/100 or 94/100 and the shortfall was
+	// read as "the priority index lags behind log appends under concurrency",
+	// which suggested waiting longer would fix it. It did not: the index does
+	// not lag, it silently dropped entries. PriorityIndex.AddMessage appended
+	// without preserving offset order while every read path binary-searches the
+	// slice, so an offset indexed out of order was skipped forever. Fixed in
+	// insertEntryLocked; see internal/broker/priority_index_ordering_test.go.
 	expected := numPublishers * messagesPerPublisher
 	var totalMessages int
 	deadline := time.Now().Add(10 * time.Second)

@@ -148,7 +148,7 @@ func NewPriorityIndex() *PriorityIndex {
 // AddMessage adds a message to the priority index.
 // Called when a message is produced to the partition.
 //
-// COMPLEXITY: O(1) amortized (append to slice)
+// COMPLEXITY: O(1) amortized in the ordinary case. See insertEntryLocked.
 func (pi *PriorityIndex) AddMessage(msg *storage.Message) {
 	pi.mu.Lock()
 	defer pi.mu.Unlock()
@@ -158,15 +158,11 @@ func (pi *PriorityIndex) AddMessage(msg *storage.Message) {
 		priority = storage.PriorityNormal
 	}
 
-	entry := PriorityIndexEntry{
+	pi.insertEntryLocked(priority, PriorityIndexEntry{
 		Offset:    msg.Offset,
 		Timestamp: msg.Timestamp,
 		Size:      msg.Size(),
-	}
-
-	pi.offsets[priority] = append(pi.offsets[priority], entry)
-	pi.stats.MessageCount[priority]++
-	pi.stats.ByteCount[priority] += int64(entry.Size)
+	})
 }
 
 // AddEntry adds a pre-built entry to the index.
@@ -179,7 +175,46 @@ func (pi *PriorityIndex) AddEntry(priority storage.Priority, entry PriorityIndex
 		priority = storage.PriorityNormal
 	}
 
-	pi.offsets[priority] = append(pi.offsets[priority], entry)
+	pi.insertEntryLocked(priority, entry)
+}
+
+// insertEntryLocked adds entry to a priority's slice while preserving ascending
+// offset order, and updates stats. Caller must hold pi.mu.
+//
+// WHY ORDER MATTERS:
+// Every read path (GetNextOffset, GetNextN, GetNextAcrossPriorities) locates
+// its starting position with searchOffsetInclusive, a binary search. Binary
+// search over an unsorted slice does not return a wrong answer loudly - it
+// returns a plausible index and the scan proceeds from there, so any entry
+// sitting before that index is skipped and never revisited: the reader
+// advances its cursor past that offset on the next call.
+//
+// WHY IT CAN ARRIVE OUT OF ORDER:
+// Producers allocate an offset inside Log.Append, under the log's lock, and
+// then index it here, under pi.mu. Those are two separate critical sections,
+// so two concurrent producers can allocate 2 and 3 in that order and index 3
+// before 2. A plain append then leaves [..., 3, 2]. The message at offset 2
+// was durably written and its offset was returned to the client, but it became
+// permanently invisible to consumers - no error, no log line, no lost write at
+// the storage layer.
+//
+// COMPLEXITY: O(1) for the in-order case, which is the overwhelming majority
+// (a single producer, and any interleaving that happens to arrive in order).
+// The out-of-order case costs one binary search plus a memmove of the tail,
+// and the tail is short because the race window is a few instructions wide.
+func (pi *PriorityIndex) insertEntryLocked(priority storage.Priority, entry PriorityIndexEntry) {
+	entries := pi.offsets[priority]
+
+	if len(entries) == 0 || entries[len(entries)-1].Offset <= entry.Offset {
+		pi.offsets[priority] = append(entries, entry)
+	} else {
+		idx := pi.searchOffsetInclusive(entries, entry.Offset)
+		entries = append(entries, PriorityIndexEntry{})
+		copy(entries[idx+1:], entries[idx:])
+		entries[idx] = entry
+		pi.offsets[priority] = entries
+	}
+
 	pi.stats.MessageCount[priority]++
 	pi.stats.ByteCount[priority] += int64(entry.Size)
 }
