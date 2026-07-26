@@ -249,13 +249,19 @@ func TestVisibilityTracker_ExtendVisibility(t *testing.T) {
 	vt := NewVisibilityTracker(config, onExpired)
 	defer vt.Close()
 
-	msg := createTestInFlightMessage("test-topic", 0, 42, 30*time.Millisecond)
+	// The original timeout has to be long enough that a 20ms sleep cannot
+	// overshoot past it. ExtendVisibility rejects an already-expired handle
+	// with ErrReceiptExpired, so a 30ms original made this test fail whenever
+	// the host took 10ms longer than asked to wake the goroutine back up.
+	const originalTimeout = 300 * time.Millisecond
+	const extension = 1500 * time.Millisecond
+
+	msg := createTestInFlightMessage("test-topic", 0, 42, originalTimeout)
 
 	vt.Track(msg)
 
-	// Wait 20ms (before timeout), then extend by 50ms
 	time.Sleep(20 * time.Millisecond)
-	newDeadline, err := vt.ExtendVisibility(msg.ReceiptHandle, 50*time.Millisecond)
+	newDeadline, err := vt.ExtendVisibility(msg.ReceiptHandle, extension)
 	if err != nil {
 		t.Fatalf("ExtendVisibility() failed: %v", err)
 	}
@@ -265,20 +271,21 @@ func TestVisibilityTracker_ExtendVisibility(t *testing.T) {
 		t.Error("new deadline should be in the future")
 	}
 
-	// Wait until original timeout would have expired
-	time.Sleep(20 * time.Millisecond)
+	// Safety property with a real deadline: past the ORIGINAL timeout but far
+	// short of the extended one, nothing may have expired. Overshoot has ~1.1s
+	// of slack before it could cross the extended deadline and invalidate the
+	// check.
+	time.Sleep(400 * time.Millisecond)
 
-	// Should still be tracked (not expired yet)
 	if atomic.LoadInt64(&expiredCount) != 0 {
-		t.Error("message should not have expired yet after extension")
+		t.Fatalf("message expired at the original deadline despite being extended (expiredCount = %d)",
+			atomic.LoadInt64(&expiredCount))
 	}
 
-	// Wait for extended timeout to expire
-	time.Sleep(60 * time.Millisecond)
-
-	if atomic.LoadInt64(&expiredCount) != 1 {
-		t.Errorf("expiredCount = %d, want 1", atomic.LoadInt64(&expiredCount))
-	}
+	// Liveness property: the extended deadline does eventually fire.
+	mustEventually(t, 5*time.Second, "extended message should expire at the new deadline", func() bool {
+		return atomic.LoadInt64(&expiredCount) == 1
+	})
 }
 
 // =============================================================================
@@ -310,8 +317,11 @@ func TestVisibilityTracker_HeapOrdering(t *testing.T) {
 	vt.Track(createTestInFlightMessage("topic", 0, 2, 60*time.Millisecond))
 	vt.Track(createTestInFlightMessage("topic", 0, 3, 20*time.Millisecond))
 
-	// Wait for all to expire
-	time.Sleep(150 * time.Millisecond)
+	mustEventually(t, 5*time.Second, "expected 3 expired messages", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(expiredOffsets) == 3
+	})
 
 	mu.Lock()
 	defer mu.Unlock()

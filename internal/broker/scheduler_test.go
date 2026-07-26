@@ -107,12 +107,9 @@ func TestScheduler_SchedulePastTime(t *testing.T) {
 		t.Fatalf("ScheduleAt with past time failed: %v", err)
 	}
 
-	// Should deliver almost immediately
-	time.Sleep(50 * time.Millisecond)
-
-	if !delivered.Load() {
-		t.Error("past time message should be delivered immediately")
-	}
+	// Liveness assertion: poll rather than sleeping a fixed window, so a
+	// loaded host makes this slower instead of red.
+	mustEventually(t, 2*time.Second, "past time message should be delivered immediately", delivered.Load)
 }
 
 func TestScheduler_ScheduleZeroDelay(t *testing.T) {
@@ -132,11 +129,7 @@ func TestScheduler_ScheduleZeroDelay(t *testing.T) {
 		t.Fatalf("Schedule with zero delay failed: %v", err)
 	}
 
-	time.Sleep(50 * time.Millisecond)
-
-	if !delivered.Load() {
-		t.Error("zero delay message should be delivered immediately")
-	}
+	mustEventually(t, 2*time.Second, "zero delay message should be delivered immediately", delivered.Load)
 }
 
 // =============================================================================
@@ -225,12 +218,11 @@ func TestScheduler_DeliveryCallback(t *testing.T) {
 
 	scheduler.Schedule("my-topic", 5, 42, 20*time.Millisecond)
 
-	// Wait for delivery
-	time.Sleep(50 * time.Millisecond)
-
-	if !delivered.Load() {
-		t.Fatal("callback should have been called")
-	}
+	// The 20ms delay is a lower bound on when the wheel fires, and the tick
+	// interval is 10ms, so the earliest possible delivery is ~30ms. Poll to a
+	// generous deadline instead of asserting after a fixed 50ms sleep, which
+	// only held when the host scheduled this goroutine back promptly.
+	mustEventually(t, 2*time.Second, "callback should have been called", delivered.Load)
 
 	if deliveredTopic != "my-topic" {
 		t.Errorf("expected topic my-topic, got %s", deliveredTopic)
@@ -261,11 +253,15 @@ func TestScheduler_MultipleCallbacks(t *testing.T) {
 		scheduler.Schedule("test-topic", 0, i, 20*time.Millisecond)
 	}
 
-	// Wait for all
-	time.Sleep(100 * time.Millisecond)
+	mustEventually(t, 2*time.Second, "expected 10 deliveries", func() bool {
+		return deliveredCount.Load() == 10
+	})
 
-	if deliveredCount.Load() != 10 {
-		t.Errorf("expected 10 deliveries, got %d", deliveredCount.Load())
+	// And no message is delivered twice. Overshooting this sleep only makes
+	// the duplicate check stronger, so it is safe as a bare sleep.
+	time.Sleep(50 * time.Millisecond)
+	if got := deliveredCount.Load(); got != 10 {
+		t.Errorf("expected exactly 10 deliveries, got %d", got)
 	}
 }
 
@@ -519,12 +515,7 @@ func TestScheduler_RecoveryPastDue(t *testing.T) {
 	// Recover
 	s2.RecoverTopic("test-topic")
 
-	// Should deliver immediately since past due
-	time.Sleep(50 * time.Millisecond)
-
-	if !delivered.Load() {
-		t.Error("past-due message should deliver immediately after recovery")
-	}
+	mustEventually(t, 2*time.Second, "past-due message should deliver immediately after recovery", delivered.Load)
 }
 
 // =============================================================================
