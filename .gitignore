@@ -5,15 +5,20 @@ data/*
 **/build/**
 
 # Terraform
+# .terraform.lock.hcl is deliberately NOT ignored: it pins provider versions
+# and hashes, so it belongs in version control the same way go.sum does.
 **/.terraform/
 *.tfstate
 *.tfstate.*
-.terraform.lock.hcl
 
-# Compiled binaries
+# Compiled binaries and packaged artifacts
 /goqueue
 /goqueue-amd64
 /bin/
+*.tgz
+
+# Editor/tooling leftovers
+*.bak
 
 # OS junk
 .DS_Store
@@ -25,3 +30,10 @@ PROGRESS.md
 .github/copilot-instructions.md
 .github/instructions/
 .github/prompts/
+
+# Operational working notes, kept local on purpose. AUDIT_REPORT.md is a
+# point-in-time EKS cluster audit rather than project documentation, and
+# comprehensive-audit.sh is written against it. Listed explicitly so a
+# `git add -A` cannot sweep either into the public repo.
+AUDIT_REPORT.md
+deploy/testing/comprehensive-audit.sh
