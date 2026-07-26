@@ -90,7 +90,7 @@ A durable, distributed message queue with consumer groups, replication, and part
 
 **Goal:** Build the append-only log and basic messaging
 
-**Learning Focus:**
+**Design concepts:**
 - Append-only log design (why Kafka uses it)
 - File I/O in Go (os.File, buffered I/O)
 - Binary encoding for messages
@@ -152,7 +152,7 @@ goqueue/
 
 **Goal:** Multi-partition topics with proper producer API
 
-**Learning Focus:**
+**Design concepts:**
 - Partitioning strategies (hash, round-robin)
 - Why partitions enable parallelism
 - Producer batching for throughput
@@ -241,7 +241,7 @@ POST /v1/topics/orders/publish/batch
 
 **Goal:** Consumer groups with reliable offset tracking
 
-**Learning Focus:**
+**Design concepts:**
 - Consumer group coordination
 - Partition assignment strategies
 - Offset commit patterns
@@ -345,7 +345,7 @@ Consumer A leaves → Rebalance!
 
 **Goal:** At-least-once delivery guarantees
 
-**Learning Focus:**
+**Design concepts:**
 - Delivery semantics (at-most-once, at-least-once, exactly-once)
 - Dead letter queue patterns
 - Backpressure strategies
@@ -444,7 +444,7 @@ topics:
 
 **Goal:** Multi-node deployment with fault tolerance
 
-**Learning Focus:**
+**Design concepts:**
 - Leader election (simplified, not full Raft)
 - Log replication strategies
 - Consistency vs availability trade-offs
@@ -546,7 +546,7 @@ replication:
 
 **Goal:** Production-ready with full API, CLI, metrics, and K8s deployment
 
-**Learning Focus:**
+**Design concepts:**
 - gRPC API design
 - CLI tool patterns in Go (cobra)
 - Kubernetes StatefulSet for stateful apps
@@ -743,7 +743,7 @@ helm install goqueue ./deployments/helm/goqueue --set replicas=3
 
 ---
 
-## Learning Resources
+## References
 
 ### Storage & Logs
 - [The Log: What every software engineer should know](https://engineering.linkedin.com/distributed-systems/log-what-every-software-engineer-should-know-about-real-time-datas-unifying) - Jay Kreps (Kafka creator)

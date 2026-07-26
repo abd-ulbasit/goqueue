@@ -8,6 +8,28 @@
 - **GoQueue Version**: v0.4.1
 - **Test Date**: February 2026
 
+## Harness
+
+Everything below comes from `deploy/kubernetes/manual/publish-benchmark.yaml`,
+which runs as a Job inside the cluster. Read the harness before reading the
+numbers — several of its properties are load-bearing:
+
+- **Client**: Python 3.12 `urllib.request`. **No connection pooling** — each
+  publish opens a new TCP connection.
+- **Client resources**: 1 vCPU limit, 512 MiB. The generator is not
+  over-provisioned relative to the broker.
+- **Transport**: HTTP API on port 8080 (not gRPC).
+- **Payload**: ~10 bytes (`"seq-{i}"` and similar). Not representative of real
+  message sizes; it isolates per-request overhead rather than serialization or
+  disk bandwidth.
+- **Topic**: 6 partitions, freshly created per run.
+- **Scope**: publish path only. Consume, replication lag and end-to-end latency
+  are not measured here.
+
+Consequence: the low-concurrency rows are bounded by the client, not the
+broker. They are useful as a per-request cost model and misleading as a
+capacity ceiling.
+
 ## Publish Throughput
 
 All tests run from within the EKS cluster to eliminate network latency effects.
@@ -87,29 +109,30 @@ When testing from within the cluster:
 
 ## Comparison with Other Systems
 
-| System | Sequential | Batch (100) | Notes |
-|--------|-----------|-------------|-------|
-| **GoQueue** | ~320/s | ~30,000/s | 3-node EKS cluster |
-| Kafka | ~100K/s | ~1M/s | Requires ZooKeeper, JVM |
-| RabbitMQ | ~10K/s | ~50K/s | Erlang-based |
-| SQS | ~300/s | ~3,000/s | AWS managed, 10 msg batch limit |
-| Redis Streams | ~100K/s | ~500K/s | In-memory only |
+Removed. An earlier revision of this document carried a table putting these
+numbers next to published figures for Kafka, RabbitMQ, SQS and Redis Streams.
+That table was not a measurement — the other rows were quoted from memory, not
+produced on this hardware, with this harness, at this payload size, under this
+durability configuration. Comparing a `urllib`-bound HTTP benchmark against
+someone else's tuned producer benchmark tells you about the two harnesses, not
+the two systems.
 
-GoQueue provides excellent throughput for its lightweight footprint:
-- Single binary deployment
-- No JVM or external dependencies
-- Built-in HTTP API
+If a comparison is needed, it has to be run: same instance types, same payload,
+same acks/fsync settings, same client library quality on both sides. Until that
+exists, the honest statement is that GoQueue's cost model is documented above
+and nothing here is a claim about anyone else's.
 
-## Hardware Recommendations
+## Sizing
 
-Based on these benchmarks:
+Only one configuration has been measured: 3 nodes of c5.xlarge, reaching
+~220,000 msgs/sec with 1,000-message batches under the harness described above.
 
-| Workload | Cluster Size | Instance Type | Expected Throughput |
-|----------|-------------|---------------|---------------------|
-| Development | 1 node | t3.small | ~10K msgs/sec |
-| Production (low) | 3 nodes | t3.medium | ~50K msgs/sec |
-| Production (medium) | 3 nodes | c5.xlarge | ~200K msgs/sec |
-| Production (high) | 5+ nodes | c5.2xlarge | ~500K+ msgs/sec |
+Everything else is untested. This document previously listed expected
+throughput for t3.small, t3.medium and 5+ node c5.2xlarge clusters; those
+figures were extrapolations presented as results and have been removed rather
+than restated as guesses. Scaling is not linear in node count for a partitioned
+log — placement, replication factor and partition count all matter — so
+extrapolating from a single data point would be inventing numbers.
 
 ## Running the Benchmark
 

@@ -20,6 +20,23 @@
 
 ---
 
+A distributed message queue in Go: append-only log, its own coordination and
+leader election with no ZooKeeper/etcd dependency, hierarchical timing wheel for
+O(1) delayed delivery, priority lanes, and cooperative incremental rebalancing.
+
+**If you only read three files:**
+
+| File | Why |
+|---|---|
+| [`internal/broker/timer_wheel.go`](internal/broker/timer_wheel.go) | 4-level hierarchical wheel: 10ms to 7.76 days in 448 buckets where a flat wheel needs 60M. Draining a bucket has to release the wheel lock to run callbacks — and `container/list` nils an element's links on `Remove`, so a `Cancel()` in that window used to truncate the traversal and silently orphan the rest of the bucket. [Details](#2--native-delay--scheduled-messages). |
+| [`internal/broker/cooperative_rebalance.go`](internal/broker/cooperative_rebalance.go) | Incremental partition handoff, so a consumer joining doesn't stop the group. Kafka's default is stop-the-world. |
+| [`internal/cluster/replica_manager.go`](internal/cluster/replica_manager.go) | Leader election and ISR tracking. Shutdown is the interesting part: emitters aren't joinable, so the event channel is deliberately never closed. |
+
+Benchmarks are in [Performance](#performance), with the harness's limits stated
+before its numbers — the sequential figure bounds a `urllib` client, not the broker.
+
+---
+
 ## The Problem
 
 Every distributed message queue forces painful trade-offs:
@@ -108,7 +125,7 @@ Consumer B: (joining)    ─────────────────[P2]
                                               (< 1 second)
 ```
 
-**Interview Talking Point:**
+**Design rationale:**
 > "Kafka's rebalancing is the #1 operational pain point I've seen. Even Confluent added incremental cooperative rebalancing in 2.4, but it's opt-in and complex. I built it as the default behavior."
 
 ---
@@ -147,8 +164,28 @@ client.Publish("reminders", &Message{
 
 **Implementation:** Hierarchical timing wheel (O(1) insert/delete) + persistent delay index
 
-**Interview Talking Point:**
+4 levels — 256×10ms, then 64 buckets each at 2.56s / 2.73min / 2.91h — covering
+10ms to 7.76 days in 448 buckets. A flat wheel at the same precision and range
+would need 60,480,000. Timers cascade down a level at a time as their bucket's
+turn arrives, and each cascade recomputes the remaining delay, so coarse
+placement at the top self-corrects instead of accumulating error.
+
+**Design rationale:**
 > "Timer wheels are used in Linux kernel, Netty, and Kafka's purgatory. I implemented the hierarchical variant for O(1) operations across a wide time range - from milliseconds to days."
+
+**The part that was subtly wrong:** draining a bucket means walking a
+`container/list` while releasing the wheel mutex to run each user callback.
+`list.Remove` nils out an element's `next`/`prev`/`list` fields, and
+`Element.Next()` returns nil once `list` is nil — so any element pointer held
+across that unlock is a handle into memory another goroutine may unlink. A
+`Cancel()` landing in the callback window on the *next* timer truncated the
+traversal: the loop saw nil and stopped, silently abandoning every remaining
+timer in the bucket until that level's cursor came around again — up to 7.76
+days at level 3. The fix drains the bucket into a slice under the lock and
+resolves fire-vs-reinsert before releasing it, so no list pointer survives the
+unlock. See `drainBucketLocked` and the three regression tests in
+[timer_wheel_cascade_test.go](internal/broker/timer_wheel_cascade_test.go),
+which each fail against the previous implementation.
 
 ---
 
@@ -181,7 +218,7 @@ client.Publish("reminders", &Message{
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-**Interview Talking Point:**
+**Design rationale:**
 > "SQS users love per-message ACKs. Kafka users love replay. I asked: why not both? The log stores everything, but a visibility index tracks what's currently being processed."
 
 ---
@@ -213,7 +250,7 @@ Delivery Attempts: 2
 Total Latency: 36.012s (publish to final ack)
 ```
 
-**Interview Talking Point:**
+**Design rationale:**
 > "Observability is usually bolted on. I made it intrinsic. Every message carries its history, queryable without external tools."
 
 ---
@@ -237,7 +274,7 @@ $ goqueue-cli consume orders --group replay-test --from-time "2025-01-14T15:00:0
 $ goqueue-cli consume orders --group audit --from-snapshot "2025-01-01" --include-deleted
 ```
 
-**Interview Talking Point:**
+**Design rationale:**
 > "Event sourcing needs deterministic replay. Kafka gives you offsets, but mapping timestamps to offsets is manual. I built a time-indexed log that makes point-in-time queries natural."
 
 ---
@@ -292,55 +329,54 @@ client.Publish("notifications", &Message{
 
 ## Performance
 
-### Cluster Benchmark Results
+### What was measured
 
-Benchmarks run from **within** a 3-node EKS cluster (c5.xlarge instances, 4 vCPU, 8GB RAM each):
+3-node EKS cluster, c5.xlarge per node (4 vCPU, 8 GB), ap-south-1, GoQueue
+v0.4.1, February 2026. Load generator is a Python 3.12 `urllib` client running
+as an in-cluster Job (1 vCPU limit), publishing ~10-byte payloads over the HTTP
+API to a 6-partition topic. Publish path only — consume is not included.
 
-| Mode | Configuration | Throughput |
-|------|--------------|------------|
-| **Sequential** | Single message at a time | **~320 msgs/sec** |
-| **Concurrent** | 8 parallel threads | **~1,300 msgs/sec** |
-| **Batch** | 100 msgs/batch | **~30,000 msgs/sec** |
-| **Large Batch** | 1000 msgs/batch | **~220,000 msgs/sec** |
+| Producer mode | In flight | Throughput | Per-message cost |
+|---|---|---|---|
+| Sequential | 1 request | ~320 msgs/sec | ~3.1 ms |
+| Concurrent | 8 threads | ~1,300 msgs/sec | ~770 µs |
+| Batch | 100 msgs/request | ~30,000 msgs/sec | ~33 µs |
+| Batch | 1,000 msgs/request | ~220,000 msgs/sec | ~4.5 µs |
 
-### Scaling with Batch Size
+### What the numbers actually bound
 
-```
-Batch Size    Throughput       Improvement
-─────────────────────────────────────────
-     1        ~320/s           baseline
-    10        ~3,000/s         ~10x
-    50        ~15,000/s        ~50x
-   100        ~30,000/s        ~100x
-   200        ~60,000/s        ~200x
-   500        ~130,000/s       ~400x
-  1000        ~220,000/s       ~700x
-```
+**The sequential row measures the harness, not the broker.** Python's `urllib`
+does no connection pooling, so every message pays a fresh TCP handshake plus
+HTTP parse, from a client pod capped at 1 vCPU. ~3.1 ms per round trip is what
+that costs. It is a latency figure with a client-side bottleneck in it, and
+reading it as "the broker tops out at 320 msgs/sec" is wrong.
 
-**Key Insight**: Batch publishing amortizes per-request overhead, enabling massive throughput improvements.
+**Concurrency hits a wall at 8 connections.** 4 threads → ~1,140/s, 8 → ~1,293/s,
+16 → ~1,031/s, 32 → ~1,035/s. Adding connections past 8 makes it *worse*. That
+shape points at per-request handling as the contended resource, which is
+consistent with batching being the thing that fixes it.
 
-### Remote Client Benchmarks
+**Batching is the only lever that moves the number by orders of magnitude.**
+1,000-message batches reach ~220,000 msgs/sec — roughly 700x sequential — with
+no change to the broker, only to how many messages share one request. The
+per-message cost falls from ~3.1 ms to ~4.5 µs, which is the per-request
+overhead being amortised away and nothing else.
 
-Benchmarks from remote client (network latency ~150ms RTT to ap-south-1):
+Full runs, including the concurrency levels that regressed, are in
+[docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
-| Test | Go Client | Python Client | TypeScript Client |
-|------|-----------|---------------|-------------------|
-| **Single message** | 6.3 msg/s | - | - |
-| **Batch 100 × 1KB** | 112 msg/s | 331 msg/s | 284 msg/s |
-| **8 Concurrent** | 152 msg/s | 567 msg/s | 571 msg/s |
+### Scope
 
-> **Note:** Remote throughput is network-bound. Deploy producers close to GoQueue nodes for best performance.
+This is a single-cluster implementation built to work through the mechanisms it
+contains — the append-only log, the coordination and leader-election protocol,
+the hierarchical timing wheel, cooperative rebalancing. It is not a Kafka
+replacement and these numbers are not a claim against one. Kafka's I/O path has
+had a decade of production tuning and a zero-copy fast path; a head-to-head
+table would be measuring that history, not a design difference, and the two
+numbers would not mean the same thing.
 
-### Performance Comparison
-
-| System | Sequential | Batch (100) | Notes |
-|--------|-----------|-------------|-------|
-| **GoQueue** | ~320/s | ~30,000/s | Single binary, no dependencies |
-| Kafka | ~100K/s | ~1M/s | Requires ZooKeeper/KRaft, JVM |
-| RabbitMQ | ~10K/s | ~50K/s | Erlang-based |
-| SQS | ~300/s | ~3,000/s | AWS managed, 10 msg batch limit |
-
-For detailed benchmarks, see [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+The measurements are here so the cost model is legible: where the time goes,
+which lever moves it, and where the harness stops being the thing under test.
 
 ---
 
@@ -538,14 +574,22 @@ See [ROADMAP.md](ROADMAP.md) for detailed milestone breakdown.
 
 ## Why Build This?
 
-This project exists to deeply understand distributed systems by building one. But it's not just a learning exercise—it solves real frustrations:
+Every feature here started as a specific operational complaint, not a checklist item:
 
-1. **Kafka's operational pain** inspired zero-dependency clustering and cooperative rebalancing
-2. **SQS's limitations** inspired the hybrid ACK model with replay capability  
-3. **Missing delay support everywhere** inspired native timer wheel integration
-4. **Debugging nightmares** inspired built-in message tracing
+1. **Kafka's operational pain** drove zero-dependency clustering and cooperative rebalancing
+2. **SQS's limitations** drove the hybrid ACK model with replay capability
+3. **Missing delay support everywhere** drove native timer wheel integration
+4. **Debugging nightmares** drove built-in message tracing
 
-Every feature choice came from real pain points, not feature checklists.
+The parts worth reading are the ones where the naive implementation was wrong
+and the code says why: the timer wheel's bucket-drain lock discipline
+([internal/broker/timer_wheel.go](internal/broker/timer_wheel.go)), the
+cooperative rebalance protocol
+([internal/broker/cooperative_rebalance.go](internal/broker/cooperative_rebalance.go)),
+and the replica manager's shutdown path
+([internal/cluster/replica_manager.go](internal/cluster/replica_manager.go)),
+where closing the event channel on Stop was a send-on-closed-channel panic
+waiting for the right interleaving.
 
 ---
 
@@ -556,5 +600,5 @@ MIT License - see [LICENSE](LICENSE) for details.
 ---
 
 <p align="center">
-  <em>Building queues to understand queues.</em>
+  <em>Append-only log, own coordination layer, no external dependencies.</em>
 </p>
