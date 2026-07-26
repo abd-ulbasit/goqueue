@@ -124,13 +124,13 @@ module "goqueue_aws" {
   # │                                                                         │
   # │ Region: ap-south-1 (Mumbai) - low latency for India-based testing      │
   # │                                                                         │
-  # │ K8S VERSION: 1.31 (Standard Support)                                    │
+  # │ K8S VERSION: 1.33 (Standard Support)                                    │
   # │   - 1.29 is in Extended Support (6x cost!)                              │
-  # │   - 1.31 is current stable with standard support pricing                │
+  # │   - 1.33 is current stable with standard support pricing                │
   # └─────────────────────────────────────────────────────────────────────────┘
   region          = "ap-south-1"
   cluster_name    = "goqueue-dev"
-  cluster_version = "1.31"
+  cluster_version = "1.33"
   environment     = "dev"
 
   # ┌─────────────────────────────────────────────────────────────────────────┐

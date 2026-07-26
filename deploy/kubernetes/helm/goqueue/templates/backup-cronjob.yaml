@@ -90,7 +90,7 @@ spec:
                 {{- if .Values.backup.include.schemas }}
                 - --schemas
                 {{- end }}
-                {{- if .Values.backup.objectStorage.enabled }}
+                {{- if and .Values.backup.objectStorage .Values.backup.objectStorage.enabled }}
                 - --upload
                 - --bucket={{ .Values.backup.objectStorage.bucket }}
                 - --prefix={{ .Values.backup.objectStorage.prefix | default "backups" }}
@@ -103,7 +103,7 @@ spec:
                     secretKeyRef:
                       name: {{ include "goqueue.fullname" . }}-api-keys
                       key: root-api-key
-                {{- if .Values.backup.objectStorage.enabled }}
+                {{- if and .Values.backup.objectStorage .Values.backup.objectStorage.enabled }}
                 {{- if .Values.backup.objectStorage.accessKeySecretRef }}
                 - name: AWS_ACCESS_KEY_ID
                   valueFrom:

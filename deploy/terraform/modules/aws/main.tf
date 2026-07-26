@@ -80,7 +80,7 @@ variable "cluster_name" {
 }
 
 variable "cluster_version" {
-  description = "Kubernetes version for EKS (use 1.31+ for standard support pricing)"
+  description = "Kubernetes version for EKS (use 1.33+ for standard support pricing)"
   type        = string
   default     = "1.34"
 }
