@@ -100,10 +100,21 @@ type ReplicaManager struct {
 	wg sync.WaitGroup
 
 	// eventCh receives replica events.
+	//
+	// Deliberately never closed. Producers (emitEvent) are spread across
+	// request-handling and metadata-listener goroutines that Stop() has no way
+	// to join, so closing here would be a send-on-closed-channel panic waiting
+	// to happen. Shutdown is signalled through ctx instead.
 	eventCh chan ReplicaEvent
 
 	// listeners receive replica events.
 	listeners []func(ReplicaEvent)
+
+	// listenersMu protects listeners.
+	listenersMu sync.RWMutex
+
+	// stopOnce makes Stop idempotent; broker teardown can reach it twice.
+	stopOnce sync.Once
 }
 
 // LocalReplica represents a local partition replica with its state and components.
@@ -207,45 +218,80 @@ func NewReplicaManager(nodeID NodeID, config ReplicationConfig, client *ClusterC
 // =============================================================================
 
 // Stop shuts down the replica manager.
+//
+// Safe to call concurrently with emitEvent and more than once.
 func (rm *ReplicaManager) Stop() error {
-	rm.logger.Info("stopping replica manager")
+	rm.stopOnce.Do(func() {
+		rm.logger.Info("stopping replica manager")
 
-	// Signal shutdown.
-	rm.cancel()
+		// Signal shutdown. Emitters observe this and stop producing; the
+		// dispatcher observes it and drains what is already buffered.
+		rm.cancel()
 
-	// Stop all fetchers.
-	rm.fetchersMu.Lock()
-	for key, fetcher := range rm.fetchers {
-		rm.logger.Debug("stopping fetcher", "partition", key)
-		fetcher.Stop()
-	}
-	rm.fetchersMu.Unlock()
+		// Stop all fetchers.
+		rm.fetchersMu.Lock()
+		for key, fetcher := range rm.fetchers {
+			rm.logger.Debug("stopping fetcher", "partition", key)
+			fetcher.Stop()
+		}
+		rm.fetchersMu.Unlock()
 
-	// Close event channel.
-	close(rm.eventCh)
+		// Wait for goroutines. eventCh is intentionally left open: emitEvent
+		// callers are not joinable here, so closing it would race them into a
+		// send-on-closed-channel panic.
+		rm.wg.Wait()
 
-	// Wait for goroutines.
-	rm.wg.Wait()
-
-	rm.logger.Info("replica manager stopped")
+		rm.logger.Info("replica manager stopped")
+	})
 	return nil
 }
 
 // dispatchEvents sends events to listeners.
+//
+// Exits on ctx cancellation rather than on channel close, after draining
+// whatever is already buffered so in-flight events still reach listeners.
 func (rm *ReplicaManager) dispatchEvents() {
 	defer rm.wg.Done()
 
-	for event := range rm.eventCh {
-		for _, listener := range rm.listeners {
-			// Call listener in goroutine to avoid blocking.
-			go listener(event)
+	for {
+		select {
+		case <-rm.ctx.Done():
+			for {
+				select {
+				case event := <-rm.eventCh:
+					rm.notifyListeners(event)
+				default:
+					return
+				}
+			}
+		case event := <-rm.eventCh:
+			rm.notifyListeners(event)
 		}
+	}
+}
+
+// notifyListeners fans an event out to registered listeners.
+func (rm *ReplicaManager) notifyListeners(event ReplicaEvent) {
+	rm.listenersMu.RLock()
+	listeners := rm.listeners
+	rm.listenersMu.RUnlock()
+
+	for _, listener := range listeners {
+		// Call listener in goroutine to avoid blocking.
+		go listener(event)
 	}
 }
 
 // AddListener registers a callback for replica events.
 func (rm *ReplicaManager) AddListener(listener func(ReplicaEvent)) {
-	rm.listeners = append(rm.listeners, listener)
+	rm.listenersMu.Lock()
+	defer rm.listenersMu.Unlock()
+
+	// Copy on append so notifyListeners can read its snapshot without holding
+	// the lock across user callbacks.
+	updated := make([]func(ReplicaEvent), len(rm.listeners), len(rm.listeners)+1)
+	copy(updated, rm.listeners)
+	rm.listeners = append(updated, listener)
 }
 
 // =============================================================================
@@ -736,8 +782,17 @@ func (rm *ReplicaManager) ApplyFetchedMessages(topic string, partition int, mess
 // =============================================================================
 
 func (rm *ReplicaManager) emitEvent(event ReplicaEvent) {
+	// Shutting down: drop rather than produce into a channel nobody will read.
+	select {
+	case <-rm.ctx.Done():
+		return
+	default:
+	}
+
 	select {
 	case rm.eventCh <- event:
+	case <-rm.ctx.Done():
+		// Stop raced us; dropping is correct during teardown.
 	default:
 		// Channel full, log and drop.
 		rm.logger.Warn("replica event channel full, dropping event",
