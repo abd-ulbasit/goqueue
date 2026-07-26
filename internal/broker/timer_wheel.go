@@ -649,6 +649,59 @@ func (tw *TimerWheel) tick() {
 	}
 }
 
+// drainBucketLocked unlinks every timer in a bucket and returns the entries in
+// list order. Caller must hold tw.mu.
+//
+// WHY THIS EXISTS (lock discipline):
+// Both callers below have to release tw.mu to invoke the user callback, and a
+// *list.Element must never be held across that gap. container/list.Remove sets
+// e.next, e.prev and e.list to nil, and Element.Next() returns nil whenever
+// e.list == nil. So if a concurrent Cancel() unlinks the element an iterating
+// loop is about to advance to, Next() reports nil and the loop terminates
+// early - silently abandoning every timer still in the bucket. Those timers
+// stay in the bucket and in tw.timers, invisible until that level's cursor
+// wraps all the way around (2.56s at level 0, up to 7.76 days at level 3).
+//
+// Draining the whole bucket up front makes the traversal immune to concurrent
+// mutation, and guarantees termination even if a reinserted timer were to land
+// back in the bucket being drained.
+func (tw *TimerWheel) drainBucketLocked(level, bucket int) []*TimerEntry {
+	bucketList := tw.levels[level][bucket]
+	if bucketList.Len() == 0 {
+		return nil
+	}
+
+	entries := make([]*TimerEntry, 0, bucketList.Len())
+	for e := bucketList.Front(); e != nil; e = bucketList.Front() {
+		bucketList.Remove(e)
+		entry, ok := e.Value.(*TimerEntry)
+		if !ok {
+			continue
+		}
+		entry.element = nil
+		entries = append(entries, entry)
+	}
+	return entries
+}
+
+// fireExpired invokes the callback for each entry with tw.mu released.
+//
+// Caller must hold tw.mu on entry; the lock is reacquired before returning.
+// Entries passed here have already been removed from tw.timers under the lock,
+// so a Cancel() racing with the callback correctly reports false ("already
+// fired") instead of appearing to succeed for a timer that fires anyway.
+func (tw *TimerWheel) fireExpired(entries []*TimerEntry) {
+	if len(entries) == 0 || tw.callback == nil {
+		return
+	}
+
+	tw.mu.Unlock()
+	for _, entry := range entries {
+		tw.callback(entry)
+	}
+	tw.mu.Lock()
+}
+
 // processExpiredBucket fires all timers in a bucket.
 //
 // IMPORTANT: We fire all timers in the bucket unconditionally.
@@ -656,27 +709,15 @@ func (tw *TimerWheel) tick() {
 // it's time to fire it. Checking DeliverAt again can cause issues if ticks run
 // slightly early due to scheduler variance.
 func (tw *TimerWheel) processExpiredBucket(level, bucket int) {
-	bucketList := tw.levels[level][bucket]
-
-	// Process all timers in bucket
-	for e := bucketList.Front(); e != nil; {
-		entry, _ := e.Value.(*TimerEntry)
-		next := e.Next()
-
-		// Remove from bucket and map
-		bucketList.Remove(e)
+	// Phase 1 (locked): commit every timer in the bucket to firing.
+	expired := tw.drainBucketLocked(level, bucket)
+	for _, entry := range expired {
 		delete(tw.timers, entry.ID)
 		tw.totalExpired.Add(1)
-
-		// Fire callback (release lock to prevent deadlock)
-		if tw.callback != nil {
-			tw.mu.Unlock()
-			tw.callback(entry)
-			tw.mu.Lock()
-		}
-
-		e = next
 	}
+
+	// Phase 2 (unlocked): run callbacks without holding wheel state.
+	tw.fireExpired(expired)
 }
 
 // cascadeBucket moves timers from a higher level bucket to lower levels.
@@ -684,36 +725,26 @@ func (tw *TimerWheel) processExpiredBucket(level, bucket int) {
 // When a higher-level bucket's time comes, its timers need to be
 // redistributed to lower levels with finer granularity.
 func (tw *TimerWheel) cascadeBucket(level, bucket int) {
-	bucketList := tw.levels[level][bucket]
+	// Phase 1 (locked): drain the bucket and decide fire-vs-reinsert for each
+	// timer. Doing this before any unlock means a concurrent Cancel() can only
+	// observe a timer as fully present or fully gone, never mid-move.
+	drained := tw.drainBucketLocked(level, bucket)
 
-	// Move all timers to appropriate lower levels
-	for e := bucketList.Front(); e != nil; {
-		entry, _ := e.Value.(*TimerEntry)
-		next := e.Next()
-
-		// Remove from current bucket
-		bucketList.Remove(e)
-		entry.element = nil
-
-		// Recalculate position based on remaining time
-		remaining := time.Until(entry.DeliverAt)
-		if remaining <= 0 {
+	var expired []*TimerEntry
+	for _, entry := range drained {
+		if time.Until(entry.DeliverAt) <= 0 {
 			// Timer should fire now
 			delete(tw.timers, entry.ID)
 			tw.totalExpired.Add(1)
-
-			if tw.callback != nil {
-				tw.mu.Unlock()
-				tw.callback(entry)
-				tw.mu.Lock()
-			}
+			expired = append(expired, entry)
 		} else {
 			// Reinsert at appropriate level
 			tw.insertTimer(entry)
 		}
-
-		e = next
 	}
+
+	// Phase 2 (unlocked): run callbacks.
+	tw.fireExpired(expired)
 }
 
 // =============================================================================
