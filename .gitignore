@@ -9,3 +9,19 @@ data/*
 *.tfstate
 *.tfstate.*
 .terraform.lock.hcl
+
+# Compiled binaries
+/goqueue
+/goqueue-amd64
+/bin/
+
+# OS junk
+.DS_Store
+
+# Local tooling scratch (editor/assistant state, working notes)
+.serena/
+memory-bank/
+PROGRESS.md
+.github/copilot-instructions.md
+.github/instructions/
+.github/prompts/
