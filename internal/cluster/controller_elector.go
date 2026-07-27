@@ -147,8 +147,8 @@ type ControllerElector struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	// wg tracks goroutines
-	wg sync.WaitGroup
+	// tasks tracks background goroutines so Stop joins them
+	tasks taskGroup
 
 	// onBecomeController is called when we become controller
 	onBecomeController func()
@@ -205,8 +205,7 @@ func (ce *ControllerElector) Start() {
 	// Randomize to prevent simultaneous elections
 	ce.resetElectionTimerLocked()
 
-	ce.wg.Add(1)
-	go ce.electionLoop()
+	ce.tasks.Go(ce.electionLoop)
 
 	ce.logger.Info("controller elector started",
 		"lease_timeout", ce.config.LeaseTimeout,
@@ -227,7 +226,7 @@ func (ce *ControllerElector) Stop() {
 	}
 	ce.mu.Unlock()
 
-	ce.wg.Wait()
+	ce.tasks.Wait()
 	ce.logger.Info("controller elector stopped")
 }
 
@@ -347,8 +346,6 @@ func (ce *ControllerElector) TriggerElection() {
 // =============================================================================
 
 func (ce *ControllerElector) electionLoop() {
-	defer ce.wg.Done()
-
 	for {
 		select {
 		case <-ce.ctx.Done():
@@ -424,8 +421,13 @@ func (ce *ControllerElector) startElectionLocked() {
 		"votes_needed", ce.votesNeeded,
 	)
 
-	// Request votes from all alive nodes
-	go ce.requestVotes()
+	// Request votes from all alive nodes.
+	//
+	// Tracked, because on a single-node cluster this path runs straight
+	// through to becomeControllerLocked -> Membership.SetController, which
+	// persists cluster/state.json. Untracked, that write could land after
+	// Stop() had already returned.
+	ce.tasks.Go(ce.requestVotes)
 }
 
 // requestVotes sends vote requests to all other nodes.
@@ -491,15 +493,31 @@ func (ce *ControllerElector) requestVotes() {
 		}(node.ID)
 	}
 
-	// Wait for all votes with timeout
+	// Wait for all votes with timeout.
+	//
+	// The per-node request goroutines above are deliberately NOT tracked by
+	// ce.tasks: they are blocked on network calls with their own timeouts, and
+	// making Stop() join them would make shutdown as slow as the slowest
+	// unreachable peer. They only ever send into `results`, which is buffered
+	// to len(nodes), so every one of them can finish even if nothing reads.
 	go func() {
 		wg.Wait()
 		close(results)
 	}()
 
-	// Collect results
+	// Collect results.
+	//
+	// The send has to be cancellable. ce.voteReceiver is buffered to 10 and
+	// its only reader is electionLoop, which returns as soon as ce.ctx is
+	// canceled — which Stop() does before joining this goroutine. A bare
+	// send would therefore block here forever in any election with more than
+	// 10 outstanding peers, and Stop() would never return.
 	for result := range results {
-		ce.voteReceiver <- result
+		select {
+		case ce.voteReceiver <- result:
+		case <-ce.ctx.Done():
+			return
+		}
 	}
 }
 
@@ -601,7 +619,7 @@ func (ce *ControllerElector) becomeControllerLocked() {
 
 	// Call callback
 	if ce.onBecomeController != nil {
-		go ce.onBecomeController()
+		ce.tasks.Go(ce.onBecomeController)
 	}
 }
 
@@ -685,7 +703,7 @@ func (ce *ControllerElector) stepDownLocked() {
 
 	// Call callback
 	if wasController && ce.onLoseController != nil {
-		go ce.onLoseController()
+		ce.tasks.Go(ce.onLoseController)
 	}
 }
 

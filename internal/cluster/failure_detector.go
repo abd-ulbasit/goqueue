@@ -62,8 +62,8 @@ type FailureDetector struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	// wg tracks background goroutines
-	wg sync.WaitGroup
+	// tasks tracks background goroutines so Stop joins them
+	tasks taskGroup
 
 	// logger for failure detection events
 	logger *slog.Logger
@@ -127,8 +127,7 @@ func (fd *FailureDetector) Start() {
 	fd.seedExistingNodes()
 	fd.membership.AddListener(fd.handleMembershipEvent)
 
-	fd.wg.Add(1)
-	go fd.detectionLoop()
+	fd.tasks.Go(fd.detectionLoop)
 
 	fd.logger.Info("failure detector started",
 		"heartbeat_interval", fd.config.HeartbeatInterval,
@@ -163,7 +162,7 @@ func (fd *FailureDetector) handleMembershipEvent(event MembershipEvent) {
 // Stop gracefully shuts down the failure detector.
 func (fd *FailureDetector) Stop() {
 	fd.cancel()
-	fd.wg.Wait()
+	fd.tasks.Wait()
 	fd.logger.Info("failure detector stopped")
 }
 
@@ -202,8 +201,6 @@ func (fd *FailureDetector) LastHeartbeat(nodeID NodeID) (time.Time, bool) {
 
 // detectionLoop runs periodically to check node health.
 func (fd *FailureDetector) detectionLoop() {
-	defer fd.wg.Done()
-
 	ticker := time.NewTicker(fd.config.HeartbeatInterval)
 	defer ticker.Stop()
 
@@ -277,11 +274,23 @@ func (fd *FailureDetector) handleStatusChange(nodeID NodeID, from, to NodeStatus
 		)
 	}
 
-	// Update membership
-	// Note: We need to release read lock before calling UpdateNodeStatus
-	// which takes write lock. This is handled by the caller.
-	// TODO: why are we doing this in a goroutine?
-	go func() {
+	// Update membership.
+	//
+	// WHY OFF THE CALLING GOROUTINE:
+	//   Our caller is checkNodes, which holds fd.mu for reading across its
+	//   whole loop over the node list. UpdateNodeStatus ends in
+	//   persistStateLocked, a write of cluster/state.json. Doing that inline
+	//   would hold the failure detector's lock across a disk write, once per
+	//   node that changed state, blocking every RecordHeartbeat behind it —
+	//   which is how a slow disk would turn into nodes being wrongly
+	//   declared dead. (The earlier note here claimed the caller releases the
+	//   read lock first. It does not; the unlock is deferred.)
+	//
+	// WHY TRACKED:
+	//   This used to be a bare `go func()`. Stop() therefore returned while
+	//   a state.json write was still in flight, and the file could reappear
+	//   after shutdown was believed complete.
+	fd.tasks.Go(func() {
 		if err := fd.membership.UpdateNodeStatus(nodeID, to); err != nil {
 			fd.logger.Warn("failed to update node status",
 				"node_id", nodeID,
@@ -289,7 +298,7 @@ func (fd *FailureDetector) handleStatusChange(nodeID NodeID, from, to NodeStatus
 				"error", err,
 			)
 		}
-	}()
+	})
 }
 
 // =============================================================================
