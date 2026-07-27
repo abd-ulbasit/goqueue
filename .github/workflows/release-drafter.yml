@@ -21,11 +21,25 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write
 
 jobs:
   update-release-draft:
     runs-on: ubuntu-latest
+    permissions:
+      # release-drafter creates and updates a draft GitHub Release on every
+      # push to main, which needs write access to contents. The workflow only
+      # ever granted `contents: read`, so that call was never going to work —
+      # release-drafter@v6 just did not fail the job over it, and no draft
+      # release has ever existed here. v7 surfaces it:
+      #
+      #   Resource not accessible by integration
+      #   https://docs.github.com/rest/releases/releases#create-a-release
+      #
+      # Fork and Dependabot pull_request runs get a read-only token from
+      # GitHub regardless of what is declared here, so this does not widen
+      # what an untrusted PR can do.
+      contents: write
+      pull-requests: write
     steps:
       - uses: release-drafter/release-drafter@v7
         with:
