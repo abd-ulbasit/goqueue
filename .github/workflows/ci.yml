@@ -371,6 +371,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      # Cheap, and it fails in two seconds with a clear message instead of
+      # after a multi-arch buildx run. This pairing going out of sync is what
+      # deadlocked seven Dependabot PRs.
+      - name: Check the base image can build this module
+        run: ./scripts/check-toolchain.sh
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
 

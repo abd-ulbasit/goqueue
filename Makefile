@@ -184,9 +184,14 @@ fmt:
 vet:
 	$(GO) vet ./...
 
-## check: Run all quality checks (fmt, vet, lint)
+## check-toolchain: Assert the Docker base image can build this module
+.PHONY: check-toolchain
+check-toolchain:
+	@./scripts/check-toolchain.sh
+
+## check: Run all quality checks (fmt, vet, lint, toolchain)
 .PHONY: check
-check: fmt vet lint
+check: fmt vet lint check-toolchain
 	@echo "✓ All quality checks passed"
 
 ## install-hooks: Install git pre-commit hooks
