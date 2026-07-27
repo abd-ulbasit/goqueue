@@ -884,10 +884,20 @@ func (qm *QuotaManager) CheckTopicCreation(tenantID string, currentTopics, curre
 // =============================================================================
 
 // GetQuotaStats returns quota statistics for a tenant.
+//
+// This is the locking wrapper. Callers that already hold qm.mu (in either mode)
+// MUST call getQuotaStatsLocked instead: Go's sync.RWMutex is not reentrant, and
+// a writer queued between the outer RLock and the inner one deadlocks both
+// goroutines permanently.
 func (qm *QuotaManager) GetQuotaStats(tenantID string) (*QuotaStats, error) {
 	qm.mu.RLock()
 	defer qm.mu.RUnlock()
+	return qm.getQuotaStatsLocked(tenantID)
+}
 
+// getQuotaStatsLocked returns quota statistics for a tenant.
+// The caller MUST already hold qm.mu for reading or writing.
+func (qm *QuotaManager) getQuotaStatsLocked(tenantID string) (*QuotaStats, error) {
 	buckets, exists := qm.buckets[tenantID]
 	if !exists {
 		return nil, fmt.Errorf("tenant %s not found", tenantID)
@@ -948,7 +958,10 @@ func (qm *QuotaManager) GetAllQuotaStats() map[string]*QuotaStats {
 
 	stats := make(map[string]*QuotaStats)
 	for tenantID := range qm.buckets {
-		if s, err := qm.GetQuotaStats(tenantID); err == nil {
+		// MUST use the *Locked variant: qm.mu.RLock is already held above, and
+		// this call sits in a loop, so the reentrancy window widens with every
+		// additional tenant.
+		if s, err := qm.getQuotaStatsLocked(tenantID); err == nil {
 			stats[tenantID] = s
 		}
 	}
