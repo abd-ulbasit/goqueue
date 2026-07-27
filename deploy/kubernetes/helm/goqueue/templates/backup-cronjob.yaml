@@ -96,9 +96,12 @@ spec:
                 - --prefix={{ .Values.backup.objectStorage.prefix | default "backups" }}
                 {{- end }}
               env:
-                - name: GOQUEUE_BROKER_ADDRESS
-                  value: "{{ include "goqueue.fullname" . }}-headless:{{ .Values.service.port }}"
-                - name: GOQUEUE_API_KEY
+                # goqueue-admin reads GOQUEUE_ADMIN_SERVER / GOQUEUE_ADMIN_API_KEY.
+                # It expects a full URL and falls back to http://localhost:8080,
+                # which resolves to nothing inside this pod.
+                - name: GOQUEUE_ADMIN_SERVER
+                  value: "http://{{ include "goqueue.fullname" . }}-headless:{{ include "goqueue.httpPort" . }}"
+                - name: GOQUEUE_ADMIN_API_KEY
                   valueFrom:
                     secretKeyRef:
                       name: {{ include "goqueue.fullname" . }}-api-keys

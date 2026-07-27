@@ -95,8 +95,8 @@ services:
     # ┌─────────────────────────────────────────────────────────────────────────┐
     # │ ENVIRONMENT VARIABLES                                                   │
     # │                                                                         │
-    # │ These override config file settings. Useful for container orchestration │
-    # │ where you can't easily modify config files.                             │
+    # │ This is the broker's only configuration mechanism. It reads no config   │
+    # │ file and parses no flags, so there is nothing here to override.         │
     # │                                                                         │
     # │ NAMING CONVENTION: GOQUEUE_{SECTION}_{KEY}                              │
     # │   e.g., GOQUEUE_BROKER_NODEID, GOQUEUE_CLUSTER_PEERS                    │
@@ -110,15 +110,6 @@ services:
       - GOQUEUE_CLUSTER_ENABLED=true
       - GOQUEUE_CLUSTER_PEERS=goqueue-2:7000,goqueue-3:7000
       - GOQUEUE_CLUSTER_ADVERTISE=goqueue-1:7000
-      - GOQUEUE_METRICS_ENABLED=true
-      - GOQUEUE_TRACING_ENABLED=true
-      - GOQUEUE_TRACING_OTLP_ENABLED=true
-      - GOQUEUE_TRACING_OTLP_ENDPOINT=tempo:4317
-      - GOQUEUE_TRACING_OTLP_PROTOCOL=grpc
-      - GOQUEUE_TRACING_OTLP_INSECURE=true
-      - GOQUEUE_TRACING_SAMPLING_RATE=1.0
-      - GOQUEUE_LOG_LEVEL=info
-      - GOQUEUE_LOG_FORMAT=json
     
     # Port mapping: host:container
     ports:
@@ -128,7 +119,6 @@ services:
     
     volumes:
       - goqueue-data-1:/data
-      - ./config/node-1.yaml:/config/config.yaml:ro
     
     networks:
       goqueue-internal:
@@ -204,15 +194,6 @@ services:
       - GOQUEUE_CLUSTER_ENABLED=true
       - GOQUEUE_CLUSTER_PEERS=goqueue-1:7000,goqueue-3:7000
       - GOQUEUE_CLUSTER_ADVERTISE=goqueue-2:7000
-      - GOQUEUE_METRICS_ENABLED=true
-      - GOQUEUE_TRACING_ENABLED=true
-      - GOQUEUE_TRACING_OTLP_ENABLED=true
-      - GOQUEUE_TRACING_OTLP_ENDPOINT=tempo:4317
-      - GOQUEUE_TRACING_OTLP_PROTOCOL=grpc
-      - GOQUEUE_TRACING_OTLP_INSECURE=true
-      - GOQUEUE_TRACING_SAMPLING_RATE=1.0
-      - GOQUEUE_LOG_LEVEL=info
-      - GOQUEUE_LOG_FORMAT=json
     
     ports:
       - "8082:8080"
@@ -221,7 +202,6 @@ services:
     
     volumes:
       - goqueue-data-2:/data
-      - ./config/node-2.yaml:/config/config.yaml:ro
     
     networks:
       goqueue-internal:
@@ -290,15 +270,6 @@ services:
       - GOQUEUE_CLUSTER_ENABLED=true
       - GOQUEUE_CLUSTER_PEERS=goqueue-1:7000,goqueue-2:7000
       - GOQUEUE_CLUSTER_ADVERTISE=goqueue-3:7000
-      - GOQUEUE_METRICS_ENABLED=true
-      - GOQUEUE_TRACING_ENABLED=true
-      - GOQUEUE_TRACING_OTLP_ENABLED=true
-      - GOQUEUE_TRACING_OTLP_ENDPOINT=tempo:4317
-      - GOQUEUE_TRACING_OTLP_PROTOCOL=grpc
-      - GOQUEUE_TRACING_OTLP_INSECURE=true
-      - GOQUEUE_TRACING_SAMPLING_RATE=1.0
-      - GOQUEUE_LOG_LEVEL=info
-      - GOQUEUE_LOG_FORMAT=json
     
     ports:
       - "8083:8080"
@@ -307,7 +278,6 @@ services:
     
     volumes:
       - goqueue-data-3:/data
-      - ./config/node-3.yaml:/config/config.yaml:ro
     
     networks:
       goqueue-internal:

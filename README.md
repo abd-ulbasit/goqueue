@@ -485,7 +485,7 @@ helm install goqueue ./deploy/kubernetes/helm/goqueue \
 
 ```bash
 go install github.com/abd-ulbasit/goqueue/cmd/goqueue@latest
-goqueue -config config.yaml
+GOQUEUE_BROKER_DATADIR=./data GOQUEUE_LISTENERS_HTTP=:8080 goqueue
 ```
 
 ### Produce Messages
@@ -586,37 +586,37 @@ for msg := range consumer.Messages() {
 
 ## Configuration
 
-```yaml
-broker:
-  nodeId: "node-1"
-  dataDir: "/var/lib/goqueue"
-  
-  listeners:
-    http: ":8080"
-    grpc: ":9000"
-    
-defaults:
-  topic:
-    partitions: 6
-    replicationFactor: 2
-    retention:
-      hours: 168          # 7 days
-      bytes: 10737418240  # 10GB
-      
-  delivery:
-    visibilityTimeout: 30s
-    maxRetries: 3
-    dlqEnabled: true
-    
-  delay:
-    enabled: true
-    maxDelay: 168h        # 7 days max delay
-    
-  priority:
-    lanes: 3              # high, normal, low
+The broker is configured entirely by `GOQUEUE_*` environment variables. It does
+not read a config file and it does not parse flags, so there is no precedence
+to reason about: a variable is set or the default in code applies.
+
+```bash
+GOQUEUE_BROKER_NODEID=node-1 \
+GOQUEUE_BROKER_DATADIR=/var/lib/goqueue \
+GOQUEUE_LISTENERS_HTTP=:8080 \
+GOQUEUE_LISTENERS_GRPC=:9000 \
+goqueue
 ```
 
-See [config.example.yaml](config.example.yaml) for full reference.
+Cluster mode, TLS, authentication and ACLs follow the same pattern.
+Partition count, retention, replication factor and visibility timeout are
+topic properties, set when the topic is created rather than in the process
+environment.
+
+Configuration is validated before anything binds, and every problem is
+reported at once rather than one restart at a time:
+
+```
+$ GOQUEUE_BROKER_DATADIR=/etc/hosts GOQUEUE_CLUSTER_ENABLED=true \
+  GOQUEUE_CLUSTER_PEERS=a:7000,b:7000 GOQUEUE_CLUSTER_QUORUM=5 goqueue
+Configuration error:
+configuration validation failed:
+  1. data_dir: "/etc/hosts" exists but is not a directory
+  2. cluster.quorum_size: 5 exceeds total cluster size 3 (peers=2 + self=1)
+```
+
+See the [configuration reference](https://abd-ulbasit.github.io/goqueue/docs/configuration/reference)
+for every variable the broker reads.
 
 ---
 

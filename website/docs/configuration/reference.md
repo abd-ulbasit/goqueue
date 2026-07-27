@@ -7,9 +7,7 @@ title: Configuration Reference
 
 # Configuration Reference
 
-
-Complete reference for all GoQueue configuration options.
-
+Every environment variable the broker reads, and nothing else.
 
 ## Table of contents
 {: .no_toc .text-delta }
@@ -19,538 +17,187 @@ Complete reference for all GoQueue configuration options.
 
 ---
 
-## Configuration File Location
+## There is no configuration file
 
-By default, GoQueue looks for configuration in:
+The broker is configured entirely by environment variables. It does not parse a
+YAML file, it does not accept command-line flags, and it does not look for
+`config.yaml` in any directory.
 
-1. `./config.yaml`
-2. `/etc/goqueue/config.yaml`
-3. `$HOME/.goqueue/config.yaml`
-
-Specify a custom location:
+Earlier versions of this page documented a large YAML schema. None of it was
+ever wired up. If you drop a `config.yaml` next to the binary it is read by
+nothing:
 
 ```bash
-goqueue --config /path/to/config.yaml
-```
-
----
-
-## Complete Configuration Example
-
-```yaml
-# GoQueue Configuration
-# Copy this file to config.yaml and customize
-
-# ==============================================================================
-# BROKER SETTINGS
-# ==============================================================================
+$ cat config.yaml
 broker:
-  # Unique identifier for this node in a cluster
-  # Default: auto-generated UUID
-  nodeId: "node-1"
-  
-  # Directory for storing data (logs, indexes, offsets)
-  # Default: /var/lib/goqueue
-  dataDir: "/var/lib/goqueue"
-
-# ==============================================================================
-# NETWORK LISTENERS
-# ==============================================================================
+  dataDir: "/tmp/THIS-YAML-IS-IGNORED"
 listeners:
-  # HTTP REST API endpoint
-  # Used by: producers, consumers, admin operations
-  # Default: :8080
-  http: ":8080"
-  
-  # gRPC API endpoint
-  # Used by: Go/Java clients for streaming
-  # Default: :9000
-  grpc: ":9000"
-  
-  # Internal cluster communication
-  # Used by: replication, cluster coordination
-  # Default: :7000
-  internal: ":7000"
+  http: ":19999"
 
-# ==============================================================================
-# METRICS CONFIGURATION
-# ==============================================================================
-metrics:
-  # Prometheus metrics endpoint
-  # Default: :9090
-  listen: ":9090"
-  
-  # Path for metrics scraping
-  # Default: /metrics
-  path: "/metrics"
-  
-  # Include Go runtime metrics (goroutines, memory, GC)
-  # Default: true
-  includeGoCollector: true
-  
-  # Include process metrics (CPU, file descriptors)
-  # Default: true
-  includeProcessCollector: true
-
-# ==============================================================================
-# LOGGING CONFIGURATION
-# ==============================================================================
-logging:
-  # Log level: debug, info, warn, error
-  # Default: info
-  level: "info"
-  
-  # Log format: json or text
-  # Default: json (recommended for production)
-  format: "json"
-  
-  # Output destination: stdout, stderr, or file path
-  # Default: stdout
-  output: "stdout"
-
-# ==============================================================================
-# STORAGE ENGINE SETTINGS
-# ==============================================================================
-storage:
-  # Maximum size per segment file before rolling to new segment
-  # Larger segments = fewer files, slower recovery
-  # Smaller segments = more files, faster recovery
-  # Default: 1073741824 (1GB)
-  segmentSize: 1073741824
-  
-  # Bytes between sparse index entries
-  # Smaller = more precise seeks, larger index files
-  # Larger = less precise seeks, smaller index files
-  # Default: 4096 (4KB)
-  indexInterval: 4096
-  
-  # Sync writes to disk immediately
-  # true = safer but slower (fsync on every write)
-  # false = faster but risk of data loss on crash
-  # Default: false
-  syncOnWrite: false
-  
-  # If syncOnWrite is false, sync interval
-  # How often to flush writes to disk
-  # Default: 1s
-  syncInterval: "1s"
-  
-  # Compression algorithm for messages
-  # Options: none, snappy, lz4, zstd
-  # Default: none
-  compression: "none"
-
-# ==============================================================================
-# CLUSTER CONFIGURATION
-# ==============================================================================
-cluster:
-  # Enable clustering (requires etcd)
-  # Default: false
-  enabled: false
-  
-  # etcd endpoints for cluster coordination
-  etcd:
-    endpoints:
-      - "localhost:2379"
-    # Optional authentication
-    username: ""
-    password: ""
-    # TLS settings
-    tls:
-      enabled: false
-      certFile: ""
-      keyFile: ""
-      caFile: ""
-  
-  # Default replication factor for new topics
-  # Minimum: 1, Recommended: 3
-  # Default: 2
-  replicationFactor: 2
-  
-  # Minimum replicas that must acknowledge a write
-  # Must be <= replicationFactor
-  # Default: 1
-  minInSyncReplicas: 1
-  
-  # Timeout for replication requests
-  # Default: 5s
-  replicationTimeout: "5s"
-
-# ==============================================================================
-# DEFAULT TOPIC SETTINGS
-# ==============================================================================
-# These apply to newly created topics unless overridden
-defaults:
-  topic:
-    # Number of partitions for new topics
-    # More partitions = more parallelism
-    # Default: 3
-    partitions: 3
-    
-    # Message retention settings
-    retention:
-      # Delete messages older than this (0 = infinite retention)
-      # Default: 168 (7 days)
-      hours: 168
-      
-      # Delete oldest messages when topic exceeds this size
-      # -1 = unlimited
-      # Default: -1
-      bytes: -1
-    
-    # Delivery settings
-    delivery:
-      # How long a message is invisible after being received
-      # Gives consumer time to process before redelivery
-      # Default: 30s
-      visibilityTimeout: "30s"
-      
-      # Maximum delivery attempts before sending to DLQ
-      # Default: 3
-      maxRetries: 3
-      
-      # Dead letter queue topic suffix
-      # Default: -dlq
-      dlqSuffix: "-dlq"
-
-# ==============================================================================
-# CONSUMER SETTINGS
-# ==============================================================================
-consumer:
-  # Session timeout: how long before consumer is considered dead
-  # If no heartbeat received within this time, consumer is removed
-  # Default: 30s
-  sessionTimeout: "30s"
-  
-  # Heartbeat interval: how often consumer should send heartbeat
-  # Should be < sessionTimeout/3
-  # Default: 10s
-  heartbeatInterval: "10s"
-  
-  # Maximum messages returned per poll request
-  # Default: 500
-  maxPollRecords: 500
-  
-  # Maximum time to wait for messages in long-poll
-  # Default: 30s
-  maxPollTimeout: "30s"
-  
-  # Auto-commit offset interval
-  # 0 = manual commit only (recommended for at-least-once)
-  # Default: 5s
-  autoCommitInterval: "5s"
-  
-  # Rebalance settings
-  rebalance:
-    # Rebalance protocol: eager or cooperative
-    # eager = all partitions revoked during rebalance
-    # cooperative = incremental rebalance (KIP-429)
-    # Default: cooperative
-    protocol: "cooperative"
-    
-    # Maximum time to wait for rebalance to complete
-    # Default: 60s
-    timeout: "60s"
-
-# ==============================================================================
-# PRODUCER SETTINGS
-# ==============================================================================
-producer:
-  # Batch messages up to this size before sending
-  # Larger = higher throughput, higher latency
-  # Default: 16384 (16KB)
-  batchSize: 16384
-  
-  # Maximum time to wait for batch to fill
-  # 0 = send immediately (no batching)
-  # Default: 5ms
-  lingerMs: 5
-  
-  # Acknowledgment mode
-  # none = fire and forget (fastest, may lose messages)
-  # leader = wait for leader to write (balanced)
-  # all = wait for all in-sync replicas (safest)
-  # Default: leader
-  acks: "leader"
-  
-  # Retry settings for failed publishes
-  retries: 3
-  retryBackoff: "100ms"
-  
-  # Idempotent producer (exactly-once semantics)
-  # Requires acks=all in cluster mode
-  # Default: true
-  idempotent: true
-  
-  # Transaction timeout
-  # How long a transaction can be open before auto-abort
-  # Default: 60s
-  transactionTimeout: "60s"
-
-# ==============================================================================
-# PRIORITY QUEUE SETTINGS
-# ==============================================================================
-priority:
-  # Enable priority queues
-  # Default: true
-  enabled: true
-  
-  # Scheduling algorithm
-  # wfq = Weighted Fair Queuing (prevents starvation)
-  # strict = Strict priority (higher always first)
-  # Default: wfq
-  scheduler: "wfq"
-  
-  # Weights for WFQ scheduling (higher = more resources)
-  weights:
-    critical: 100
-    high: 50
-    normal: 25
-    low: 10
-    background: 5
-
-# ==============================================================================
-# DELAY QUEUE SETTINGS
-# ==============================================================================
-delay:
-  # Enable delayed messages
-  # Default: true
-  enabled: true
-  
-  # Timer wheel configuration
-  timerWheel:
-    # Tick duration (resolution of delay queue)
-    # Smaller = more precise, more CPU
-    # Default: 100ms
-    tickDuration: "100ms"
-    
-    # Number of ticks per wheel
-    # Default: 512
-    ticksPerWheel: 512
-  
-  # Maximum delay allowed
-  # Default: 168h (7 days)
-  maxDelay: "168h"
-
-# ==============================================================================
-# SCHEMA REGISTRY SETTINGS
-# ==============================================================================
-schema:
-  # Enable schema registry
-  # Default: true
-  enabled: true
-  
-  # Global compatibility mode
-  # NONE, BACKWARD, FORWARD, FULL, BACKWARD_TRANSITIVE, FORWARD_TRANSITIVE, FULL_TRANSITIVE
-  # Default: BACKWARD
-  compatibility: "BACKWARD"
-  
-  # Validate messages against schema on publish
-  # Default: false (opt-in per topic)
-  validateOnPublish: false
-
-# ==============================================================================
-# MULTI-TENANCY SETTINGS
-# ==============================================================================
-tenancy:
-  # Enable multi-tenancy
-  # Default: false
-  enabled: false
-  
-  # Default quotas for new tenants
-  defaultQuotas:
-    maxTopics: 100
-    maxPartitionsPerTopic: 12
-    maxMessageSizeBytes: 1048576  # 1MB
-    maxMessagesPerSecond: 10000
-    maxBytesPerSecond: 104857600  # 100MB/s
-    maxRetentionHours: 720  # 30 days
-
-# ==============================================================================
-# TRACING SETTINGS
-# ==============================================================================
-tracing:
-  # Enable message tracing
-  # Default: true
-  enabled: true
-  
-  # Maximum traces to keep in memory
-  # Default: 10000
-  maxTraces: 10000
-  
-  # Trace retention
-  # Default: 24h
-  retention: "24h"
-
-# ==============================================================================
-# TOPIC-SPECIFIC OVERRIDES
-# ==============================================================================
-# Override default settings for specific topics
-topics:
-  # High-throughput event topic
-  events:
-    partitions: 12
-    retention:
-      hours: 24
-    delivery:
-      visibilityTimeout: "10s"
-      maxRetries: 1
-  
-  # Critical order processing topic
-  orders:
-    partitions: 6
-    retention:
-      hours: 720  # 30 days
-    delivery:
-      visibilityTimeout: "60s"
-      maxRetries: 5
+$ GOQUEUE_BROKER_DATADIR=./gqdata GOQUEUE_LISTENERS_HTTP=127.0.0.1:18081 goqueue
+   ✓ Data directory: ./gqdata
+   ✓ HTTP API listening on http://127.0.0.1:18081
 ```
+
+The same applies to flags. `goqueue --config /path/to/anything` starts a broker
+with defaults; the argument is never parsed, so a typo in it fails silently
+rather than loudly.
+
+The one YAML file that is real belongs to the CLI, not the broker:
+`~/.goqueue/config.yaml` holds `goqueue-cli` contexts (server address, API key,
+timeout). See the CLI documentation for its schema.
 
 ---
 
-## Environment Variables
+## Broker identity and storage
 
-All configuration options can be set via environment variables with the `GOQUEUE_` prefix:
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `GOQUEUE_BROKER_DATADIR` | `./data` | Directory for segments, indexes and the PID file |
+| `GOQUEUE_BROKER_NODEID` | `node-1` | Node identifier, reported in `/stats` and used for cluster membership |
 
-| Config Path | Environment Variable |
-|-------------|---------------------|
-| `broker.nodeId` | `GOQUEUE_BROKER_NODEID` |
-| `broker.dataDir` | `GOQUEUE_BROKER_DATADIR` |
-| `listeners.http` | `GOQUEUE_LISTENERS_HTTP` |
-| `listeners.grpc` | `GOQUEUE_LISTENERS_GRPC` |
-| `logging.level` | `GOQUEUE_LOGGING_LEVEL` |
-| `storage.syncOnWrite` | `GOQUEUE_STORAGE_SYNCONWRITE` |
-| `cluster.enabled` | `GOQUEUE_CLUSTER_ENABLED` |
-
-Example:
-
-```bash
-export GOQUEUE_BROKER_DATADIR=/data/goqueue
-export GOQUEUE_LISTENERS_HTTP=:8080
-export GOQUEUE_LOGGING_LEVEL=debug
-goqueue
-```
+In Kubernetes, set `GOQUEUE_BROKER_NODEID` to the pod name so a restarted pod
+keeps its identity.
 
 ---
 
-## Command-Line Flags
+## Listeners
 
-Common flags:
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `GOQUEUE_LISTENERS_HTTP` | `127.0.0.1:8080` | HTTP REST API. Also serves `/metrics` and the health endpoints |
+| `GOQUEUE_LISTENERS_GRPC` | `127.0.0.1:9000` | gRPC API |
+| `GOQUEUE_LISTENERS_INTERNAL` | `:7000` | Inter-node cluster HTTP. Only bound when cluster mode is on |
+| `GOQUEUE_GRPC_REFLECTION` | unset | Set to `true` to enable gRPC server reflection, which `grpcurl` needs. Off by default because it exposes the API surface |
 
-```bash
-goqueue [flags]
+The defaults bind to loopback, so a container needs
+`GOQUEUE_LISTENERS_HTTP=:8080` to be reachable from outside.
 
-Flags:
-  --config string       Path to configuration file
-  --data-dir string     Data directory (overrides config)
-  --http-port string    HTTP API port (default ":8080")
-  --grpc-port string    gRPC API port (default ":9000")
-  --log-level string    Log level: debug, info, warn, error
-  --log-format string   Log format: json, text
-  --node-id string      Node identifier for clustering
-  --help                Show help
-  --version             Show version
-```
-
-Example:
-
-```bash
-goqueue --config /etc/goqueue/config.yaml \
-        --log-level debug \
-        --http-port :8081
-```
+Prometheus metrics are served at `/metrics` **on the HTTP API listener**. There
+is no separate metrics port, and no variable to move or disable the endpoint.
+Point your scrape config at the HTTP listener.
 
 ---
 
-## Configuration by Use Case
+## Cluster mode
 
-### Development
+Cluster mode is off unless `GOQUEUE_CLUSTER_ENABLED` is exactly `true`. The
+remaining cluster variables are read only when it is.
 
-```yaml
-broker:
-  dataDir: "./data"
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `GOQUEUE_CLUSTER_ENABLED` | unset | `true` enables gossip membership, controller election and replication |
+| `GOQUEUE_CLUSTER_PEERS` | empty | Comma-separated peer addresses. Empty means a single-node cluster |
+| `GOQUEUE_CLUSTER_ADVERTISE` | empty | Address other nodes should use to reach this one |
+| `GOQUEUE_CLUSTER_CLIENT_ADVERTISE` | derived from `GOQUEUE_LISTENERS_HTTP` | Address producers are forwarded to when this node is not the partition leader |
+| `GOQUEUE_CLUSTER_QUORUM` | `2` | Votes required to elect a controller |
 
-listeners:
-  http: ":8080"
-  grpc: ":9000"
+Coordination is built in. GoQueue runs its own gossip membership and controller
+election, so there is no ZooKeeper, etcd or other external coordination service
+to deploy, and no endpoints to configure. Nothing in the module talks to etcd,
+and there is no etcd client in `go.mod`.
 
-logging:
-  level: "debug"
-  format: "text"
+Example, one pod of a three-node StatefulSet:
 
-storage:
-  syncOnWrite: false
-  segmentSize: 67108864  # 64MB (smaller for dev)
+```bash
+export GOQUEUE_CLUSTER_ENABLED=true
+export GOQUEUE_BROKER_NODEID=goqueue-0
+export GOQUEUE_CLUSTER_ADVERTISE=goqueue-0.goqueue-headless:7000
+export GOQUEUE_CLUSTER_PEERS=goqueue-1.goqueue-headless:7000,goqueue-2.goqueue-headless:7000
+export GOQUEUE_CLUSTER_QUORUM=2
 ```
 
-### Production (Single Node)
+Replication factor and minimum in-sync replicas are properties of a topic, set
+when the topic is created, not process-level settings. There is no environment
+variable for either.
 
-```yaml
-broker:
-  dataDir: "/var/lib/goqueue"
+---
 
-listeners:
-  http: ":8080"
-  grpc: ":9000"
+## TLS
 
-logging:
-  level: "info"
-  format: "json"
+Read by the HTTP API server. The `GOQUEUE_TLS_` set secures the client-facing
+listener; the `GOQUEUE_CLUSTER_TLS_` set uses identical suffixes for
+inter-node mTLS.
 
-storage:
-  syncOnWrite: false
-  syncInterval: "1s"
-  segmentSize: 1073741824  # 1GB
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `GOQUEUE_TLS_ENABLED` | unset | `true` serves HTTPS instead of HTTP |
+| `GOQUEUE_TLS_CERT_FILE` | empty | Server certificate (PEM) |
+| `GOQUEUE_TLS_KEY_FILE` | empty | Private key (PEM) |
+| `GOQUEUE_TLS_CA_FILE` | empty | CA bundle used to verify client certificates |
+| `GOQUEUE_TLS_SELF_SIGNED` | unset | `true` generates a self-signed certificate at startup. Development only |
+| `GOQUEUE_TLS_CLIENT_AUTH` | `none` | One of `none`, `request`, `require`, `verify`, `require-verify` |
+| `GOQUEUE_TLS_MIN_VERSION` | `1.2` | `1.2` or `1.3`. Any other value leaves the default in place |
 
-defaults:
-  topic:
-    partitions: 6
-    retention:
-      hours: 168
-```
+Certificate files are watched and reloaded in place, so renewal does not need a
+restart.
 
-### Production (Cluster)
+---
 
-```yaml
-broker:
-  nodeId: "node-1"
-  dataDir: "/var/lib/goqueue"
+## Authentication and authorization
 
-cluster:
-  enabled: true
-  etcd:
-    endpoints:
-      - "etcd-1:2379"
-      - "etcd-2:2379"
-      - "etcd-3:2379"
-  replicationFactor: 3
-  minInSyncReplicas: 2
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `GOQUEUE_AUTH_ENABLED` | unset | `true` requires an API key on API requests |
+| `GOQUEUE_API_ROOT_KEY` | empty | Root admin key. Set this when auth is enabled, or nothing can mint further keys |
+| `GOQUEUE_AUTH_ALLOW_HEALTH` | `true` | Set to `false` to require auth on health endpoints too. Doing so will break Kubernetes probes unless they carry a key |
+| `GOQUEUE_ACL_ENABLED` | unset | `true` enforces per-key topic ACLs on top of authentication |
 
-producer:
-  acks: "all"
-  idempotent: true
-```
+---
+
+## Command-line tools
+
+`goqueue-cli` and `goqueue-admin` are separate binaries with their own
+configuration, and unlike the broker they do parse flags and a config file.
+
+| Variable | Used by | Effect |
+|----------|---------|--------|
+| `GOQUEUE_SERVER` | `goqueue-cli` | Broker address |
+| `GOQUEUE_API_KEY` | `goqueue-cli` | API key |
+| `GOQUEUE_CONTEXT` | `goqueue-cli` | Named context from `~/.goqueue/config.yaml` |
+| `GOQUEUE_ADMIN_SERVER` | `goqueue-admin` | Broker address |
+| `GOQUEUE_ADMIN_API_KEY` | `goqueue-admin` | API key |
 
 ---
 
 ## Validation
 
-Validate your configuration:
+The broker validates its configuration before it opens a listener and exits
+with a numbered list of every problem it found, rather than one at a time:
 
-```bash
-goqueue validate --config /path/to/config.yaml
+```
+$ GOQUEUE_BROKER_DATADIR=/etc/hosts GOQUEUE_CLUSTER_ENABLED=true \
+  GOQUEUE_CLUSTER_PEERS=a:7000,b:7000 GOQUEUE_CLUSTER_QUORUM=5 goqueue
+Configuration error:
+configuration validation failed:
+  1. data_dir: "/etc/hosts" exists but is not a directory
+  2. cluster.quorum_size: 5 exceeds total cluster size 3 (peers=2 + self=1)
 ```
 
-This checks for:
-- Syntax errors
-- Invalid values
-- Incompatible settings
-- Security warnings
+Validation covers the data directory, node ID, listener addresses and cluster
+quorum. It cannot catch a misspelled variable name: an unrecognised `GOQUEUE_*`
+variable is simply never read, and the broker starts with the default. Check
+the startup banner, which prints the data directory, node ID and every bound
+address, to confirm the settings you meant to apply actually landed.
+
+---
+
+## Not configurable
+
+These have defaults in code with no environment variable to override them.
+Listing them here so that their absence above is not read as an oversight:
+
+- Segment size, index interval and fsync behaviour in the storage engine
+- Producer batch size, linger and acknowledgement mode (per-producer arguments
+  in the client library, not process-level settings)
+- Consumer session timeout, heartbeat interval and poll limits
+- Retention, visibility timeout and retry limits (topic properties, set at
+  topic creation)
+- Priority scheduler weights, timer wheel resolution and tracing sampling
 
 ---
 
 ## Next Steps
 
-- [Production Configuration](production) - Best practices for production
-- [Performance Tuning](tuning) - Optimize for your workload
-- [Cluster Setup](../operations/clustering) - Multi-node deployment
+- [Operations]({{ '/docs/operations' | relative_url }}) - Deploying and monitoring GoQueue
+- [Benchmarks]({{ '/docs/operations/benchmarks' | relative_url }}) - What has been measured, and how

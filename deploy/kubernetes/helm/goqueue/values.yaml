@@ -105,56 +105,25 @@ securityContext:
 # GOQUEUE CONFIGURATION
 # -----------------------------------------------------------------------------
 # ┌─────────────────────────────────────────────────────────────────────────────┐
-# │ These settings are passed to GoQueue via ConfigMap or environment vars.    │
-# │ They map to the goqueue config.yaml structure.                             │
+# │ These become GOQUEUE_* environment variables on the broker container.       │
+# │                                                                             │
+# │ The broker reads no configuration file, so every key here has to map to a   │
+# │ variable the binary actually reads. Keys that only fed a mounted config     │
+# │ file (storage tuning, topic defaults, consumer and producer settings,       │
+# │ logging, replication factor) were removed: nothing consumed them, and       │
+# │ leaving them offered knobs that silently did nothing when turned.           │
+# │                                                                             │
+# │ Replication factor and minimum in-sync replicas are topic properties, set   │
+# │ when a topic is created, not process settings.                              │
 # └─────────────────────────────────────────────────────────────────────────────┘
 
 config:
   # Cluster settings
   cluster:
+    # -> GOQUEUE_CLUSTER_ENABLED
     enabled: true
-    replicationFactor: 2
-    minInSyncReplicas: 1
-    replicationTimeout: "5s"
-  
-  # Storage settings
-  storage:
-    segmentSize: 1073741824  # 1GB
-    indexInterval: 4096
-    syncOnWrite: false
-    syncInterval: "1s"
-  
-  # Default topic settings
-  defaults:
-    topic:
-      partitions: 6
-      retention:
-        hours: 168  # 7 days
-        bytes: -1   # unlimited
-      delivery:
-        visibilityTimeout: "30s"
-        maxRetries: 3
-  
-  # Consumer settings
-  consumer:
-    sessionTimeout: "30s"
-    heartbeatInterval: "10s"
-    maxPollRecords: 500
-    maxPollTimeout: "30s"
-    autoCommitInterval: "5s"
-  
-  # Producer settings
-  producer:
-    batchSize: 16384
-    lingerMs: 5
-    acks: "leader"
-    retries: 3
-    retryBackoff: "100ms"
-  
-  # Logging
-  logging:
-    level: "info"
-    format: "json"
+    # -> GOQUEUE_CLUSTER_QUORUM: votes needed to elect a controller
+    quorumSize: 2
 
 # -----------------------------------------------------------------------------
 # NETWORK / SERVICES

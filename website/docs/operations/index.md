@@ -15,12 +15,17 @@ Deploy, monitor, and operate GoQueue in production.
 
 ## Deployment Options
 
-| Environment | Recommended Setup | Guide |
-|-------------|------------------|-------|
-| Development | Single binary, local filesystem | [Local Setup](local) |
-| Docker | Docker Compose with persistence | [Docker](docker) |
-| Kubernetes | Helm chart with StatefulSet | [Kubernetes](kubernetes) |
-| Production | 3+ node cluster with etcd | [Clustering](clustering) |
+| Environment | Recommended Setup |
+|-------------|------------------|
+| Development | Single binary, local filesystem |
+| Docker | Docker Compose with persistence |
+| Kubernetes | Helm chart with StatefulSet |
+| Production | 3+ node cluster, `GOQUEUE_CLUSTER_ENABLED=true` |
+
+Coordination is built in: gossip membership and controller election run inside
+the broker, so a production cluster is three or more GoQueue processes and
+nothing else. There is no ZooKeeper, etcd or other external coordination
+service to deploy.
 
 ---
 
@@ -33,11 +38,14 @@ Deploy, monitor, and operate GoQueue in production.
 curl -L https://github.com/abd-ulbasit/goqueue/releases/latest/download/goqueue-linux-amd64 -o goqueue
 chmod +x goqueue
 
-# Start with defaults
+# Start with defaults (binds to loopback, data in ./data)
 ./goqueue
 
-# Start with custom config
-./goqueue --config /etc/goqueue/config.yaml
+# Configure through the environment; there is no config file or flag
+GOQUEUE_BROKER_DATADIR=/var/lib/goqueue \
+GOQUEUE_LISTENERS_HTTP=:8080 \
+GOQUEUE_LISTENERS_GRPC=:9000 \
+./goqueue
 ```
 
 ### Docker
@@ -74,10 +82,11 @@ helm install goqueue goqueue/goqueue \
 
 ### Prometheus Metrics
 
-GoQueue exposes Prometheus metrics on port 9090:
+GoQueue exposes Prometheus metrics at `/metrics` on the HTTP API listener.
+There is no separate metrics port:
 
 ```bash
-curl http://localhost:9090/metrics
+curl http://localhost:8080/metrics
 ```
 
 Key metrics:
@@ -231,75 +240,68 @@ See [Troubleshooting Guide](troubleshooting) for more.
 
 ## Security
 
-### TLS/SSL
+Security is configured through the environment, like everything else. The full
+variable list is in the [Configuration Reference]({{ '/docs/configuration/reference' | relative_url }}).
 
-```yaml
-listeners:
-  http: ":8080"
-  grpc: ":9000"
-  
-tls:
-  enabled: true
-  certFile: "/etc/goqueue/tls/server.crt"
-  keyFile: "/etc/goqueue/tls/server.key"
-  caFile: "/etc/goqueue/tls/ca.crt"
-  clientAuth: "require"  # none, request, require
+### TLS
+
+```bash
+export GOQUEUE_TLS_ENABLED=true
+export GOQUEUE_TLS_CERT_FILE=/etc/goqueue/tls/server.crt
+export GOQUEUE_TLS_KEY_FILE=/etc/goqueue/tls/server.key
+export GOQUEUE_TLS_CA_FILE=/etc/goqueue/tls/ca.crt
+export GOQUEUE_TLS_CLIENT_AUTH=require-verify
+export GOQUEUE_TLS_MIN_VERSION=1.3
 ```
+
+The certificate files are watched and reloaded in place, so renewal does not
+need a restart. The same suffixes under `GOQUEUE_CLUSTER_TLS_` configure mTLS
+between cluster nodes.
 
 ### Authentication
 
-```yaml
-auth:
-  enabled: true
-  
-  # API Key authentication
-  apiKeys:
-    - key: "your-api-key"
-      name: "admin"
-      roles: ["admin"]
-    - key: "producer-key"
-      name: "producer"
-      roles: ["producer"]
-  
-  # JWT authentication
-  jwt:
-    enabled: true
-    issuer: "https://auth.example.com"
-    jwksUrl: "https://auth.example.com/.well-known/jwks.json"
+```bash
+export GOQUEUE_AUTH_ENABLED=true
+export GOQUEUE_API_ROOT_KEY=...          # keep in a Secret, not in a manifest
+export GOQUEUE_AUTH_ALLOW_HEALTH=true    # false breaks Kubernetes probes
 ```
+
+The root key is registered at startup with the `admin` role. It is the only key
+that comes from the environment; further keys are minted through the admin API
+using it, and are returned once at creation time:
+
+```bash
+curl -H "X-API-Key: $GOQUEUE_API_ROOT_KEY" -H "Content-Type: application/json" \
+  -d '{"name":"producer-svc","roles":["producer"]}' \
+  http://localhost:8080/admin/keys
+{"id":"key_3444ca357e1abf51","key":"gq_22a8294e...","prefix":"gq_22a8294e","name":"producer-svc","roles":["producer"]}
+```
+
+`GET /admin/keys` lists keys by hash and prefix, `DELETE /admin/keys/{keyID}`
+revokes one. Roles are `admin`, `producer`, `consumer` and `readonly`.
 
 ### Authorization
 
-```yaml
-authorization:
-  enabled: true
-  
-  # Role definitions
-  roles:
-    admin:
-      permissions: ["*"]
-    producer:
-      permissions: ["topic:read", "topic:write"]
-    consumer:
-      permissions: ["topic:read", "group:*"]
-    readonly:
-      permissions: ["topic:read"]
-  
-  # ACLs
-  acls:
-    - principal: "producer-service"
-      resource: "topic:orders"
-      operations: ["write"]
-    - principal: "analytics"
-      resource: "topic:*"
-      operations: ["read"]
+```bash
+export GOQUEUE_ACL_ENABLED=true
 ```
+
+Enables per-key ACL enforcement on top of authentication. Rules are managed at
+`/admin/acls` and scoped to a topic, consumer group or the cluster:
+
+```bash
+curl -H "X-API-Key: $GOQUEUE_API_ROOT_KEY" -H "Content-Type: application/json" \
+  -d '{"principal":"producer-svc","resource_type":"topic","resource_name":"orders","operation":"write","effect":"allow"}' \
+  http://localhost:8080/admin/acls
+```
+
+`resource_type` is `topic`, `group` or `cluster`; `operation` is `read`,
+`write`, `create`, `delete` or `all`; `effect` is `allow` or `deny`. Rules are
+held in memory, so they need reapplying after a restart.
 
 ---
 
 ## Next Steps
 
-- [Docker Deployment](docker) - Container deployment guide
-- [Kubernetes Deployment](kubernetes) - Helm chart and manifests
-- [Clustering](clustering) - Multi-node setup
-- [Monitoring](monitoring) - Detailed observability guide
+- [Configuration Reference]({{ '/docs/configuration/reference' | relative_url }}) - Every variable the broker reads
+- [Benchmarks]({{ '/docs/operations/benchmarks' | relative_url }}) - What has been measured, and how

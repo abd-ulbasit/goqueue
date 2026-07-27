@@ -84,8 +84,6 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
       annotations:
-        # Checksum of config to trigger rolling update on config change
-        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -181,21 +179,9 @@ spec:
               value: {{ include "goqueue.clusterPeers" . | quote }}
             - name: GOQUEUE_CLUSTER_ADVERTISE
               value: "$(POD_NAME).{{ include "goqueue.headlessServiceName" . }}.$(POD_NAMESPACE).svc.cluster.local:{{ include "goqueue.internalPort" . }}"
-            - name: GOQUEUE_CLUSTER_REPLICATION_FACTOR
-              value: {{ .Values.config.cluster.replicationFactor | quote }}
-            - name: GOQUEUE_CLUSTER_MIN_ISR
-              value: {{ .Values.config.cluster.minInSyncReplicas | quote }}
-            
-            # Metrics
-            - name: GOQUEUE_METRICS_ENABLED
-              value: {{ .Values.metrics.enabled | quote }}
-            
-            # Logging
-            - name: GOQUEUE_LOG_LEVEL
-              value: {{ .Values.config.logging.level | quote }}
-            - name: GOQUEUE_LOG_FORMAT
-              value: {{ .Values.config.logging.format | quote }}
-            
+            - name: GOQUEUE_CLUSTER_QUORUM
+              value: {{ .Values.config.cluster.quorumSize | quote }}
+
             # ═══════════════════════════════════════════════════════════════════
             # SECURITY CONFIGURATION (M21)
             # ═══════════════════════════════════════════════════════════════════
@@ -281,8 +267,6 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
-            - name: config
-              mountPath: /config
               readOnly: true
             # Tmp directory for read-only root filesystem
             - name: tmp
@@ -356,9 +340,6 @@ spec:
       
       # Volumes (non-persistent)
       volumes:
-        - name: config
-          configMap:
-            name: {{ include "goqueue.configMapName" . }}
         - name: tmp
           emptyDir: {}
         {{- if .Values.security.tls.enabled }}

@@ -69,13 +69,6 @@ Create the headless service name for StatefulSet
 {{- end }}
 
 {{/*
-Create the ConfigMap name
-*/}}
-{{- define "goqueue.configMapName" -}}
-{{- printf "%s-config" (include "goqueue.fullname" .) }}
-{{- end }}
-
-{{/*
 Create the secret name
 */}}
 {{- define "goqueue.secretName" -}}

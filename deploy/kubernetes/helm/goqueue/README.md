@@ -72,8 +72,8 @@ resources:
 replicaCount: 5
 config:
   cluster:
-    replicationFactor: 3
-    minInSyncReplicas: 2
+    enabled: true
+    quorumSize: 3   # majority of 5
 persistence:
   size: 100Gi
   storageClass: premium-rwo

@@ -104,15 +104,24 @@ docker run -d \
   -v goqueue-data:/var/lib/goqueue \
   abdulbasit/goqueue:latest
 
-# With custom config
+# With custom settings. The broker is configured by environment variables;
+# it reads no config file and parses no flags.
 docker run -d \
   --name goqueue \
   -p 8080:8080 \
   -p 9000:9000 \
-  -v $(pwd)/config.yaml:/etc/goqueue/config.yaml \
+  -e GOQUEUE_BROKER_DATADIR=/var/lib/goqueue \
+  -e GOQUEUE_LISTENERS_HTTP=:8080 \
+  -e GOQUEUE_LISTENERS_GRPC=:9000 \
   -v goqueue-data:/var/lib/goqueue \
-  abdulbasit/goqueue:latest --config /etc/goqueue/config.yaml
+  abdulbasit/goqueue:latest
 ```
+
+The default listeners bind to loopback, so a container needs
+`GOQUEUE_LISTENERS_HTTP` and `GOQUEUE_LISTENERS_GRPC` set to `:port` to be
+reachable from outside. See the
+[configuration reference]({{ '/docs/configuration/reference' | relative_url }})
+for the full list.
 
 ### Docker Compose
 
@@ -125,14 +134,14 @@ services:
   goqueue:
     image: abdulbasit/goqueue:latest
     ports:
-      - "8080:8080"   # HTTP API
+      - "8080:8080"   # HTTP API, also serves /metrics
       - "9000:9000"   # gRPC API
-      - "9090:9090"   # Metrics
     volumes:
       - goqueue-data:/var/lib/goqueue
-      - ./config.yaml:/etc/goqueue/config.yaml
     environment:
-      - GOQUEUE_LOG_LEVEL=info
+      - GOQUEUE_BROKER_DATADIR=/var/lib/goqueue
+      - GOQUEUE_LISTENERS_HTTP=:8080
+      - GOQUEUE_LISTENERS_GRPC=:9000
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
       interval: 10s

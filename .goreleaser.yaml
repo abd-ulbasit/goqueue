@@ -158,7 +158,6 @@ archives:
     files:
       - LICENSE
       - README.md
-      - config.example.yaml
       - docs/ARCHITECTURE.md
       - docs/runbook.md
 

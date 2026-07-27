@@ -16,20 +16,18 @@ Configure GoQueue for your environment and workload.
 
 ## Overview
 
-GoQueue can be configured via:
+The broker is configured by environment variables, all prefixed `GOQUEUE_`.
+There is no configuration file and there are no command-line flags: the broker
+parses neither, so a `config.yaml` sitting next to the binary and a `--config`
+argument passed to it are both read by nothing.
 
-1. **YAML configuration file** (recommended)
-2. **Environment variables**
-3. **Command-line flags**
+That makes precedence simple. A variable is either set or it is not; if it is
+not, the default in code applies. Nothing overrides anything else.
 
-Configuration precedence (highest to lowest):
-1. Command-line flags
-2. Environment variables
-3. Configuration file
-4. Default values
+Topic-level settings such as partition count, retention, replication factor and
+visibility timeout are properties of a topic, set when the topic is created,
+not process-level configuration.
 
 ## Quick Links
 
-- [Configuration Reference](reference) - Complete configuration options
-- [Production Configuration](production) - Production-ready settings
-- [Performance Tuning](tuning) - Optimize for your workload
+- [Configuration Reference](reference) - Every variable the broker reads
