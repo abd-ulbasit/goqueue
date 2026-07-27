@@ -36,7 +36,7 @@
 # -----------------------------------------------------------------------------
 # STAGE 1: Builder - Compile the Go binary
 # -----------------------------------------------------------------------------
-FROM golang:1.24-alpine AS builder
+FROM golang:1.25-alpine AS builder
 
 # ┌─────────────────────────────────────────────────────────────────────────────┐
 # │ WHY ALPINE FOR BUILD?                                                       │
@@ -44,7 +44,7 @@ FROM golang:1.24-alpine AS builder
 # │ Alpine Linux is small (~5MB) but has full musl libc and package manager.    │
 # │ We need: git (for go mod), ca-certificates, and build essentials.           │
 # │                                                                             │
-# │ Alternative: golang:1.24 (Debian-based, larger but glibc)                   │
+# │ Alternative: golang:1.25 (Debian-based, larger but glibc)                   │
 # │ We use Alpine because we're building static binaries anyway.                │
 # └─────────────────────────────────────────────────────────────────────────────┘
 
