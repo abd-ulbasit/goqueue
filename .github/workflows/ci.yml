@@ -432,10 +432,15 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # Pinned rather than `latest`. `latest` resolves through a release-API
+      # call on every run, so the job depends on that call succeeding and on
+      # whatever buf shipped that morning: it failed here on 2026-07-27 in a
+      # commit that touched no proto and no CI step it uses. A pinned version
+      # fails only when someone changes this line.
       - name: Install buf
         uses: bufbuild/buf-setup-action@v1
         with:
-          version: latest
+          version: 1.72.0
 
       - name: Buf lint
         run: buf lint api/proto
