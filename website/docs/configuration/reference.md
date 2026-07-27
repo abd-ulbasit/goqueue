@@ -142,6 +142,31 @@ restart.
 | `GOQUEUE_API_ROOT_KEY` | empty | Root admin key. Set this when auth is enabled, or nothing can mint further keys |
 | `GOQUEUE_AUTH_ALLOW_HEALTH` | `true` | Set to `false` to require auth on health endpoints too. Doing so will break Kubernetes probes unless they carry a key |
 | `GOQUEUE_ACL_ENABLED` | unset | `true` enforces per-key topic ACLs on top of authentication |
+| `GOQUEUE_TRUSTED_PROXIES` | empty | Comma-separated CIDR blocks or bare IPs whose `X-Forwarded-For` is believed. See below |
+
+### Client IP and `X-Forwarded-For`
+
+The audit log records a client IP on every auth failure and ACL denial. That
+field is only worth anything if the caller cannot choose it.
+
+`X-Forwarded-For` is a request header, so anyone who can reach the API can send
+one. goqueue therefore ignores it unless the TCP peer is listed in
+`GOQUEUE_TRUSTED_PROXIES`. With the default empty list, the client IP is always
+the TCP peer address, which cannot be forged across a TCP handshake.
+
+If you run behind a load balancer or ingress controller, set the variable to the
+addresses that balancer connects *from* — not the addresses it serves:
+
+```
+GOQUEUE_TRUSTED_PROXIES=10.0.0.0/8,192.168.1.7
+```
+
+goqueue then walks `X-Forwarded-For` from right to left and takes the first hop
+outside that list: the last address one of your own proxies observed. Entries a
+client prepended to the header sit further left and are never reached.
+
+A malformed value is logged and treated as an empty list, so a typo costs you
+proxy awareness rather than silently restoring the spoof.
 
 ---
 

@@ -17,7 +17,7 @@
 //
 // MIDDLEWARE CHAIN:
 //
-//   Request ──► RequestID ──► RealIP ──► Logger ──► Recoverer
+//   Request ──► RequestID ──► ClientIP ──► Logger ──► Recoverer
 //           ──► MaxBodySize ──► RateLimit ──► Auth ──► Handler
 //
 // =============================================================================

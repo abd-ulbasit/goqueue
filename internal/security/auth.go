@@ -504,7 +504,7 @@ func (m *APIKeyManager) AuthMiddleware(next http.Handler) http.Handler {
 				"path", r.URL.Path,
 				"method", r.Method,
 				"error", err,
-				"remote_addr", r.RemoteAddr,
+				"remote_addr", ClientIP(r),
 			)
 
 			status := http.StatusUnauthorized

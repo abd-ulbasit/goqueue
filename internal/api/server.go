@@ -239,7 +239,26 @@ func NewServer(b *broker.Broker, config ServerConfig) *Server {
 
 	// Set up middleware
 	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
+
+	// Client IP resolution.
+	//
+	// This used to be chi's middleware.RealIP, which is deprecated as of chi
+	// 5.3.1 because it rewrites r.RemoteAddr from the leftmost
+	// X-Forwarded-For value with no notion of which peers are trusted — so
+	// every caller got to choose the IP that landed in the audit log. Our
+	// middleware ignores X-Forwarded-For unless the TCP peer is a configured
+	// trusted proxy, and never mutates r.RemoteAddr. Read the result with
+	// security.ClientIP(r). See internal/security/clientip.go.
+	trustedProxies, err := security.ParseTrustedProxies(config.Security.TrustedProxies)
+	if err != nil {
+		// Misconfigured proxy list: log it and trust nothing, so the client
+		// IP falls back to the unspoofable TCP peer.
+		logger.Error("invalid trusted proxy list, ignoring X-Forwarded-For entirely",
+			"error", err)
+		trustedProxies = &security.TrustedProxies{}
+	}
+	r.Use(security.ClientIPMiddleware(trustedProxies))
+
 	r.Use(s.loggingMiddleware)
 	r.Use(middleware.Recoverer)
 

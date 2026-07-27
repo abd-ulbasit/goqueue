@@ -32,6 +32,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/go-chi/chi/v5"
@@ -380,6 +381,12 @@ type SecurityConfig struct {
 
 	// ACL settings
 	ACLEnabled bool
+
+	// TrustedProxies lists the peer addresses (CIDR blocks or bare IPs)
+	// whose X-Forwarded-For header is believed when resolving the client IP
+	// recorded in audit logs. Empty — the default — means the client IP is
+	// always the TCP peer and X-Forwarded-For is ignored. See clientip.go.
+	TrustedProxies []string
 }
 
 // DefaultSecurityConfig returns a default security configuration.
@@ -399,7 +406,24 @@ func LoadSecurityConfigFromEnv() SecurityConfig {
 		MTLS:       LoadTLSConfigFromEnv("GOQUEUE_CLUSTER_TLS"),
 		Auth:       LoadAPIKeyConfigFromEnv(),
 		ACLEnabled: os.Getenv("GOQUEUE_ACL_ENABLED") == "true",
+
+		TrustedProxies: splitAndTrim(os.Getenv("GOQUEUE_TRUSTED_PROXIES")),
 	}
+}
+
+// splitAndTrim splits a comma-separated env value, dropping empty entries.
+func splitAndTrim(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // NewSecurityManagerWithConfig creates a security manager from config.

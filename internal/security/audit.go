@@ -287,7 +287,7 @@ func (a *AuditLogger) LogResourceEvent(event AuditEvent, resource, actor, client
 // ┌─────────────────────────────────────────────────────────────────────────────┐
 // │ MIDDLEWARE POSITION IN CHAIN                                                │
 // │                                                                             │
-// │ Request ──► RequestID ──► RealIP ──► Logger ──► Recoverer                  │
+// │ Request ──► RequestID ──► ClientIP ──► Logger ──► Recoverer                │
 // │         ──► BodyLimit ──► RateLimit ──► CORS ──► Auth ──► AUDIT            │
 // │         ──► Handler                                                         │
 // │                                                                             │
@@ -319,11 +319,13 @@ func AuditMiddleware(audit *AuditLogger) func(http.Handler) http.Handler {
 			wrapped := &auditResponseWriter{ResponseWriter: w, status: 200}
 			next.ServeHTTP(wrapped, r)
 
-			// Log based on response status
-			clientIP := r.RemoteAddr
-			if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
-				clientIP = forwarded
-			}
+			// Log based on response status.
+			//
+			// ClientIP is the trusted-proxy-aware resolution from
+			// clientip.go. Do NOT read X-Forwarded-For here: it is a
+			// caller-supplied header, and reading it directly is what let
+			// anyone pick the IP recorded against their own auth failures.
+			clientIP := ClientIP(r)
 
 			switch {
 			case wrapped.status == http.StatusUnauthorized:
