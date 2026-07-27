@@ -814,7 +814,11 @@ func (b *Broker) PublishAtWithPriority(topic string, key, value []byte, deliverA
 		if !isLeader {
 			// For delayed messages, we can't simply forward via HTTP because
 			// the leader needs to register with its local scheduler.
-			// TODO: Implement delayed message forwarding with scheduler registration
+			// LIMITATION: not forwarded. A delayed message has to be registered
+			// with the leader's local scheduler, which a plain HTTP forward would
+			// bypass, so the message would be stored but never fire. Failing with
+			// the leader's address is the honest outcome until the forward carries
+			// a scheduler registration.
 			// For now, we log and return an error (client should retry to leader)
 			leaderAddr := b.clusterCoordinator.GetLeaderClientAddress(topic, partition)
 			b.logger.Warn("delayed publish to non-leader not yet supported, client should publish to leader",

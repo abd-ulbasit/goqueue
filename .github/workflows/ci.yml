@@ -97,10 +97,27 @@ jobs:
   #   Generate coverage report for Codecov integration.
   #   Not a gate (we don't enforce minimum coverage), but useful for tracking.
   #
+  #   The upload is conditional on CODECOV_TOKEN being set, and fails loudly
+  #   when it is. It used to run unconditionally with fail_ci_if_error: false,
+  #   which meant every run since the workflow was added logged
+  #
+  #       Token required - not valid tokenless upload
+  #
+  #   and then reported success. Coverage was computed on every push and
+  #   silently thrown away, and the green check said otherwise. A skipped step
+  #   that says why is honest; a passing step that uploaded nothing is not.
+  #
+  #   The profile is kept as an artifact either way, so the numbers are
+  #   available from the run even with no Codecov account attached.
+  #
   # ============================================================================
   test:
     name: Test
     runs-on: ubuntu-latest
+    env:
+      # Mapped to job env because the `secrets` context is not available in a
+      # step-level `if:`.
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -122,13 +139,29 @@ jobs:
       - name: Run tests with race detection
         run: go test -race -coverprofile=coverage.out -covermode=atomic -timeout=10m ./...
 
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
+      - name: Upload coverage profile as an artifact
+        uses: actions/upload-artifact@v4
         if: always()
         with:
+          name: coverage-profile
+          path: coverage.out
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        if: always() && env.CODECOV_TOKEN != ''
+        with:
           files: coverage.out
-          fail_ci_if_error: false
-          token: ${{ secrets.CODECOV_TOKEN }}
+          # Loud on purpose. A broken upload should be a red step, not a log
+          # line nobody reads.
+          fail_ci_if_error: true
+          token: ${{ env.CODECOV_TOKEN }}
+
+      - name: Note that coverage was not uploaded
+        if: always() && env.CODECOV_TOKEN == ''
+        run: |
+          echo "::notice title=Coverage not uploaded::CODECOV_TOKEN is not set on this repository, so the Codecov upload was skipped. Coverage was still measured and is attached to this run as the 'coverage-profile' artifact. To enable uploads, add the repository secret CODECOV_TOKEN."
 
   # ============================================================================
   # Security — Vulnerability Scanning

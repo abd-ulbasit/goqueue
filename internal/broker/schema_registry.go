@@ -316,8 +316,13 @@ type SchemaRegistry struct {
 	// schemas maps schema ID → Schema
 	schemas map[int64]*Schema
 
-	// subjects maps subject → version → Schema
-	// TODO: should we make it map[string][]int]*Schema for faster lookup?
+	// subjects maps subject → version → Schema.
+	//
+	// The inner map is keyed by version rather than a version-indexed slice
+	// because versions are not dense: deletes leave holes, and a slice would
+	// need either tombstones or a rebuild on every delete. Lookup is already
+	// O(1) either way, and a subject holds a handful of versions, so the
+	// slice would buy nothing measurable.
 	subjects map[string]map[int]*Schema
 
 	// subjectConfigs maps subject → SubjectConfig

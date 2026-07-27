@@ -58,7 +58,7 @@
 //   - $ref (basic, local references only)
 //
 // FUTURE:
-// TODO: Enhance the validator to support more JSON Schema features:
+// Supporting the rest of Draft 7 means bringing in a real implementation:
 //   - Add github.com/santhosh-tekuri/jsonschema for full Draft 7 support
 //   - Add Protobuf support via protoc-gen-go
 //   - Add Avro support via goavro

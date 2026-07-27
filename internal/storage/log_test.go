@@ -372,15 +372,24 @@ func BenchmarkLog_Append(b *testing.B) {
 	dir := b.TempDir()
 	log, _ := NewLog(dir)
 	defer log.Close()
-	//TODO Check why the follwing benchmark for value of the message
-	// max value size in the message.go says 16MB
-	// for 1KB     293733	      3520 ns/op	    1170 B/op	       1 allocs/op
-	// for 1MB       2030	    570840 ns/op	 1073798 B/op	       1 allocs/op
-	// for 4MB        534	   1968821 ns/op	 4479483 B/op	       2 allocs/op
-	// for 8MB        240	   4242974 ns/op	 9589645 B/op	       4 allocs/op
-	// for 32MB   2913681	     404.6 ns/op	     408 B/op	       7 allocs/op
-	// for 64MB   2783688	     416.8 ns/op	     408 B/op	       7 allocs/op
-	msg := NewMessage([]byte("key"), make([]byte, 8*1024*1024)) // 1KB message
+	// Recorded numbers, by message value size:
+	//   1KB     293733	      3520 ns/op	    1170 B/op	       1 allocs/op
+	//   1MB       2030	    570840 ns/op	 1073798 B/op	       1 allocs/op
+	//   4MB        534	   1968821 ns/op	 4479483 B/op	       2 allocs/op
+	//   8MB        240	   4242974 ns/op	 9589645 B/op	       4 allocs/op
+	//   32MB   2913681	     404.6 ns/op	     408 B/op	       7 allocs/op
+	//   64MB   2783688	     416.8 ns/op	     408 B/op	       7 allocs/op
+	//
+	// The 32MB and 64MB rows are not a speedup, they are the benchmark
+	// measuring nothing. MaxValueSize is 16MB (message.go), so encoding fails
+	// with ErrValueTooLarge before anything is written:
+	//
+	//	value exceeds maximum size: value is 33554432 bytes, max is 16777216
+	//
+	// 400ns and 408 B/op is the cost of building and returning that error, not
+	// of writing a message. Anything at or below 16MB scales linearly with
+	// payload size, which is what this benchmark is actually for.
+	msg := NewMessage([]byte("key"), make([]byte, 8*1024*1024)) // 8MB message
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

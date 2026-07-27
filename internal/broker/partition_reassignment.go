@@ -592,10 +592,14 @@ func (rm *ReassignmentManager) waitForCatchup(
 
 // checkCatchup returns whether all new replicas are caught up.
 //
-// IMPLEMENTATION NOTE:
-// In a real system, we'd query each replica's offset via RPC.
-// TODO: Implement RPC calls to get replica offsets.
-// For now, we simulate by checking local state (works in single-node tests).
+// LIMITATION: this reads local state, not the replicas'.
+//
+// A correct check queries each new replica for its log end offset over the
+// cluster RPC. Reading local state means that on a multi-node cluster every
+// remote replica looks caught up the moment the leader is, so a reassignment
+// can complete while a new replica is still behind. Single-node, where leader
+// and replica are the same log, is the only case this is right for — which is
+// why it is adequate for the tests and not for a real cluster.
 func (rm *ReassignmentManager) checkCatchup(pr *PartitionReassignment) (bool, float64) {
 	// Get leader's current offset
 	assignment := rm.metadataStore.GetAssignment(pr.Topic, pr.Partition)
@@ -667,9 +671,9 @@ func (rm *ReassignmentManager) getReplicaOffset(topic string, partition int, nod
 		return rm.getPartitionHighWatermark(topic, partition)
 	}
 
-	// For remote nodes, would need RPC
-	// For now, assume caught up (tests only)
-	// TODO: Implement RPC to get remote replica offset
+	// A remote replica's offset would have to come over the cluster RPC.
+	// Returning the local high watermark instead reports every remote replica
+	// as fully caught up. See the limitation on checkCatchup above.
 	return rm.getPartitionHighWatermark(topic, partition)
 }
 

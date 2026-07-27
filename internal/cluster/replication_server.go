@@ -580,8 +580,16 @@ func (rs *ReplicationServer) addToISR(topic string, partition int, nodeID NodeID
 		return fmt.Errorf("node %s is not a replica for this partition", nodeID)
 	}
 
-	// TODO: Verify offset is caught up with leader.
-	// For now, trust the request.
+	// KNOWN LIMITATION: this trusts the caller's claim to be caught up.
+	//
+	// Membership in the ISR is what makes a replica eligible to be elected
+	// partition leader, so a replica that adds itself here while still behind
+	// can be elected and silently truncate the records it never received.
+	// Closing this means comparing the caller's log end offset against the
+	// leader's within the ISR lag bounds already configured in
+	// ReplicationConfig (ISRLagTimeMaxMs, ISRLagMaxMessages) — the same check
+	// ISRManager applies on the leader side — and rejecting the request when
+	// it does not hold.
 
 	newISR := make([]NodeID, 0, len(assignment.ISR)+1)
 	newISR = append(newISR, assignment.ISR...)

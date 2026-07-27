@@ -536,8 +536,24 @@ func (ms *MetadataStore) UpdateISR(topic string, partition int, isr []NodeID) er
 }
 
 // UpdateLeader updates the leader for a partition.
-// TODO: why do have a leader for partition ? is this cluster leader? or replica leader? like which one is the primary replica?
-// Called during leader election (M11).
+//
+// This is the PARTITION leader, not the cluster controller. The two are
+// separate roles:
+//
+//	Cluster controller — one per cluster, elected in controller_elector.go.
+//	  Owns metadata: who holds which partition, and calls this method.
+//
+//	Partition leader — one per partition, chosen from that partition's ISR by
+//	  partition_leader_elector.go. Serves all reads and writes for the
+//	  partition; the other replicas fetch from it. This is the primary replica.
+//
+// A node is very often both, and on a single-node cluster it always is, which
+// is what makes the distinction easy to lose. They fail over independently:
+// losing the controller triggers a controller election and leaves partition
+// leadership untouched, while losing a partition leader triggers a per-
+// partition election run by whichever node is currently controller.
+//
+// Called during partition leader election (M11).
 func (ms *MetadataStore) UpdateLeader(topic string, partition int, leader NodeID) error {
 	ms.mu.Lock()
 	defer ms.mu.Unlock()

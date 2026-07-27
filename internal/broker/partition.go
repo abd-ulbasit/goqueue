@@ -35,6 +35,7 @@ package broker
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -111,8 +112,13 @@ func LoadPartition(baseDir, topic string, id int) (*Partition, error) {
 		dir:               dir,
 		priorityIndex:     NewPriorityIndex(),
 		priorityScheduler: NewPriorityScheduler(DefaultPrioritySchedulerConfig()),
-		// TODO: Can we load actual creation time from file metadata
-		createdAt: time.Now(), //  We don't persist creation time yet
+		// Creation time is not persisted anywhere, so on a restart this is the
+		// time the partition was reopened, not the time it was created. It is
+		// only used for reporting. Deriving it from the filesystem would not
+		// help: the directory's mtime moves every time a segment is rolled.
+		// Making it truthful means writing it into partition metadata at
+		// creation, which is a storage format change.
+		createdAt: time.Now(),
 	}
 
 	// Rebuild priority index and scheduler from log
@@ -622,11 +628,21 @@ func (p *Partition) rebuildPriorityState() error {
 	}
 
 	// Scan all messages and rebuild state
+	skipped := 0
 	for offset := earliest; offset <= latest; offset++ {
 		msg, err := p.log.Read(offset)
 		if err != nil {
-			// Log gap or corrupted message - skip but log warning
-			// TODO: Add proper logging
+			// A gap or a corrupted record. Skipping is right — one bad record
+			// must not stop a partition from opening — but it is silent data
+			// loss from the scheduler's point of view, so say so. Logged at
+			// most once per offset, and summarized below.
+			skipped++
+			slog.Warn("skipping unreadable message while rebuilding priority state",
+				"topic", p.topic,
+				"partition", p.id,
+				"offset", offset,
+				"error", err,
+			)
 			continue
 		}
 
@@ -636,6 +652,15 @@ func (p *Partition) rebuildPriorityState() error {
 		// Enqueue to scheduler for WFQ consumption
 		// The scheduler tracks pending messages and applies WFQ ordering
 		p.priorityScheduler.Enqueue(msg)
+	}
+
+	if skipped > 0 {
+		slog.Warn("partition opened with unreadable messages",
+			"topic", p.topic,
+			"partition", p.id,
+			"skipped", skipped,
+			"scanned", latest-earliest+1,
+		)
 	}
 
 	return nil

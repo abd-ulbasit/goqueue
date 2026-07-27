@@ -287,7 +287,13 @@ func LoadIndex(path string, baseOffset int64) (*Index, error) {
 //	lastLogPosition = 4100
 //	MaybeAppend(101, 4200)  // position 4200 < 4100 + 4096, skip → false
 func (idx *Index) MaybeAppend(offset, position int64) (bool, error) {
-	// TODO: Maybe first check with RLock for performance?
+	// Takes the write lock up front rather than testing the threshold under a
+	// read lock first. The read-then-upgrade version would have to re-check
+	// the threshold after upgrading — two goroutines can both pass the read
+	// check and then both append — so it costs a second comparison and an
+	// extra lock acquisition to save a write lock on the common skip path.
+	// Appends are already serialized by the caller holding the segment lock,
+	// so there is no contention here to optimize away.
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 

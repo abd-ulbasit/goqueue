@@ -696,9 +696,9 @@ func (t *Timer) ObserveDuration() time.Duration {
 // CURRENT STATE: Not implemented - using Prometheus directly
 // FUTURE: Could add go.opentelemetry.io/otel/exporters/prometheus
 func (r *Registry) WithOTLP(ctx context.Context, endpoint string) error {
-	// TODO: Implement OTLP metric export when needed
-	// For now, we use Prometheus directly for metrics
-	// and OpenTelemetry for traces (M7)
+	// Deliberately a no-op. Metrics go to Prometheus directly and traces go
+	// through OpenTelemetry (M7); nothing in the tree needs OTLP metrics, so
+	// this exists only to keep the call site stable if that changes.
 	r.logger.Info("OTLP metrics export not yet implemented",
 		"endpoint", endpoint,
 	)

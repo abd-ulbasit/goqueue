@@ -627,10 +627,15 @@ func (s *consumeServiceServer) resolveStartOffset(
 		if req.StartTimestamp == nil {
 			return 0, status.Error(codes.InvalidArgument, "start_timestamp required for TIMESTAMP position")
 		}
-		// TODO: Use time index to find offset (M14)
-		// For now, fall back to earliest since time index isn't implemented yet
-		// Time Index is implemented in storage but not yet exposed in broker?
-		// use that
+		// LIMITATION: falls back to earliest instead of seeking.
+		//
+		// The time index itself exists — internal/storage/time_index.go builds
+		// and queries it — but nothing on Topic or Partition surfaces a
+		// timestamp-to-offset lookup, so this layer has no way to reach it.
+		// Wiring it up is a broker-side accessor, not new storage work.
+		//
+		// Consequence: a consumer asking to start at a timestamp gets the whole
+		// retained log instead. Loud rather than silent, hence the warning.
 		s.logger.Warn("timestamp-based offset lookup not yet implemented, using earliest",
 			"topic", topic.Name(),
 			"partition", partition,
@@ -756,9 +761,10 @@ func (s *consumeServiceServer) getCommittedOrDefaultOffset(
 	}
 }
 
-// heartbeatLoop sends periodic heartbeats and detects rebalances.
-// TODO: this needs to be enhanced to actually detect rebalances
-// NOTE: Current goqueue coordinator doesn't return rebalance info from Heartbeat.
+// heartbeatLoop sends periodic heartbeats to keep the consumer alive.
+//
+// Despite the name it does not detect rebalances, because there is nothing to
+// detect them from: the coordinator's Heartbeat carries no rebalance info.
 // Rebalancing is handled through JoinGroup. For now, we just keep the consumer alive.
 // A future enhancement could add rebalance notifications via a separate mechanism.
 func (s *consumeServiceServer) heartbeatLoop(

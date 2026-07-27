@@ -1,7 +1,3 @@
-// TODO: Break this file into smaller files per feature (e.g., topics.go, messages.go, groups.go, etc.)
-// for better maintainability.
-// TODO: Add unit tests for all handlers and edge cases.
-
 // =============================================================================
 // HTTP API SERVER - REST INTERFACE FOR GOQUEUE
 // =============================================================================

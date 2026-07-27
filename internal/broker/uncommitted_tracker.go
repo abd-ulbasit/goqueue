@@ -351,7 +351,7 @@ func (ut *UncommittedTracker) GetTransactionOffsets(txnID string) []partitionOff
 //      - Pro: Simple, O(1) lookup
 //      - Con: Memory usage grows with aborts (but aborts should be rare)
 //
-// TODO: Persistence: can be enhanced to persist aborted offsets:
+// A third option, not taken:
 //   3. Store aborted offsets in a persistent index
 //      - Pro: Survives restarts
 //      - Con: Added complexity

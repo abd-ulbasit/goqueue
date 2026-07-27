@@ -654,6 +654,26 @@ waiting for the right interleaving.
 
 ---
 
+## How this was built
+
+Part of the history here carries a `Co-authored-by: Claude` trailer — run `git
+log --grep='^Co-authored-by: Claude' -i --oneline | wc -l` against `git log
+--oneline | wc -l` for the current ratio. I build with coding agents and review,
+benchmark, and integrate what comes back.
+
+The parts that decided the shape of this project were not generated. The
+benchmark numbers above came from running the thing on a real cluster and then
+arguing with the results: [docs/BENCHMARKS.md](docs/BENCHMARKS.md) still carries
+the concurrency levels that regressed, and the README says outright that the
+sequential row measures the load generator rather than the broker. The bugs
+worth reading were found the same way — the replica manager's send-on-closed-
+channel shutdown path, and the audit log recording a client IP that the caller
+got to choose ([internal/security/clientip.go](internal/security/clientip.go)).
+If you want to judge the engineering rather than the tooling, start with those
+and with the mechanisms listed above.
+
+---
+
 ## License
 
 MIT License - see [LICENSE](LICENSE) for details.

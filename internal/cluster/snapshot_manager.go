@@ -521,7 +521,10 @@ func (sm *SnapshotManager) loadExistingSnapshots() {
 		// Parse filename: topic-partition-offset.tar.gz
 		// For now, just log that we found snapshots.
 		sm.logger.Debug("found existing snapshot", "file", entry.Name())
-		// TODO: Parse and load metadata if needed.
+		// Discovery is log-only on purpose: the filename carries everything a
+		// restore needs (topic, partition, offset), and Restore parses it then.
+		// Eagerly loading every snapshot header here would cost startup time for
+		// data that is usually never read.
 	}
 }
 

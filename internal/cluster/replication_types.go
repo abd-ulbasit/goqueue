@@ -175,7 +175,14 @@ type FetchRequest struct {
 
 	// LeaderEpoch is the follower's expected leader epoch.
 	// If stale, leader rejects the request (epoch fencing).
-	// TODO: then this rapilica would be good for nothing ?
+	//
+	// A fenced follower is not written off — rejection is how it learns its
+	// view of the leader is stale. It stops that fetcher
+	// (FetchErrorEpochFenced in follower_fetcher.go), and ReplicaManager
+	// starts a fresh one against the new leader at the new epoch once the
+	// metadata update reaches it. Serving the request instead would let the
+	// follower keep replicating from a deposed leader and silently diverge,
+	// which is the split-brain this field exists to prevent.
 	LeaderEpoch int64 `json:"leader_epoch"`
 }
 
@@ -214,8 +221,12 @@ type FetchResponse struct {
 }
 
 // ReplicatedMessage is a message in the fetch response.
-// Simplified format for replication (full message bytes).
-// TODO: We have some missing fields here (Compression, flags, etc.)
+//
+// This is deliberately a simplified format: offset, timestamp, key, value.
+// Compression and record flags are not carried, so a follower stores what the
+// leader decoded rather than a byte-identical copy of the leader's segment.
+// That costs bandwidth versus shipping compressed batches through untouched,
+// and it is the reason replication cannot currently be a plain segment copy.
 type ReplicatedMessage struct {
 	// Offset is the message's offset in the partition.
 	Offset int64 `json:"offset"`

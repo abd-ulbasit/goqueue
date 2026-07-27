@@ -448,7 +448,23 @@ type ReliabilityConfig struct {
 	// Can be overridden per-message or per-topic.
 	// Default: 0
 	DefaultMessageTTLMs int64
+
+	// RetryQueueSize is the capacity of the ACK manager's retry channel.
+	//
+	// This is not just a buffer size, it is the backpressure threshold: a NACK
+	// that arrives when the channel is full is not retried at all, it is routed
+	// straight to the DLQ with DLQReasonBackpressure. Raising it absorbs longer
+	// bursts at the cost of memory; lowering it sheds load to the DLQ sooner.
+	// Either way, DLQ traffic tagged BACKPRESSURE is the signal that this value
+	// (or consumer throughput) needs attention.
+	//
+	// Default: 10000. Values <= 0 fall back to the default.
+	RetryQueueSize int
 }
+
+// DefaultRetryQueueSize is the ACK manager retry channel capacity used when
+// ReliabilityConfig.RetryQueueSize is unset.
+const DefaultRetryQueueSize = 10000
 
 // DefaultReliabilityConfig returns sensible defaults for reliability settings.
 func DefaultReliabilityConfig() ReliabilityConfig {
@@ -464,6 +480,7 @@ func DefaultReliabilityConfig() ReliabilityConfig {
 		MaxInFlightPerConsumer:    1000,
 		VisibilityCheckIntervalMs: 100, // 100ms
 		DefaultMessageTTLMs:       0,   // No TTL by default
+		RetryQueueSize:            DefaultRetryQueueSize,
 	}
 }
 

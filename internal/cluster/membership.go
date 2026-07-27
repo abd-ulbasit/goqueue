@@ -117,20 +117,22 @@ type Membership struct {
 
 	// dataDir is where state is persisted
 	dataDir string
-
-	// config is the cluster configuration
-	// TODO: is this config needed here? if not then remove it
-	config *ClusterConfig
 }
 
 // NewMembership creates a new membership manager.
-func NewMembership(localNode *Node, config *ClusterConfig, dataDir string) *Membership {
+//
+// The config argument is accepted for symmetry with the other cluster
+// components and is deliberately not retained: nothing in Membership reads it.
+// Quorum here is a property of observed state — HasQuorum is a majority of the
+// nodes we know about — while the configured QuorumSize is a bootstrap
+// precondition, enforced by the coordinator in waitForQuorum. Keeping a copy of
+// the config on this struct would invite those two to be conflated.
+func NewMembership(localNode *Node, _ *ClusterConfig, dataDir string) *Membership {
 	return &Membership{
 		localNode: localNode,
 		state:     NewClusterState(),
 		listeners: make([]MembershipListener, 0),
 		dataDir:   dataDir,
-		config:    config,
 	}
 }
 

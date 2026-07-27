@@ -1804,7 +1804,15 @@ func (t *Tracer) SearchTraces(query TraceQuery) []*Trace {
 	if !query.StartTime.IsZero() && !query.EndTime.IsZero() {
 		spans = t.ringBuf.GetByTimeRange(query.StartTime, query.EndTime)
 	} else {
-		// TODO: we are fetching all recent spans ? cap it ?? page no/page size ?
+		// "All recent spans" is already bounded: the ring buffer holds at most
+		// RingBufferCapacity spans and overwrites the oldest, so this scan is
+		// capped by configuration rather than by traffic. query.Limit then
+		// truncates the grouped traces below.
+		//
+		// Not offset pagination: the buffer is a moving window, so page N of a
+		// second request would not line up with page N of the first. Callers
+		// that need a stable window pass StartTime/EndTime, which takes the
+		// branch above.
 		spans = t.ringBuf.GetRecent(t.config.RingBufferCapacity)
 	}
 

@@ -398,15 +398,22 @@ func NewAckManager(broker *Broker, config ReliabilityConfig) *AckManager {
 		Level: slog.LevelInfo,
 	}))
 
+	// Retry queue capacity is the backpressure threshold, not just a buffer:
+	// a NACK arriving when it is full goes to the DLQ instead of being
+	// retried. See ReliabilityConfig.RetryQueueSize.
+	retryQueueSize := config.RetryQueueSize
+	if retryQueueSize <= 0 {
+		retryQueueSize = DefaultRetryQueueSize
+	}
+
 	am := &AckManager{
 		consumerStates: make(map[string]*ConsumerAckState),
-		// TODO:should this be configurable?
-		retryQueue: make(chan *InFlightMessage, 10000),
-		config:     config,
-		broker:     broker,
-		ctx:        ctx,
-		cancel:     cancel,
-		logger:     logger,
+		retryQueue:     make(chan *InFlightMessage, retryQueueSize),
+		config:         config,
+		broker:         broker,
+		ctx:            ctx,
+		cancel:         cancel,
+		logger:         logger,
 	}
 
 	// Create visibility tracker with expiry callback
