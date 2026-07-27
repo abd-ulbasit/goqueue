@@ -395,8 +395,18 @@ jobs:
       - name: Buf lint
         run: buf lint api/proto
 
+      # subdir is load-bearing. The input `api/proto` is a module root, so buf
+      # sees its files as `goqueue.proto`, while the --against reference points
+      # at the whole repository, where the same file is `api/proto/goqueue.proto`.
+      # Comparing those two roots makes every file look deleted:
+      #
+      #   <input>:1:1:Previously present file "api/proto/goqueue.proto" was deleted.
+      #
+      # Because this step only runs on pull_request, main never exercised it and
+      # the check failed on every PR since it was added, including ones that
+      # touched no proto at all.
       - name: Buf breaking change detection
-        run: buf breaking api/proto --against 'https://github.com/${{ github.repository }}.git#branch=main'
+        run: buf breaking api/proto --against 'https://github.com/${{ github.repository }}.git#branch=main,subdir=api/proto'
         if: github.event_name == 'pull_request'
 
   # ============================================================================
