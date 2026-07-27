@@ -104,7 +104,7 @@ type ReplicaManager struct {
 	// Deliberately never closed. Producers (emitEvent) are spread across
 	// request-handling and metadata-listener goroutines that Stop() has no way
 	// to join, so closing here would be a send-on-closed-channel panic waiting
-	// to happen. Shutdown is signalled through ctx instead.
+	// to happen. Shutdown is signaled through ctx instead.
 	eventCh chan ReplicaEvent
 
 	// listeners receive replica events.
@@ -291,7 +291,8 @@ func (rm *ReplicaManager) AddListener(listener func(ReplicaEvent)) {
 	// the lock across user callbacks.
 	updated := make([]func(ReplicaEvent), len(rm.listeners), len(rm.listeners)+1)
 	copy(updated, rm.listeners)
-	rm.listeners = append(updated, listener)
+	updated = append(updated, listener)
+	rm.listeners = updated
 }
 
 // =============================================================================
