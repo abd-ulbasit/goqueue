@@ -221,7 +221,6 @@ COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
 # │ 8080: HTTP API (REST endpoints for produce/consume)                         │
 # │ 9000: gRPC API (high-performance streaming)                                 │
 # │ 7000: Internal cluster communication (replication, leader election)         │
-# │ 9090: Prometheus metrics (if enabled separately)                            │
 # └─────────────────────────────────────────────────────────────────────────────┘
 EXPOSE 8080 9000 7000
 

@@ -174,7 +174,7 @@ func manifestEnvVars(t *testing.T, root string) map[string][]string {
 		// Tracks whether the container currently being described runs goqueue.
 		// An image line re-decides it; a command naming a goqueue binary turns
 		// it on, which is how the backup CronJob (a generic image running
-		// goqueue-admin) is recognised.
+		// goqueue-admin) is recognized.
 		goqueueContainer := false
 
 		for _, line := range strings.Split(string(body), "\n") {
