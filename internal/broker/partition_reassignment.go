@@ -398,7 +398,11 @@ func (rm *ReassignmentManager) StartReassignment(request *ReassignmentRequest) (
 	// START WORKER
 	// =========================================================================
 
-	ctx, cancel := context.WithCancel(context.Background())
+	// gosec G118 wants cancel called or deferred in this scope. It is neither:
+	// the worker outlives this function, so cancel is stored and invoked from
+	// CancelReassignment (explicit cancel) and from the completion cleanup
+	// below. Both paths are covered; the check is syntactic and cannot see it.
+	ctx, cancel := context.WithCancel(context.Background()) //nolint:gosec // G118: cancel is stored in rm.cancelFuncs and invoked on both the cancel and completion paths
 	rm.cancelFuncs[reassignmentID] = cancel
 
 	go rm.runReassignment(ctx, status)
@@ -731,7 +735,15 @@ func (rm *ReassignmentManager) completeReassignment(reassignmentID string, err e
 		delete(rm.partitionReassignments, key)
 	}
 
-	// Clean up cancel func
+	// Clean up cancel func. Call it before dropping the reference: the context
+	// is derived from context.Background(), so nothing else will ever cancel
+	// it, and context.WithCancel's contract is that cancel must be called to
+	// release the context's resources. Deleting the map entry alone leaks them
+	// for the process lifetime, once per completed reassignment. Canceling a
+	// context whose work has already finished is a no-op.
+	if cancel, ok := rm.cancelFuncs[reassignmentID]; ok {
+		cancel()
+	}
 	delete(rm.cancelFuncs, reassignmentID)
 }
 

@@ -1,296 +1,198 @@
 # =============================================================================
-# GOLANGCI-LINT CONFIGURATION
+# GOLANGCI-LINT CONFIGURATION (schema v2)
 # =============================================================================
-#
-# WHY LINTING MATTERS:
-# ┌─────────────────────────────────────────────────────────────────────────────┐
-# │ Linters catch bugs BEFORE they reach production:                            │
-# │                                                                             │
-# │   - errcheck:    Unchecked errors → silent failures in production          │
-# │   - govet:       Incorrect printf formats → panics or wrong output         │
-# │   - staticcheck: Dead code, deprecated APIs → maintenance burden           │
-# │   - gocritic:    Performance anti-patterns → unnecessary allocations       │
-# │   - revive:      Style issues → inconsistent codebase                      │
-# │   - gosec:       Security issues → vulnerabilities in production           │
-# │                                                                             │
-# │ COMPARISON:                                                                 │
-# │   - Kafka: Uses Checkstyle + SpotBugs (Java)                              │
-# │   - RabbitMQ: Dialyzer (Erlang static analysis)                            │
-# │   - NATS: Uses golangci-lint (same tool, similar config)                   │
-# │   - CockroachDB: Uses golangci-lint with 30+ linters                      │
-# │                                                                             │
-# │ PHILOSOPHY:                                                                 │
-# │   Enable linters that catch real bugs, not just style preferences.          │
-# │   Every linter here has prevented a real bug in production Go code.        │
-# └─────────────────────────────────────────────────────────────────────────────┘
 #
 # RUN:
-#   make lint                      # Via Makefile
-#   golangci-lint run              # Check all issues
-#   golangci-lint run --fix        # Auto-fix what's possible
-#   golangci-lint run --new        # Only check new/changed code
+#   make lint                      # via Makefile
+#   golangci-lint run              # check all issues
+#   golangci-lint run --fix        # auto-fix what is fixable
 #
+# MIGRATED FROM v1. golangci-lint v1 is end-of-life and refuses to load a
+# config for a module whose go directive is 1.25 or newer:
+#
+#   can't load config: the Go language version (go1.24) used to build
+#   golangci-lint is lower than the targeted Go version (1.25.0)
+#
+# That is what failed every dependabot PR here, because bumping a dependency
+# such as golang.org/x/sys also bumps the go directive. The v1 config is in
+# git history if the old wording is ever wanted.
+#
+# LINTER SELECTION, grouped by what each one catches:
+#
+#   CORRECTNESS   errcheck (unchecked errors), govet (suspicious constructs),
+#                 staticcheck (SA* analysis), ineffassign, unused
+#   PERFORMANCE   prealloc, copyloopvar
+#   SECURITY      gosec
+#   QUALITY       gocritic, noctx (requests without a context), bodyclose
+#                 (leaked response bodies), errname (ErrFoo naming),
+#                 errorlint (%w wrapping)
+#   STYLE         revive, misspell, with gofmt/goimports as formatters
+#
+# In v2 the correctness set (errcheck, govet, staticcheck, ineffassign,
+# unused) is the "standard" default, so those no longer appear under `enable`.
 # =============================================================================
 
-run:
-  timeout: 5m
-
-# =============================================================================
-# LINTER SELECTION
-# =============================================================================
-#
-# Linters are grouped by what they catch:
-#
-# CORRECTNESS (catch bugs):
-#   errcheck     - Unchecked error returns
-#   govet        - Suspicious constructs (printf args, struct tags)
-#   staticcheck  - Advanced static analysis (SA* checks)
-#   ineffassign  - Assignments to variables that are never used
-#   unused       - Unused variables, functions, types
-#
-# PERFORMANCE:
-#   prealloc     - Slice pre-allocation suggestions
-#   copyloopvar  - Detects loop variable capture bugs (Go <1.22)
-#
-# STYLE & CONSISTENCY:
-#   gofmt        - Standard Go formatting
-#   goimports    - Import grouping and ordering
-#   revive       - Extensible linter (successor to golint)
-#   misspell     - Catches common typos in comments/strings
-#
-# SECURITY:
-#   gosec        - Security-focused checks (SQL injection, crypto, etc.)
-#
-# CODE QUALITY:
-#   gocritic     - Opinionated but useful code suggestions
-#   noctx        - HTTP requests without context.Context
-#   bodyclose    - Unclosed HTTP response bodies (resource leak)
-#   errname      - Error variables must follow Go naming (ErrFoo)
-#   errorlint    - Proper error wrapping with %w
-# =============================================================================
+version: "2"
 linters:
   enable:
-    # --- Correctness ---
-    - errcheck
-    - govet
-    - staticcheck
-    - ineffassign
-    - unused
-
-    # --- Style ---
-    - gofmt
-    - goimports
-    - misspell
-    - revive
-
-    # --- Performance ---
-    - prealloc
-    - copyloopvar
-
-    # --- Security ---
-    - gosec
-
-    # --- Code Quality ---
-    - gocritic
-    - noctx
     - bodyclose
+    - copyloopvar
     - errname
     - errorlint
+    - gocritic
+    - gosec
+    - misspell
+    - noctx
+    - prealloc
+    - revive
+  settings:
+    # staticcheck: v2 turns on the ST* (style) and QF* (quickfix) families that
+    # v1 never ran. Enabling them wholesale would add 57 findings that are
+    # purely stylistic (37 "could remove embedded field from selector", 20
+    # "error strings should not be capitalized") and zero bugs. The SA*
+    # correctness analysis, which is why staticcheck is here at all, stays on.
+    staticcheck:
+      checks:
+        - all
+        - -ST1005
+        - -QF1001
+        - -QF1006
+        - -QF1008
 
-# =============================================================================
-# LINTER-SPECIFIC SETTINGS
-# =============================================================================
-linters-settings:
-  # errcheck: Catch unchecked errors — the #1 source of silent Go bugs
-  errcheck:
-    # Check type assertions (value, ok := x.(Type))
-    check-type-assertions: true
-    # Don't flag these functions (common to ignore their errors)
-    exclude-functions:
-      - (io.Closer).Close
-      - (*os.File).Close
-      - (net/http.ResponseWriter).Write
-      - fmt.Fprint
-      - fmt.Fprintf
-      - fmt.Fprintln
-      # rand.Read cannot fail since Go 1.15 (always returns nil error)
-      - crypto/rand.Read
-      - (math/rand).Read
-      - math/rand.Read
-
-  # govet: Built-in Go analysis passes
-  govet:
-    enable-all: true
-    disable:
-      # fieldalignment is noisy and the savings are usually trivial
-      - fieldalignment
-      # -----------------------------------------------------------------------
-      # shadow: Disabled because 99% of findings are `err` re-declarations
-      # in nested scopes — the standard Go error handling pattern:
-      #
-      #   result, err := outer()
-      #   if result != nil {
-      #       val, err := inner()  // "shadows" outer err — this is idiomatic
-      #   }
-      #
-      # Go 1.22+ fixed the REAL shadowing bug (loop variable capture).
-      # Remaining shadow warnings are just noise on standard Go patterns.
-      #
-      # COMPARISON:
-      #   - NATS: Does not enable shadow check
-      #   - CockroachDB: Disables shadow for err specifically
-      #   - Kubernetes: Does not use shadow check
-      # -----------------------------------------------------------------------
-      - shadow
-
-  # revive: Successor to golint — extensible and configurable
-  revive:
+    # errcheck: unchecked errors are the largest source of silent Go bugs.
+    errcheck:
+      check-type-assertions: true
+      exclude-functions:
+        - (io.Closer).Close
+        - (*os.File).Close
+        - (net/http.ResponseWriter).Write
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - crypto/rand.Read
+        # rand.Read cannot fail as of Go 1.15; it always returns a nil error.
+        - (math/rand).Read
+        - math/rand.Read
+    errorlint:
+      errorf: true
+      asserts: true
+      comparison: true
+    gocritic:
+      disabled-checks:
+        - hugeParam
+        - rangeValCopy
+        - unnamedResult
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+    gosec:
+      excludes:
+        - G104
+        - G304
+        - G401
+        - G501
+        - G115
+    # govet: fieldalignment is noisy for trivial savings. shadow flags the
+    # standard `if err := ...; err != nil` pattern in nested scopes, which is
+    # idiomatic Go rather than a defect.
+    govet:
+      disable:
+        - fieldalignment
+        - shadow
+      enable-all: true
+    misspell:
+      locale: US
+    revive:
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: exported
+          disabled: true
+        - name: increment-decrement
+        - name: var-naming
+        - name: var-declaration
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: unexported-return
+        - name: indent-error-flow
+        - name: errorf
+        - name: empty-block
+        - name: superfluous-else
+        - name: unreachable-code
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
     rules:
-      - name: blank-imports
-      - name: context-as-argument
-      - name: context-keys-type
-      - name: dot-imports
-      - name: error-return
-      - name: error-strings
-      - name: error-naming
-      - name: exported
-        disabled: true  # Too noisy for learning project with heavy comments
-      - name: increment-decrement
-      - name: var-naming
-      - name: var-declaration
-      - name: range
-      - name: receiver-naming
-      - name: time-naming
-      - name: unexported-return
-      - name: indent-error-flow
-      - name: errorf
-      - name: empty-block
-      - name: superfluous-else
-      - name: unreachable-code
-
-  # gocritic: Opinionated checker with useful diagnostics
-  gocritic:
-    enabled-tags:
-      - diagnostic
-      - style
-      - performance
-    disabled-checks:
-      # These are too opinionated for a learning project
-      - hugeParam
-      - rangeValCopy
-      - unnamedResult
-
-  # gosec: Security checker
-  gosec:
-    excludes:
-      # G104: Audit errors not checked — covered by errcheck
-      - G104
-      # G304: File path from variable — we intentionally use dynamic paths
-      - G304
-      # G401/G501: Weak crypto — not relevant for our use case
-      - G401
-      - G501
-      # -----------------------------------------------------------------
-      # G115: Integer overflow conversion — disabled because it flags every
-      # int64→uint32, int→uint16, etc. conversion in serialization code.
-      #
-      # In a message queue, we frequently convert between int sizes for
-      # wire formats and binary encoding. These conversions are bounded
-      # by protocol constraints (e.g., message sizes, sequence numbers).
-      #
-      # WHY NOT FIX INDIVIDUALLY:
-      #   - 105 instances, all in storage/broker serialization paths
-      #   - Adding bounds checks to each would be massive code churn
-      #   - The values are already validated at ingestion boundaries
-      #
-      # COMPARISON:
-      #   - Kubernetes: Uses nolint:gosec extensively for G115
-      #   - CockroachDB: Disables G115 globally
-      #   - Most Go projects: Consider G115 too noisy to enable
-      # -----------------------------------------------------------------
-      - G115
-
-  # errorlint: Proper error wrapping
-  errorlint:
-    # Check errors.Is instead of == comparison
-    comparison: true
-    # Check errors.As instead of type assertion
-    asserts: true
-    # Check fmt.Errorf uses %w for wrapping
-    errorf: true
-
-  # misspell: Catch typos
-  misspell:
-    locale: US
-
-# =============================================================================
-# ISSUE FILTERING
-# =============================================================================
-#
-# WHY EXCLUDE RULES?
-# Some linters flag things that are intentional or irrelevant in certain
-# contexts. For example:
-#   - Test files: errcheck is less important (test failures are visible)
-#   - Generated code: We don't control proto-gen output
-#   - Main files: Complex main() is expected in a broker
-# =============================================================================
+      # Generated protobuf code is not ours to lint.
+      - linters:
+          - all
+        path: api/proto/gen/
+      # Tests: the opinion linters are noise on table-driven helpers. The
+      # correctness linters still apply to test code.
+      - linters:
+          - bodyclose
+          - errcheck
+          - gocritic
+          - gosec
+          - noctx
+        path: _test\.go
+      - linters:
+          - gocritic
+        path: cmd/
+      - linters:
+          - errcheck
+        path: internal/cli/
+      - linters:
+          - errcheck
+        path: cmd/goqueue-admin/
+      - linters:
+          - errcheck
+        path: cmd/goqueue-cli/
+      - linters:
+          - errcheck
+          - noctx
+        path: scripts/
+      - linters:
+          - gocritic
+        text: commentFormatting
+      - linters:
+          - revive
+        text: unused-parameter
+      # internal/grpc/services.go re-exports protobuf-generated types under
+      # their generated names (ConsumeResponse_Messages,
+      # HealthService_WatchServer, and so on). The underscores are not a style
+      # choice: the alias has to match the name protoc emits, and revive is
+      # already silenced per-line for the same reason. ST1003 has no per-line
+      # nolint that survives alongside the revive one, so it is scoped here.
+      - linters:
+          - staticcheck
+        text: 'ST1003'
+        path: internal/grpc/services\.go
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
 issues:
-  # Report all issues, don't cap per-linter
   max-issues-per-linter: 0
   max-same-issues: 0
-
-  exclude-rules:
-    # Generated protobuf code: skip all linters
-    - path: api/proto/gen/
-      linters:
-        - all
-
-    # Test files: relax errcheck and gosec (test code is less strict)
-    - path: _test\.go
-      linters:
-        - errcheck
-        - gosec
-        - gocritic
-        - bodyclose
-        - noctx
-
-    # Generated protobuf code: skip everything
-    - path: api/proto/gen/
-      linters:
-        - all
-
-    # Main entry points: allow complex functions
-    - path: cmd/
-      linters:
-        - gocritic
-
-    # CLI code: allow unchecked errors in output formatting
-    - path: internal/cli/
-      linters:
-        - errcheck
-
-    # Admin CLI: allow unchecked errors in cobra flag setup and formatters
-    - path: cmd/goqueue-admin/
-      linters:
-        - errcheck
-
-    # CLI tool: allow unchecked errors in cobra flag setup and formatters
-    - path: cmd/goqueue-cli/
-      linters:
-        - errcheck
-
-    # Benchmark scripts: allow unchecked errors
-    - path: scripts/
-      linters:
-        - errcheck
-        - noctx
-
-    # Known patterns that are intentional
-    - linters:
-        - gocritic
-      text: "commentFormatting"
-
-    # Allow unused parameters in interface implementations
-    - linters:
-        - revive
-      text: "unused-parameter"
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

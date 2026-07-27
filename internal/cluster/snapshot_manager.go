@@ -172,8 +172,13 @@ func (sm *SnapshotManager) CreateSnapshot(topic string, partition int, logDir st
 
 		// Copy file content.
 		// Sanitize path to prevent path traversal
+		// gosec G122 flags symlink TOCTOU between Walk and Open. The tree being
+		// walked is the broker's own snapshot directory, written by this process
+		// and not attacker-supplied, so there is no untrusted symlink to race.
+		// os.Root would remove the class entirely and is the right fix if this
+		// ever walks user-supplied paths.
 		cleanPath := filepath.Clean(path)
-		file, err := os.Open(cleanPath)
+		file, err := os.Open(cleanPath) //nolint:gosec // G122: walks a process-owned directory, not user input
 		if err != nil {
 			return fmt.Errorf("failed to open file: %w", err)
 		}

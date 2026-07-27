@@ -313,12 +313,12 @@ func TestTimeIndexTruncate(t *testing.T) {
 	}
 
 	// Verify last timestamp is 2000
-	lastTs, err := ti.GetLastTimestamp()
+	lastTS, err := ti.GetLastTimestamp()
 	if err != nil {
 		t.Errorf("failed to get last timestamp: %v", err)
 	}
-	if lastTs != 2000 {
-		t.Errorf("expected last timestamp 2000, got %d", lastTs)
+	if lastTS != 2000 {
+		t.Errorf("expected last timestamp 2000, got %d", lastTS)
 	}
 }
 

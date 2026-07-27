@@ -1701,8 +1701,9 @@ func (t *Tracer) GetTrace(traceID TraceID) *Trace {
 		return spans[i].Timestamp < spans[j].Timestamp
 	})
 
-	// Build trace
-	trace := &Trace{
+	// Build trace. Named tr, not trace: this file imports
+	// go.opentelemetry.io/otel/trace, and a local named trace shadows it.
+	tr := &Trace{
 		TraceID:   traceID,
 		Topic:     spans[0].Topic,
 		Partition: spans[0].Partition,
@@ -1712,10 +1713,10 @@ func (t *Tracer) GetTrace(traceID TraceID) *Trace {
 		Spans:     spans,
 	}
 
-	trace.Duration = trace.EndTime.Sub(trace.StartTime)
-	trace.Status = t.determineTraceStatus(spans)
+	tr.Duration = tr.EndTime.Sub(tr.StartTime)
+	tr.Status = t.determineTraceStatus(spans)
 
-	return trace
+	return tr
 }
 
 // determineTraceStatus determines the overall trace status from spans.
@@ -1764,7 +1765,7 @@ func (t *Tracer) GetRecentTraces(limit int) []*Trace {
 			return spans[i].Timestamp < spans[j].Timestamp
 		})
 
-		trace := &Trace{
+		tr := &Trace{
 			TraceID:   traceID,
 			Topic:     spans[0].Topic,
 			Partition: spans[0].Partition,
@@ -1773,10 +1774,10 @@ func (t *Tracer) GetRecentTraces(limit int) []*Trace {
 			EndTime:   time.Unix(0, spans[len(spans)-1].Timestamp),
 			Spans:     spans,
 		}
-		trace.Duration = trace.EndTime.Sub(trace.StartTime)
-		trace.Status = t.determineTraceStatus(spans)
+		tr.Duration = tr.EndTime.Sub(tr.StartTime)
+		tr.Status = t.determineTraceStatus(spans)
 
-		traces = append(traces, trace)
+		traces = append(traces, tr)
 	}
 
 	// Sort by start time (newest first)
@@ -1841,7 +1842,7 @@ func (t *Tracer) SearchTraces(query TraceQuery) []*Trace {
 			return tspans[i].Timestamp < tspans[j].Timestamp
 		})
 
-		trace := &Trace{
+		tr := &Trace{
 			TraceID:   traceID,
 			Topic:     tspans[0].Topic,
 			Partition: tspans[0].Partition,
@@ -1850,15 +1851,15 @@ func (t *Tracer) SearchTraces(query TraceQuery) []*Trace {
 			EndTime:   time.Unix(0, tspans[len(tspans)-1].Timestamp),
 			Spans:     tspans,
 		}
-		trace.Duration = trace.EndTime.Sub(trace.StartTime)
-		trace.Status = t.determineTraceStatus(tspans)
+		tr.Duration = tr.EndTime.Sub(tr.StartTime)
+		tr.Status = t.determineTraceStatus(tspans)
 
 		// Filter by status
-		if query.Status != "" && string(trace.Status) != query.Status {
+		if query.Status != "" && string(tr.Status) != query.Status {
 			continue
 		}
 
-		traces = append(traces, trace)
+		traces = append(traces, tr)
 	}
 
 	// Sort by start time

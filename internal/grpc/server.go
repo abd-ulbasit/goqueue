@@ -269,7 +269,10 @@ func (s *Server) Start() error {
 		return errors.New("server already running")
 	}
 
-	listener, err := net.Listen("tcp", s.config.Address)
+	// noctx wants (*net.ListenConfig).Listen so a bind can be canceled. That
+	// needs a context, and Start() has none: threading one through is a public
+	// API change, tracked separately rather than papered over here.
+	listener, err := net.Listen("tcp", s.config.Address) //nolint:noctx // Start() has no context; adding one is a public API change
 	if err != nil {
 		s.mu.Unlock()
 		return fmt.Errorf("failed to listen on %s: %w", s.config.Address, err)

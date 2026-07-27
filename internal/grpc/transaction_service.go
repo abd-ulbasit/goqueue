@@ -439,7 +439,7 @@ func (s *transactionServiceServer) DescribeTransaction(ctx context.Context, req 
 // txnMetadataToProto converts internal TransactionMetadata to proto TransactionInfo.
 func txnMetadataToProto(txn *broker.TransactionMetadata) *TransactionInfo {
 	// Convert partition map to proto format
-	partitions := make([]*TransactionPartition, 0)
+	partitions := make([]*TransactionPartition, 0, len(txn.GetPartitionsList()))
 	for topic, parts := range txn.GetPartitionsList() {
 		protoPartitions := make([]int32, len(parts))
 		for i, p := range parts {
