@@ -639,9 +639,11 @@ func (l *Log) ReadFrom(startOffset int64, maxMessages int) ([]*Message, error) {
 		return []*Message{}, nil // No new messages
 	}
 
-	// Clamp to earliest available offset
-	if startOffset < l.EarliestOffset() {
-		startOffset = l.EarliestOffset()
+	// Clamp to earliest available offset.
+	// MUST use the *Locked variant: l.mu.RLock is already held above, and
+	// sync.RWMutex read locks are not reentrant once a writer is queued.
+	if earliest := l.earliestOffsetLocked(); startOffset < earliest {
+		startOffset = earliest
 	}
 
 	// Find starting segment
@@ -750,10 +752,20 @@ func (l *Log) NextOffset() int64 {
 
 // EarliestOffset returns the first available offset in the log.
 // This may not be 0 if old segments have been deleted (retention cleanup).
+//
+// This is the locking wrapper. Callers that already hold l.mu (in either mode)
+// MUST call earliestOffsetLocked instead: Go's sync.RWMutex is not reentrant,
+// and a writer queued between the outer RLock and the inner one deadlocks both
+// goroutines permanently.
 func (l *Log) EarliestOffset() int64 {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
+	return l.earliestOffsetLocked()
+}
 
+// earliestOffsetLocked returns the first available offset in the log.
+// The caller MUST already hold l.mu for reading or writing.
+func (l *Log) earliestOffsetLocked() int64 {
 	if len(l.segments) == 0 {
 		return 0
 	}
