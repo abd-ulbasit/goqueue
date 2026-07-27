@@ -13,7 +13,7 @@
 # pair has to move together, and 625c6d7 raised go.mod alone within hours of
 # 42e393e establishing that it must not.
 #
-# Unlike pgbranch's equivalent, this tolerates a floating minor tag. goqueue
+# Unlike pgoverlay's equivalent, this tolerates a floating minor tag. goqueue
 # builds on `golang:1.25-alpine`, which always resolves to the newest 1.25.x
 # and so satisfies any 1.25.x `go` directive without edits. That is a
 # deliberate, working choice; what it cannot survive is go.mod moving to a
