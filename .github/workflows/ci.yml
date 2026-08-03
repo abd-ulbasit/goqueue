@@ -218,7 +218,7 @@ jobs:
           gosec -no-fail -fmt sarif -out gosec.sarif ./...
 
       - name: Upload gosec SARIF
-        uses: github/codeql-action/upload-sarif@v4
+        uses: github/codeql-action/upload-sarif@v4.37.4
         if: always()
         continue-on-error: true  # OK here: Code Scanning might not be enabled
         with:
