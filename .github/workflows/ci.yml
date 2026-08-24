@@ -279,7 +279,7 @@ jobs:
       # On PRs: compare against main branch baseline if available
       - name: Download baseline benchmarks
         if: github.event_name == 'pull_request'
-        uses: dawidd6/action-download-artifact@v21
+        uses: dawidd6/action-download-artifact@v24
         with:
           name: benchmark-results-*
           branch: main
